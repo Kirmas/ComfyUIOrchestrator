@@ -1,0 +1,17 @@
+[Unit]
+Description=ComfyUI Orchestrator (API + WS + in-process job dispatch)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=orchestrator
+Group=orchestrator
+WorkingDirectory=/opt/comfy-orchestrator/backend
+EnvironmentFile=/opt/comfy-orchestrator/backend/.env
+ExecStart=/opt/comfy-orchestrator/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

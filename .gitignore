@@ -1,0 +1,23 @@
+# Backend (Python)
+__pycache__/
+*.pyc
+.venv/
+backend/.env
+backend/media/
+backend/logs/
+
+# Frontend (Node)
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+npm-debug.log*
+
+# Local dev artifacts
+*.db
+*.sqlite3
+
+# Claude Code local session state (not project source)
+.claude/
+
+# OS
+.DS_Store
