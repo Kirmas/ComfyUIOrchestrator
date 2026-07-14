@@ -4,6 +4,7 @@ import random
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 from sqlalchemy import delete, select
 
 from app.config import get_settings
@@ -402,7 +403,11 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                 # of ever retrying (see the 2026-07-13 incident). Retries are
                 # still capped by max_retries, so a backend that's actually
                 # dead still ends in a terminal error rather than looping.
-                if not isinstance(exc, TimeoutError):
+                # httpx.TransportError (ReadTimeout, ConnectError, ...) is not
+                # a subclass of the builtin TimeoutError, so a transient
+                # network blip during polling used to slip past this guard
+                # and exclude the backend anyway (2026-07-14 recurrence).
+                if not isinstance(exc, (TimeoutError, httpx.TransportError)):
                     exclude.add(str(choice.backend.id))
                 await job_queue.enqueue(run_variant_job, job_id, list(exclude))
                 return

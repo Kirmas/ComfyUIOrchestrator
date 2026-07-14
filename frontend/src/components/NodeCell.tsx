@@ -9,6 +9,7 @@ import type { Asset, Backend, Capability, InputRef, Job, NodeItem, NodeTemplate 
 import { cx } from "../utils";
 import { CropPreview, type CropBox } from "./CropPreview";
 import { Model3DThumb } from "./Model3DThumb";
+import { ZoomableImage } from "./ZoomableImage";
 
 interface Props {
   node: NodeItem;
@@ -18,11 +19,14 @@ interface Props {
   outputs: Asset[];
   pickingActive: boolean;
   isPickingSource: boolean;
+  compareActive: boolean;
+  isComparingSource: boolean;
   isLastInTrack: boolean;
   registerRef: (nodeId: string, el: HTMLDivElement | null) => void;
   onStartPicking: (nodeId: string, slotIndex: number) => void;
   onCellClicked: (node: NodeItem) => void;
   onSelectCandidate: (node: NodeItem, kept: Asset, others: Asset[]) => Promise<NodeItem | undefined>;
+  onStartCompare: (node: NodeItem, asset: Asset) => void;
 }
 
 // node.is_picker (explicit, persistent -- see db/models.py) forces a decision
@@ -30,7 +34,19 @@ interface Props {
 // a new picker row) or reject it outright -- rather than a checkbox that
 // quietly leaves the rest sitting here forever. A settled node (is_picker
 // false) just renders its image, no decision needed.
-function CandidatesGrid({ outputs, onSelect, onDiscard, onImageOpen }: { outputs: Asset[]; onSelect: (asset: Asset) => void; onDiscard: (asset: Asset) => void; onImageOpen: (url: string) => void }) {
+function CandidatesGrid({
+  outputs,
+  onSelect,
+  onDiscard,
+  onImageOpen,
+  onCompare,
+}: {
+  outputs: Asset[];
+  onSelect: (asset: Asset) => void;
+  onDiscard: (asset: Asset) => void;
+  onImageOpen: (url: string) => void;
+  onCompare: (asset: Asset) => void;
+}) {
   return (
     // No stopPropagation here (unlike the buttons below) -- the thumbnail is
     // most of a cell's tappable area, especially on a phone, so it has to let
@@ -63,6 +79,17 @@ function CandidatesGrid({ outputs, onSelect, onDiscard, onImageOpen }: { outputs
               >
                 🔍
               </button>
+              <button
+                type="button"
+                className="zoom-button compare-button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCompare(asset);
+                }}
+                title="Compare with another asset node"
+              >
+                ⇄
+              </button>
             </>
           )}
           <div style={{ display: "flex", gap: 4, marginTop: 2 }}>
@@ -93,7 +120,7 @@ function CandidatesGrid({ outputs, onSelect, onDiscard, onImageOpen }: { outputs
   );
 }
 
-function SingleOutput({ asset, onImageOpen }: { asset: Asset; onImageOpen: (url: string) => void }) {
+function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImageOpen: (url: string) => void; onCompare: (asset: Asset) => void }) {
   return (
     <div className="output-grid">
       <div className="output-item">
@@ -119,6 +146,17 @@ function SingleOutput({ asset, onImageOpen }: { asset: Asset; onImageOpen: (url:
             >
               🔍
             </button>
+            <button
+              type="button"
+              className="zoom-button compare-button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onCompare(asset);
+              }}
+              title="Compare with another asset node"
+            >
+              ⇄
+            </button>
           </>
         )}
       </div>
@@ -126,7 +164,18 @@ function SingleOutput({ asset, onImageOpen }: { asset: Asset; onImageOpen: (url:
   );
 }
 
-function AssetNodeCell({ node, outputs, pickingActive, isLastInTrack, registerRef, onCellClicked, onSelectCandidate }: Props) {
+function AssetNodeCell({
+  node,
+  outputs,
+  pickingActive,
+  compareActive,
+  isComparingSource,
+  isLastInTrack,
+  registerRef,
+  onCellClicked,
+  onSelectCandidate,
+  onStartCompare,
+}: Props) {
   const setNode = useProjectStore((s) => s.setNode);
   const refreshOutputs = useProjectStore((s) => s.refreshNodeOutputs);
   const removeNode = useProjectStore((s) => s.removeNode);
@@ -139,6 +188,11 @@ function AssetNodeCell({ node, outputs, pickingActive, isLastInTrack, registerRe
 
   const openImage = (url: string) => setFullSizeUrl(url);
   const closeImage = () => setFullSizeUrl(null);
+
+  // Starting a compare here just arms Grid-level state (compareFor) -- the
+  // second asset comes from clicking a *different* asset node cell anywhere
+  // in the project, same click-to-complete gesture slot-picking already uses.
+  const startCompare = (asset: Asset) => onStartCompare(node, asset);
 
   // Deleting cascades forward (everything after this cell in the same track
   // depends on it) and may promote a sibling spawned-track into the freed-up
@@ -232,7 +286,13 @@ function AssetNodeCell({ node, outputs, pickingActive, isLastInTrack, registerRe
     await refreshOutputs(node.id);
   };
 
-  const cls = cx("node-cell", "node-cell-asset", `status-${node.status}`, pickingActive && "picking-target");
+  const cls = cx(
+    "node-cell",
+    "node-cell-asset",
+    `status-${node.status}`,
+    (pickingActive || compareActive) && "picking-target",
+    isComparingSource && "picking-source",
+  );
 
   return (
     <div
@@ -240,7 +300,7 @@ function AssetNodeCell({ node, outputs, pickingActive, isLastInTrack, registerRe
       className={cls}
       tabIndex={outputs.length === 0 && !isCandidatesGrid ? 0 : undefined}
       onPaste={handlePaste}
-      onClick={() => pickingActive && onCellClicked(node)}
+      onClick={() => (pickingActive || compareActive) && onCellClicked(node)}
     >
       <div className="node-cell-header">
         <span>{isCandidatesGrid ? "Asset Select" : "Asset"}</span>
@@ -293,10 +353,14 @@ function AssetNodeCell({ node, outputs, pickingActive, isLastInTrack, registerRe
       )}
 
       {isCandidatesGrid ? (
-        <CandidatesGrid outputs={outputs} onSelect={selectCandidate} onDiscard={discardCandidate} onImageOpen={openImage} />
+        <CandidatesGrid outputs={outputs} onSelect={selectCandidate} onDiscard={discardCandidate} onImageOpen={openImage} onCompare={startCompare} />
       ) : outputs.length === 1 ? (
-        <SingleOutput asset={outputs[0]} onImageOpen={openImage} />
+        <SingleOutput asset={outputs[0]} onImageOpen={openImage} onCompare={startCompare} />
       ) : null}
+
+      {isComparingSource && (
+        <div style={{ fontSize: 10, color: "var(--accent)" }}>click another asset node to compare with…</div>
+      )}
 
       {fullSizeUrl && (
         <div className="image-modal-backdrop" onClick={closeImage}>
@@ -304,7 +368,7 @@ function AssetNodeCell({ node, outputs, pickingActive, isLastInTrack, registerRe
             <button type="button" className="image-modal-close" onClick={closeImage} title="Close full-size image">
               ×
             </button>
-            <img src={fullSizeUrl} alt="full size" />
+            <ZoomableImage src={fullSizeUrl} />
           </div>
         </div>
       )}

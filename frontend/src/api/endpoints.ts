@@ -56,6 +56,7 @@ export const tracksApi = {
     api.post<Track>("/api/tracks", data),
   nodes: (id: string) => api.get<NodeItem[]>(`/api/tracks/${id}/nodes`),
   update: (id: string, data: { row_index: number }) => api.patch<Track>(`/api/tracks/${id}`, data),
+  shift: (id: string, delta: number) => api.post<NodeItem[]>(`/api/tracks/${id}/shift`, { delta }),
   remove: (id: string) => api.delete(`/api/tracks/${id}`),
 };
 

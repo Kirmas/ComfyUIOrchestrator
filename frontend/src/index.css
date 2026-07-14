@@ -235,6 +235,11 @@ input, select, textarea {
   background: rgba(0, 0, 0, 0.8);
 }
 
+.compare-button {
+  right: auto;
+  left: 4px;
+}
+
 .image-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -248,21 +253,82 @@ input, select, textarea {
 
 .image-modal-content {
   position: relative;
-  max-width: min(95vw, 1000px);
-  max-height: min(95vh, 1000px);
-  width: 100%;
+  max-width: 95vw;
+  max-height: 95vh;
   padding: 12px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.95);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
 }
 
-.image-modal-content img {
-  width: 100%;
-  height: auto;
-  max-height: 90vh;
+.compare-modal-content {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  max-width: 95vw;
+  max-height: 95vh;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.compare-pane {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.zoomable-image {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  /* We handle wheel/drag ourselves -- stop the browser's own scroll/pinch
+     from fighting our zoom-and-pan gestures. */
+  touch-action: none;
+}
+
+.zoomable-image img {
+  /* Natural size, only shrunk to fit the viewport -- not stretched/capped to
+     an arbitrary box, or "full size" stops being full size on a big image.
+     transform (scale/translate) then zooms/pans from that base size. */
   display: block;
+  max-width: calc(95vw - 24px);
+  max-height: calc(95vh - 24px);
+  width: auto;
+  height: auto;
   border-radius: 10px;
+  user-select: none;
+}
+
+.zoom-controls {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  padding: 4px 6px;
+  border-radius: 20px;
+}
+
+.zoom-controls button {
+  color: white;
+  background: transparent;
+  border: none;
+  font-size: 14px;
+  min-width: 28px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.zoom-controls button:hover {
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .image-modal-close {
@@ -313,12 +379,7 @@ input, select, textarea {
   align-items: center;
   font-size: 11px;
   color: var(--text-dim);
-  cursor: grab;
   border-radius: 4px;
-}
-
-.track-label.dragging {
-  opacity: 0.4;
 }
 
 .settings-panel {

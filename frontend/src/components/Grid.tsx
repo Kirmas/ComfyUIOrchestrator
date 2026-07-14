@@ -3,8 +3,8 @@ import { assetsApi, backendsApi, capabilitiesApi, nodesApi, nodeTemplatesApi, pr
 import { useProjectWs } from "../api/useProjectWs";
 import { useProjectStore } from "../state/projectStore";
 import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project, Track } from "../types";
-import { cx } from "../utils";
 import { ArrowsOverlay, type Edge } from "./ArrowsOverlay";
+import { CompareModal } from "./CompareModal";
 import { NodeCell } from "./NodeCell";
 
 // A workflow node's result always materializes as a *following* asset node
@@ -43,7 +43,12 @@ export function Grid({ projectId }: { projectId: string }) {
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
   const [project, setProject] = useState<Project | null>(null);
   const [pickingFor, setPickingFor] = useState<{ nodeId: string; slotIndex: number } | null>(null);
-  const [draggedTrackId, setDraggedTrackId] = useState<string | null>(null);
+  // Compare mode spans the whole project, not just one node's own candidates
+  // -- compareFor is the anchor asset (from wherever "⇄" was clicked), and
+  // clicking any other pickable asset-node cell completes the pair (same
+  // click-to-complete gesture pickingFor already uses for input slots).
+  const [compareFor, setCompareFor] = useState<{ nodeId: string; asset: Asset } | null>(null);
+  const [comparePair, setComparePair] = useState<[Asset, Asset] | null>(null);
   // How many leading columns an as-yet-empty track should skip before its
   // first real cell -- purely a UI notion (never sent to the backend on its
   // own): a track only gets a step_index once a node actually exists at it,
@@ -152,6 +157,20 @@ export function Grid({ projectId }: { projectId: string }) {
     removeTrack(trackId);
   };
 
+  // Pure layout nudge (e.g. lining a spawned branch up under its parent's
+  // column) -- always +/-2 so asset/workflow kind alternation (keyed off
+  // step_index parity) isn't disturbed. Doesn't account for track_below_prev
+  // inputs on this track or its row_index neighbors (see shift_track's
+  // docstring in tracks.py) -- fine for a purely cosmetic nudge, but a track
+  // that feeds/is fed by one via "track below" can resolve differently after.
+  const shiftTrack = async (trackId: string, delta: number) => {
+    const updated = await tracksApi.shift(trackId, delta).catch((err) => {
+      alert(err instanceof Error ? err.message : "Couldn't shift this track.");
+      return null;
+    });
+    if (updated) for (const node of updated) addNode(node);
+  };
+
   // row_index is both the visible "track N" label and, via track_below_prev
   // inputs (see the edges memo above), an adjacency link to the track right
   // below -- so a move always reindexes *every* track to a contiguous
@@ -172,6 +191,13 @@ export function Grid({ projectId }: { projectId: string }) {
 
     const changed = reindexed.filter((t) => byId.get(t.id)!.row_index !== t.row_index);
     await Promise.all(changed.map((t) => tracksApi.update(t.id, { row_index: t.row_index })));
+  };
+
+  const moveTrackStep = (trackId: string, direction: -1 | 1) => {
+    const idx = sortedTracks.findIndex((t) => t.id === trackId);
+    const targetIdx = idx + direction;
+    if (idx === -1 || targetIdx < 0 || targetIdx >= sortedTracks.length) return;
+    moveTrack(trackId, sortedTracks[targetIdx].id);
   };
 
   const nextStepIndex = (trackId: string): number => nextStepIndexFor(nodesByTrack.get(trackId) ?? []);
@@ -261,20 +287,34 @@ export function Grid({ projectId }: { projectId: string }) {
   };
 
   const onCellClicked = async (node: NodeItem) => {
-    if (!pickingFor || pickingFor.nodeId === node.id) return;
-    const outputs = await nodesApi.outputs(node.id).catch(() => []);
-    const asset = outputs.find((a) => a.selected) ?? outputs[0];
-    if (!asset) {
-      alert("This cell has no outputs yet.");
+    if (pickingFor && pickingFor.nodeId !== node.id) {
+      const outputs = await nodesApi.outputs(node.id).catch(() => []);
+      const asset = outputs.find((a) => a.selected) ?? outputs[0];
+      if (!asset) {
+        alert("This cell has no outputs yet.");
+        return;
+      }
+      const target = nodesById[pickingFor.nodeId];
+      const inputs = [...target.inputs];
+      inputs[pickingFor.slotIndex] = { type: "explicit", node_id: node.id, output_id: asset.id };
+      const updated = await nodesApi.update(target.id, { inputs });
+      addNode(updated);
+      setPickingFor(null);
       return;
     }
-    const target = nodesById[pickingFor.nodeId];
-    const inputs = [...target.inputs];
-    inputs[pickingFor.slotIndex] = { type: "explicit", node_id: node.id, output_id: asset.id };
-    const updated = await nodesApi.update(target.id, { inputs });
-    addNode(updated);
-    setPickingFor(null);
+    if (compareFor && compareFor.nodeId !== node.id) {
+      const outputs = await nodesApi.outputs(node.id).catch(() => []);
+      const asset = outputs.find((a) => a.selected) ?? outputs[0];
+      if (!asset) {
+        alert("This cell has no outputs yet.");
+        return;
+      }
+      setComparePair([compareFor.asset, asset]);
+      setCompareFor(null);
+    }
   };
+
+  const onStartCompare = (node: NodeItem, asset: Asset) => setCompareFor({ nodeId: node.id, asset });
 
   return (
     <div className="main-area" ref={containerRef}>
@@ -290,23 +330,45 @@ export function Grid({ projectId }: { projectId: string }) {
           {sortedTracks.map((track, rowIdx) => (
             <div
               key={`label-${track.id}`}
-              className={cx("track-label", draggedTrackId === track.id && "dragging")}
+              className="track-label"
               style={{ gridColumn: 1, gridRow: rowIdx + 1, display: "flex", alignItems: "center", justifyContent: "space-between" }}
-              draggable
-              title="Drag to reorder this branch"
-              onDragStart={() => setDraggedTrackId(track.id)}
-              onDragEnd={() => setDraggedTrackId(null)}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => {
-                e.preventDefault();
-                if (draggedTrackId) moveTrack(draggedTrackId, track.id);
-                setDraggedTrackId(null);
-              }}
             >
               track {track.row_index}
-              <button onClick={() => deleteTrackRow(track.id)} title="Delete this track and all its cells" style={{ fontSize: 10, padding: "1px 4px" }}>
-                ×
-              </button>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button
+                  onClick={() => moveTrackStep(track.id, -1)}
+                  disabled={rowIdx === 0}
+                  title="Move this track up"
+                  style={{ fontSize: 10, padding: "1px 4px" }}
+                >
+                  ↑
+                </button>
+                <button
+                  onClick={() => moveTrackStep(track.id, 1)}
+                  disabled={rowIdx === sortedTracks.length - 1}
+                  title="Move this track down"
+                  style={{ fontSize: 10, padding: "1px 4px" }}
+                >
+                  ↓
+                </button>
+                <button
+                  onClick={() => shiftTrack(track.id, -2)}
+                  title="Shift this whole track 2 columns to the left (layout only, doesn't change generation)"
+                  style={{ fontSize: 10, padding: "1px 4px" }}
+                >
+                  ←
+                </button>
+                <button
+                  onClick={() => shiftTrack(track.id, 2)}
+                  title="Shift this whole track 2 columns to the right (layout only, doesn't change generation)"
+                  style={{ fontSize: 10, padding: "1px 4px" }}
+                >
+                  →
+                </button>
+                <button onClick={() => deleteTrackRow(track.id)} title="Delete this track and all its cells" style={{ fontSize: 10, padding: "1px 4px" }}>
+                  ×
+                </button>
+              </div>
             </div>
           ))}
 
@@ -325,11 +387,16 @@ export function Grid({ projectId }: { projectId: string }) {
                     pickingFor !== null && pickingFor.nodeId !== node.id && isPickable(node, outputsByNode[node.id] ?? [])
                   }
                   isPickingSource={pickingFor?.nodeId === node.id}
+                  compareActive={
+                    compareFor !== null && compareFor.nodeId !== node.id && isPickable(node, outputsByNode[node.id] ?? [])
+                  }
+                  isComparingSource={compareFor?.nodeId === node.id}
                   isLastInTrack={node.id === lastNodeId}
                   registerRef={registerRef}
                   onStartPicking={(nodeId, slotIndex) => setPickingFor({ nodeId, slotIndex })}
                   onCellClicked={onCellClicked}
                   onSelectCandidate={onSelectCandidate}
+                  onStartCompare={onStartCompare}
                 />
               </div>
             ));
@@ -406,8 +473,15 @@ export function Grid({ projectId }: { projectId: string }) {
               Cancel picking
             </button>
           )}
+          {compareFor && (
+            <button style={{ marginLeft: 8 }} onClick={() => setCompareFor(null)}>
+              Cancel comparing
+            </button>
+          )}
         </div>
       </div>
+
+      {comparePair && <CompareModal left={comparePair[0]} right={comparePair[1]} onClose={() => setComparePair(null)} />}
     </div>
   );
 }

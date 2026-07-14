@@ -135,8 +135,31 @@ class ComfyUIBackend:
             history = await self._get_history_entry(client, job_id)
             if not history:
                 return assets
-            for node_output in history.get("outputs", {}).values():
-                for image in node_output.get("images", []):
+
+            # history["outputs"] has an entry for every OUTPUT_NODE in the
+            # graph, not just the one meant as the deliverable -- a leftover
+            # PreviewImage used to eyeball a crop/reference while building the
+            # workflow in ComfyUI's own UI shows up here too, and without this
+            # filter its image leaks into the job's result assets alongside
+            # (or instead of) the real SaveImage output. history["prompt"] is
+            # [number, prompt_id, {node_id: node, ...}, ...] -- the exact graph
+            # that was submitted, so it's an honest source of each node's
+            # class_type regardless of what workflow_json in our own capability
+            # config looked like at edit time. Only "images" is gated on this --
+            # no capability actually produces meshes yet, so there's no known
+            # save-node class_type to allow-list for that branch.
+            prompt = history.get("prompt")
+            save_node_ids: set[str] | None = None
+            if isinstance(prompt, list) and len(prompt) > 2 and isinstance(prompt[2], dict):
+                save_node_ids = {
+                    node_id
+                    for node_id, node in prompt[2].items()
+                    if isinstance(node, dict) and node.get("class_type") == "SaveImage"
+                }
+
+            for node_id, node_output in history.get("outputs", {}).items():
+                is_save_node = save_node_ids is None or node_id in save_node_ids
+                for image in node_output.get("images", []) if is_save_node else []:
                     resp = await client.get(
                         "/view",
                         params={

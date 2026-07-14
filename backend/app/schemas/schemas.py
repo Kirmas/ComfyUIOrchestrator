@@ -133,6 +133,10 @@ class TrackUpdate(BaseModel):
     row_index: int
 
 
+class TrackShift(BaseModel):
+    delta: int
+
+
 class TrackRead(ORMModel):
     id: uuid.UUID
     project_id: uuid.UUID

@@ -32,6 +32,10 @@ export interface ParamField {
   type: "image" | "text" | "int" | "float" | "seed" | "enum" | "file" | "bool";
   label?: string;
   required?: boolean;
+  // Not every capability for this node_type_slug has to honor this field --
+  // a capability whose workflow doesn't wire it up just omits it from its
+  // param_mapping, and the value is silently ignored for that backend.
+  optional?: boolean;
   default?: unknown;
   min?: number;
   max?: number;

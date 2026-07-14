@@ -28,6 +28,13 @@ def configure_logging() -> None:
     file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
     root.addHandler(file_handler)
 
+    # httpx/httpcore log every request at INFO by default and otherwise
+    # inherit root's level -- with dispatcher polling ComfyUI every few
+    # seconds per backend, that drowns out actual signal in the file GET
+    # /api/logs tails. Only warnings/errors from them are worth keeping.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 
 def log_file_path() -> Path:
     return Path(get_settings().log_dir) / "orchestrator.log"

@@ -79,6 +79,10 @@ KNOWN_NODE_LITERAL_FIELDS: dict[str, list[tuple[tuple[str, ...], str, str]]] = {
         (("width",), "width", "int"),
         (("height",), "height", "int"),
     ],
+    # SamplerCustomAdvanced-style graphs (e.g. Flux2) source their seed from
+    # a standalone RandomNoise node instead of a KSampler widget, so it's
+    # invisible to SAMPLER_LITERAL_FIELDS same as "easy seed" above.
+    "RandomNoise": [(("noise_seed",), "seed", "seed")],
 }
 
 # ComfyUI's own "promoted widget" primitives -> the param_schema field type to expose them as.

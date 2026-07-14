@@ -19,6 +19,15 @@ keyed by template field name, value is "<ComfyUI node title>.<input key>":
   "seed": "KSampler.seed",
   "image": "Load Image.image"
 }
+
+A field can be flagged "optional": true in param_schema when it's not
+guaranteed to be meaningful for every capability of this node_type_slug --
+e.g. a toggle that only one of several backend variants' workflows wires up.
+This needs no special handling here: build_workflow() below only touches
+fields that a given capability's own param_mapping actually maps, so a
+capability that leaves such a field out of its mapping just ignores whatever
+value the user set for it. "optional" is purely a UI/documentation hint --
+it does not relax validate_params() (already governed by "required").
 """
 import copy
 from typing import Any
