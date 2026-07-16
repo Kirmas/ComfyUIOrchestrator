@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.api_backend import build_api_backend
 from app.core.comfyui_backend import ComfyUIBackend
 from app.core.job_backend import JobBackend
+from app.core.native_backend import build_native_backend
 from app.db.models import ApiKeyPermission, Backend, Capability, ExecutionType
 
 # Several worker tasks can call select_backend() concurrently (worker_concurrency
@@ -83,6 +84,12 @@ def _instantiate(backend: Backend, capability: Capability, permission: ApiKeyPer
         model_id = capability.config.get("model_id")
         try:
             return build_api_backend(provider, api_key=permission.api_key, model_id=model_id)
+        except ValueError:
+            return None
+    if capability.execution_type == ExecutionType.native:
+        handler = capability.config.get("handler")
+        try:
+            return build_native_backend(handler) if handler else None
         except ValueError:
             return None
     return None

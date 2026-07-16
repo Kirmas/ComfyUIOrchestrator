@@ -44,6 +44,12 @@ sudo systemctl restart comfy-orchestrator-api
 sudo systemctl status comfy-orchestrator-api
 ```
 
+## Code style
+
+- Avoid unjustified code duplication. Before writing similar logic in a second place, check whether an existing helper already does it (or could, with a small generalization) and reuse it instead of re-deriving it inline.
+- When the same piece of logic is genuinely needed in more than one spot, extract it into a shared function/class (e.g. `workflowMatching.ts`, `cropUtils.ts` on the frontend) rather than copy-pasting — even across a backend/frontend split, mirror the same computation rather than let two implementations drift.
+- This applies to logic/computation, not to UI/JSX that merely looks structurally similar but serves a different purpose (e.g. a "define a new field" checkbox+label row vs a "match an existing field" dropdown row) — don't force those into one shared component just because they share a shape; only extract when the *duplicated part itself* (e.g. the actual `<select>` options/footer text) would otherwise be copy-pasted verbatim.
+
 ## Server specifics (don't rediscover these)
 
 - Debian 13 (trixie), single-box deploy: FastAPI/uvicorn serves the API, the WebSocket progress feed, *and* the built frontend (`frontend/dist`) from one process — no nginx/redis/minio, see `deploy/debian-setup.md` for why.

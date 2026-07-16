@@ -16,11 +16,13 @@ def _uuid_pk() -> Mapped[uuid.UUID]:
 class BackendKind(str, enum.Enum):
     comfyui = "comfyui"
     api_provider = "api_provider"
+    native = "native"  # runs in this process, no remote backend at all -- see core/native_backend.py
 
 
 class ExecutionType(str, enum.Enum):
     comfyui_workflow = "comfyui_workflow"
     api_call = "api_call"
+    native = "native"
 
 
 class NodeKind(str, enum.Enum):

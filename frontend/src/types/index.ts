@@ -1,5 +1,5 @@
-export type BackendKind = "comfyui" | "api_provider";
-export type ExecutionType = "comfyui_workflow" | "api_call";
+export type BackendKind = "comfyui" | "api_provider" | "native";
+export type ExecutionType = "comfyui_workflow" | "api_call" | "native";
 export type NodeStatus = "draft" | "queued" | "running" | "done" | "error" | "discarded";
 export type JobStatus = "pending" | "waiting_for_backend" | "running" | "done" | "error" | "cancelled";
 export type AssetKind = "image" | "mesh" | "other";

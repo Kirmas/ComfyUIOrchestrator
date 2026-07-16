@@ -1,7 +1,16 @@
 import { useState } from "react";
 import { capabilitiesApi, nodeTemplatesApi } from "../api/endpoints";
+import { detectCropGroups } from "../cropUtils";
 import { slotFields } from "../templateUtils";
-import { autoMatchField, matchTypeFor, type FieldResolution } from "../workflowMatching";
+import {
+  autoMatchField,
+  defaultGroupLabel,
+  groupDetectedFields,
+  groupMemberSuffix,
+  matchTypeFor,
+  type DetectedFieldGroup,
+  type FieldResolution,
+} from "../workflowMatching";
 import type { Backend, NodeTemplate, ParamField, WorkflowAnalysis } from "../types";
 
 export type WizardMode = { kind: "create" } | { kind: "add-instance"; template: NodeTemplate; excludeBackendIds: string[] };
@@ -21,6 +30,51 @@ function slugify(text: string): string {
     .replace(/^_+|_+$/g, "");
 }
 
+// Shared by both the crop-group row and the plain-field row below (the
+// add-instance "match against this template's schema" step) -- the two
+// differ in what they're matching (a whole crop group vs one field) and how
+// a pick gets applied, but the select/options/status-footer markup itself
+// would otherwise be pasted twice verbatim.
+function ResolveFieldRow<T>({
+  label,
+  typeHint,
+  value,
+  options,
+  optionValue,
+  optionLabel,
+  onChange,
+}: {
+  label: string;
+  typeHint: string;
+  value: string; // "" (unresolved) | ABSENT | optionValue(picked option)
+  options: T[];
+  optionValue: (opt: T) => string;
+  optionLabel: (opt: T) => string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="inline-form" style={{ marginTop: 0 }}>
+      <span style={{ width: 140 }}>
+        {label} <span style={{ color: "var(--text-dim)", fontSize: 11 }}>({typeHint})</span>
+      </span>
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="" disabled>
+          — choose —
+        </option>
+        {options.map((o) => (
+          <option key={optionValue(o)} value={optionValue(o)}>
+            {optionLabel(o)}
+          </option>
+        ))}
+        <option value={ABSENT}>— not present in this workflow —</option>
+      </select>
+      {value === ABSENT && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>will be left as-is in this workflow</span>}
+      {value !== ABSENT && value !== "" && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>matched</span>}
+      {value === "" && <span className="error-text">no confident auto-match -- choose one</span>}
+    </div>
+  );
+}
+
 export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends: Backend[]; mode: WizardMode; onCancel: () => void; onSaved: () => void }) {
   const comfyBackends = backends.filter((b) => b.kind === "comfyui");
   const availableBackends = mode.kind === "add-instance" ? comfyBackends.filter((b) => !mode.excludeBackendIds.includes(b.id)) : comfyBackends;
@@ -35,6 +89,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
   const [expectedOutputCount, setExpectedOutputCount] = useState(1);
   const [fieldIncluded, setFieldIncluded] = useState<Record<string, boolean>>({});
   const [fieldLabels, setFieldLabels] = useState<Record<string, string>>({});
+  const [groupLabelOverride, setGroupLabelOverride] = useState<Record<string, string>>({});
 
   const [selectedBackendId, setSelectedBackendId] = useState("");
 
@@ -59,6 +114,29 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
 
   const templateImageFields = mode.kind === "add-instance" ? slotFields(mode.template.param_schema) : [];
   const templateOtherFields = mode.kind === "add-instance" ? mode.template.param_schema.fields.filter((f) => f.type !== "image" && f.type !== "file") : [];
+
+  // Same complaint as "create" mode's Detected fields, mirrored here: this
+  // template's own schema already has crop_x/y/width/height as 4 separate
+  // fields (detectCropGroups matches them by name, same convention
+  // KNOWN_NODE_COMPOSITE_FIELDS produces), so resolving each independently
+  // against the uploaded workflow means 4 near-identical dropdowns for what's
+  // really one crop box -- group them into a single dropdown instead.
+  const templateCropGroups = mode.kind === "add-instance" ? detectCropGroups(templateOtherFields) : [];
+  const cropGroupedFieldNames = new Set(templateCropGroups.flatMap((g) => [g.xField, g.yField, g.widthField, g.heightField]));
+  const templateSingleFields = templateOtherFields.filter((f) => !cropGroupedFieldNames.has(f.name));
+
+  // Candidate matches for a template crop group: composite groups detected in
+  // the *uploaded* workflow (see groupDetectedFields) that decompose into the
+  // same x/y/width/height shape.
+  const detectedCropGroups: DetectedFieldGroup[] = analysis
+    ? groupDetectedFields(analysis.detected_fields).filter(
+        (g) =>
+          g.fields.length === 4 &&
+          ["x", "y", "width", "height"].every((want) => g.fields.some((f) => groupMemberSuffix(g.fields, f).toLowerCase() === want)),
+      )
+    : [];
+  const detectedGroupField = (group: DetectedFieldGroup, suffix: string) =>
+    group.fields.find((f) => groupMemberSuffix(group.fields, f).toLowerCase() === suffix);
 
   const canGoToUpload = mode.kind === "create" ? Boolean(name.trim() && nodeTypeSlug.trim() && selectedBackendId) : Boolean(selectedBackendId);
 
@@ -428,23 +506,64 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
             <div className="field-row">
               <label>Detected fields</label>
               {analysis.detected_fields.length === 0 && <span style={{ color: "var(--text-dim)" }}>None detected (no KSampler found).</span>}
-              {analysis.detected_fields.map((f) => (
-                <div key={f.key} className="inline-form" style={{ marginTop: 0 }}>
-                  <input
-                    type="checkbox"
-                    checked={fieldIncluded[f.key] ?? true}
-                    onChange={(e) => setFieldIncluded((m) => ({ ...m, [f.key]: e.target.checked }))}
-                  />
-                  <input
-                    value={fieldLabels[f.key] ?? f.label}
-                    onChange={(e) => setFieldLabels((m) => ({ ...m, [f.key]: e.target.value }))}
-                    style={{ width: 140 }}
-                  />
-                  <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
-                    {f.type}, default: {String(f.default)}
-                  </span>
-                </div>
-              ))}
+              {groupDetectedFields(analysis.detected_fields).map((group) =>
+                group.fields.length === 1 ? (
+                  (() => {
+                    const f = group.fields[0];
+                    return (
+                      <div key={f.key} className="inline-form" style={{ marginTop: 0 }}>
+                        <input
+                          type="checkbox"
+                          checked={fieldIncluded[f.key] ?? true}
+                          onChange={(e) => setFieldIncluded((m) => ({ ...m, [f.key]: e.target.checked }))}
+                        />
+                        <input
+                          value={fieldLabels[f.key] ?? f.label}
+                          onChange={(e) => setFieldLabels((m) => ({ ...m, [f.key]: e.target.value }))}
+                          style={{ width: 140 }}
+                        />
+                        <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                          {f.type}, default: {String(f.default)}
+                        </span>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  // A composite widget (e.g. ImageCropV2's crop_region) flattens into
+                  // several fields sharing one node -- toggling/labelling them one at a
+                  // time doesn't mean anything (a crop with only 3 of its 4 numbers is
+                  // meaningless), so this group gets one checkbox/label for all of them.
+                  <div key={group.signature} className="inline-form" style={{ marginTop: 0 }}>
+                    <input
+                      type="checkbox"
+                      checked={group.fields.every((f) => fieldIncluded[f.key] ?? true)}
+                      onChange={(e) =>
+                        setFieldIncluded((m) => {
+                          const next = { ...m };
+                          for (const f of group.fields) next[f.key] = e.target.checked;
+                          return next;
+                        })
+                      }
+                    />
+                    <input
+                      value={groupLabelOverride[group.signature] ?? defaultGroupLabel(group.fields)}
+                      onChange={(e) => {
+                        const label = e.target.value;
+                        setGroupLabelOverride((m) => ({ ...m, [group.signature]: label }));
+                        setFieldLabels((m) => {
+                          const next = { ...m };
+                          for (const f of group.fields) next[f.key] = `${label} ${groupMemberSuffix(group.fields, f)}`;
+                          return next;
+                        });
+                      }}
+                      style={{ width: 140 }}
+                    />
+                    <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                      {group.fields.length} numbers ({group.fields.map((f) => groupMemberSuffix(group.fields, f)).join("/")})
+                    </span>
+                  </div>
+                ),
+              )}
             </div>
           )}
 
@@ -452,40 +571,68 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
             <div className="field-row">
               <label>Fields (matched against this node type's existing schema)</label>
               {templateOtherFields.length === 0 && <span style={{ color: "var(--text-dim)" }}>No non-image fields on this template.</span>}
-              {templateOtherFields.map((field) => {
+
+              {templateCropGroups.map((group) => {
+                const names = [group.xField, group.yField, group.widthField, group.heightField];
+                const resolutions = names.map((n) => fieldResolutions[n] ?? "unresolved");
+                const anyUnresolved = resolutions.some((r) => r === "unresolved");
+                const allAbsent = !anyUnresolved && resolutions.every((r) => r !== "unresolved" && r.detectedKey === null);
+                const matched = anyUnresolved
+                  ? undefined
+                  : detectedCropGroups.find((g) =>
+                      (["x", "y", "width", "height"] as const).every(
+                        (suffix, i) => (resolutions[i] as { detectedKey: string | null }).detectedKey === detectedGroupField(g, suffix)?.key,
+                      ),
+                    );
+                const value = allAbsent ? ABSENT : matched ? matched.signature : "";
+                return (
+                  <ResolveFieldRow
+                    key={group.prefix}
+                    label={group.prefix}
+                    typeHint="crop, 4x int"
+                    value={value}
+                    options={detectedCropGroups}
+                    optionValue={(g) => g.signature}
+                    optionLabel={(g) => `${defaultGroupLabel(g.fields)} (crop)`}
+                    onChange={(v) =>
+                      setFieldResolutions((m) => {
+                        const next = { ...m };
+                        if (v === ABSENT) {
+                          for (const n of names) next[n] = { detectedKey: null };
+                        } else {
+                          const picked = detectedCropGroups.find((g) => g.signature === v);
+                          if (!picked) return m;
+                          next[group.xField] = { detectedKey: detectedGroupField(picked, "x")?.key ?? null };
+                          next[group.yField] = { detectedKey: detectedGroupField(picked, "y")?.key ?? null };
+                          next[group.widthField] = { detectedKey: detectedGroupField(picked, "width")?.key ?? null };
+                          next[group.heightField] = { detectedKey: detectedGroupField(picked, "height")?.key ?? null };
+                        }
+                        return next;
+                      })
+                    }
+                  />
+                );
+              })}
+
+              {templateSingleFields.map((field) => {
                 const resolution = fieldResolutions[field.name] ?? "unresolved";
                 const value = resolution === "unresolved" ? "" : resolution.detectedKey === null ? ABSENT : resolution.detectedKey;
                 return (
-                  <div key={field.name} className="inline-form" style={{ marginTop: 0 }}>
-                    <span style={{ width: 140 }}>
-                      {field.label ?? field.name} <span style={{ color: "var(--text-dim)", fontSize: 11 }}>({field.type})</span>
-                    </span>
-                    <select
-                      value={value}
-                      onChange={(e) =>
-                        setFieldResolutions((m) => ({
-                          ...m,
-                          [field.name]: e.target.value === ABSENT ? { detectedKey: null } : { detectedKey: e.target.value },
-                        }))
-                      }
-                    >
-                      <option value="" disabled>
-                        — choose —
-                      </option>
-                      {analysis.detected_fields.map((f) => (
-                        <option key={f.key} value={f.key}>
-                          {f.label} ({f.type})
-                        </option>
-                      ))}
-                      <option value={ABSENT}>— not present in this workflow —</option>
-                    </select>
-                    {resolution !== "unresolved" && (
-                      <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
-                        {resolution.detectedKey === null ? "will be left as-is in this workflow" : "matched"}
-                      </span>
-                    )}
-                    {resolution === "unresolved" && <span className="error-text">no confident auto-match -- choose one</span>}
-                  </div>
+                  <ResolveFieldRow
+                    key={field.name}
+                    label={field.label ?? field.name}
+                    typeHint={field.type}
+                    value={value}
+                    options={analysis.detected_fields}
+                    optionValue={(f) => f.key}
+                    optionLabel={(f) => `${f.label} (${f.type})`}
+                    onChange={(v) =>
+                      setFieldResolutions((m) => ({
+                        ...m,
+                        [field.name]: v === ABSENT ? { detectedKey: null } : { detectedKey: v },
+                      }))
+                    }
+                  />
                 );
               })}
             </div>
