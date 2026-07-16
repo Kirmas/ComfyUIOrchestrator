@@ -6,13 +6,20 @@ Full product spec: [SPEC.md](SPEC.md) — read it for architecture, data model, 
 
 This working copy (`~/comfy-orchestrator`) is the **development copy**, owned by `keresh`, editable directly (no sudo). It is separate from the **live production copy** at `/opt/comfy-orchestrator`, owned by the `orchestrator` system user, run as systemd unit `comfy-orchestrator-api`. The two are not symlinked or synced automatically — deploying means copying dev → prod on purpose (see below).
 
-There is no git repo yet (deliberately deferred by the user). Until one exists, "what changed" has to be tracked by memory/conversation, not `git diff` — don't assume git history is available.
+This is a git repo (`main` branch, remote on GitHub) — use `git diff`/`git log` freely to see what changed. Commits happen only when the user asks; pushes likewise.
 
 ## Deploying a change (dev copy → live service)
 
 `deploy/deploy.sh` scripts this (build frontend, sync backend + frontend
 into `/opt/comfy-orchestrator`, `pip install`, `alembic upgrade head`,
-restart the unit). It shells out to `deploy/root-deploy.sh` via `sudo` for
+restart the unit). `root-deploy.sh` syncs `backend/app/`, `backend/alembic/`
+(the whole directory, not just `versions/`), and `requirements.txt` — it used
+to skip `alembic/` entirely, so a new migration file only ever existed in the
+dev copy and `alembic upgrade head` on prod silently had nothing new to
+apply; the app then started against a schema missing a column its own
+models.py declared (2026-07-17 incident, `nodes.node_type`). If you ever
+rewrite this script from scratch, make sure alembic/ is in the sync list. It
+shells out to `deploy/root-deploy.sh` via `sudo` for
 the privileged half. See `deploy/README.md` for the one-time sudoers setup
 that makes that `sudo` call passwordless for `keresh` — once that's in
 place, Claude Code can run `deploy/deploy.sh` directly without the user

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.node_types import resolve_effective_template, sync_legacy_fields
 from app.core.queue import job_queue
 from app.core.storage import build_asset_url, get_storage
 from app.db.base import get_db
@@ -41,6 +42,9 @@ async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)):
     data = payload.model_dump(mode="json")
     data["kind"] = resolved_kind
     node = Node(**data)
+    if node.node_type:
+        effective = await resolve_effective_template(db, node)
+        sync_legacy_fields(node, effective)
     db.add(node)
     await db.commit()
     await db.refresh(node)
@@ -63,6 +67,9 @@ async def update_node(node_id: uuid.UUID, payload: NodeUpdate, db: AsyncSession 
     data = payload.model_dump(mode="json", exclude_unset=True)
     for field, value in data.items():
         setattr(node, field, value)
+    if "node_type" in data:
+        effective = await resolve_effective_template(db, node)
+        sync_legacy_fields(node, effective)
     await db.commit()
     await db.refresh(node)
     return node
@@ -211,6 +218,7 @@ async def reroll_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         track_id=old.track_id,
         step_index=old.step_index,
         kind=NodeKind.workflow,
+        node_type=old.node_type,
         template_id=old.template_id,
         inputs=old.inputs,
         params=old.params,

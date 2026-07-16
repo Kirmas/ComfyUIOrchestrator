@@ -1,16 +1,34 @@
 import json
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.node_types import NATIVE_NODE_TYPES
 from app.core.workflow_analyzer import analyze_workflow
 from app.db.base import get_db
 from app.db.models import NodeTemplate
 from app.schemas.schemas import NodeTemplateCreate, NodeTemplateRead, NodeTemplateUpdate, WorkflowAnalysisOut
 
 router = APIRouter(prefix="/api/node-templates", tags=["node_templates"])
+
+# Deterministic namespace so a native type's synthetic id is stable across
+# requests/restarts (nothing persists it -- it's derived fresh every time).
+_NATIVE_ID_NAMESPACE = uuid.UUID("6f6e6f34-6e61-7469-7665-6e6f64657301")
+
+
+def _native_template_read(native) -> NodeTemplateRead:
+    return NodeTemplateRead(
+        id=uuid.uuid5(_NATIVE_ID_NAMESPACE, native.slug),
+        node_type_slug=native.slug,
+        name=native.name,
+        param_schema=native.param_schema,
+        defaults=native.defaults,
+        created_at=datetime.now(UTC),
+        node_type=f"native.{native.slug}",
+    )
 
 
 @router.post("/analyze-workflow", response_model=WorkflowAnalysisOut)
@@ -32,8 +50,19 @@ async def analyze_workflow_endpoint(file: UploadFile):
 
 @router.get("", response_model=list[NodeTemplateRead])
 async def list_node_templates(db: AsyncSession = Depends(get_db)):
+    """Merges real DB-backed templates (ComfyUI/API node types, genuinely
+    user-created via the wizard) with the native registry (code-only, no DB
+    row -- see core/node_types.py) into one list, so the frontend's "choose
+    node type" flow doesn't need to know which is which."""
     result = await db.execute(select(NodeTemplate).order_by(NodeTemplate.created_at))
-    return result.scalars().all()
+    out: list[NodeTemplateRead] = []
+    for t in result.scalars().all():
+        item = NodeTemplateRead.model_validate(t)
+        item.node_type = f"template.{t.node_type_slug}"
+        out.append(item)
+    for native in NATIVE_NODE_TYPES.values():
+        out.append(_native_template_read(native))
+    return out
 
 
 @router.post("", response_model=NodeTemplateRead, status_code=201)

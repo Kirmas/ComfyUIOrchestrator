@@ -84,6 +84,12 @@ class NodeTemplateRead(ORMModel):
     param_schema: dict
     defaults: dict
     created_at: datetime
+    # Node.node_type value a node picking this template should be given --
+    # "template.<slug>" for a real DB row, "native.<slug>" for a synthetic
+    # entry synthesized from the NATIVE_NODE_TYPES registry (see
+    # api/routes/node_templates.py's list_node_templates and core/node_types.py).
+    # Not a DB column; set by the route handler after validation.
+    node_type: str = ""
 
 
 # ---------- Workflow analysis (template creation wizard) ----------
@@ -160,6 +166,11 @@ class NodeCreate(BaseModel):
     track_id: uuid.UUID
     step_index: int
     kind: NodeKind = NodeKind.workflow
+    # Authoritative discriminator going forward -- "asset.select"/"asset.single"/
+    # "native.<slug>"/"template.<slug>" (see core/node_types.py). template_id
+    # is kept for backward compatibility only; the route derives it (and
+    # is_picker) from node_type when both are given, node_type wins.
+    node_type: str | None = None
     template_id: uuid.UUID | None = None
     inputs: list[InputRef] = []
     params: dict[str, Any] = {}
@@ -169,6 +180,14 @@ class NodeCreate(BaseModel):
 
 
 class NodeUpdate(BaseModel):
+    # Relocates the node to a different track (same id, same history/jobs/
+    # assets) -- used by Grid.tsx's onSelectCandidate to move a leftover
+    # picker into its new spawned track without a destructive delete+recreate
+    # (DELETE /api/nodes/{id} cascades forward through the rest of the track,
+    # which is right for the user-facing "delete this cell" action but wrong
+    # here -- this node isn't being deleted, just relocated).
+    track_id: uuid.UUID | None = None
+    node_type: str | None = None
     template_id: uuid.UUID | None = None
     inputs: list[InputRef] | None = None
     params: dict[str, Any] | None = None
@@ -184,6 +203,7 @@ class NodeRead(ORMModel):
     track_id: uuid.UUID
     step_index: int
     kind: NodeKind
+    node_type: str | None
     is_picker: bool
     template_id: uuid.UUID | None
     inputs: list[dict]

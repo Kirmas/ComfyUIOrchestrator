@@ -26,13 +26,14 @@ function kindForStep(startKind: NodeKind, stepIndex: number): NodeKind {
 }
 
 // "pick cell..." may only target a settled asset cell with exactly one
-// resolved output -- a chooser cell (is_picker, still showing several
-// undecided candidates) has no single well-defined picture to grab, so
-// letting it be picked meant silently grabbing whichever candidate happened
-// to be "selected" or first in the list, never a choice the user actually
-// made. Resolve the chooser (select ★ one) first, then it becomes pickable.
+// resolved output -- a chooser cell (node_type "asset.select", still showing
+// several undecided candidates) has no single well-defined picture to grab,
+// so letting it be picked meant silently grabbing whichever candidate
+// happened to be "selected" or first in the list, never a choice the user
+// actually made. Resolve the chooser (select ★ one) first, then it becomes
+// pickable (node_type flips to "asset.single").
 function isPickable(node: NodeItem, outputs: Asset[]): boolean {
-  return node.kind === "asset" && !node.is_picker && outputs.length > 0;
+  return node.kind === "asset" && node.node_type !== "asset.select" && outputs.length > 0;
 }
 
 export function Grid({ projectId }: { projectId: string }) {
@@ -223,67 +224,104 @@ export function Grid({ projectId }: { projectId: string }) {
     });
   };
 
-  // The chosen candidate stays exactly where it is (same track, same cell --
-  // it never moves), which is what keeps the "primary" line anchored at the
-  // track where generation actually happened. Only the still-undecided
-  // leftovers get pushed out, together, into a fresh picker row below.
-  //
-  // Returns the new picker node (or undefined if there were no leftovers) --
-  // NodeCell.tsx's "Select all" calls this repeatedly in a tight loop to
-  // cascade every candidate into its own line (pick one, get the leftover
-  // picker back, pick one from *that*, and so on), so it reads live store
-  // state via getState() instead of this render's closed-over tracks/
-  // nodesByTrack -- those go stale after the first iteration of a cascade
-  // that never waits for Grid to re-render in between.
-  const onSelectCandidate = async (sourceNode: NodeItem, kept: Asset, others: Asset[]): Promise<NodeItem | undefined> => {
-    const settledNode = await nodesApi.update(sourceNode.id, { is_picker: false });
+  // No leftovers: there's only one possible outcome for this cell, so it's
+  // not really "a complex node becoming a simple one" in any sense worth
+  // avoiding -- just flip its node_type in place. (See below for the case
+  // that actually matters.)
+  const settleSoleCandidate = async (sourceNode: NodeItem): Promise<void> => {
+    const settledNode = await nodesApi.update(sourceNode.id, { node_type: "asset.single" });
     addNode(settledNode);
     await refreshNodeOutputs(sourceNode.id);
+  };
 
-    const workflowStepIndex = sourceNode.step_index + 1;
+  // When there ARE leftovers, this is a genuine fork: the cell that
+  // generated N candidates now has to become two different things (one
+  // settled result, one still-undecided picker for the rest) -- and rather
+  // than mutating sourceNode's role in place to be whichever one is more
+  // convenient (see the 2026-07-17 review: "чому мутуємо складнішу ноду в
+  // простішу, а не навпаки"), neither identity gets repurposed:
+  //   1. sourceNode itself relocates (same id, same job/asset history) into
+  //      the new spawned track, keeping its "still needs choosing" role and
+  //      its remaining (non-kept) candidates.
+  //   2. A brand new "asset.single" node is created in the vacated original
+  //      cell, holding only the kept asset.
+  // Moving (PATCH track_id) rather than delete+recreate matters here: DELETE
+  // /api/nodes/{id} cascades forward through the rest of the track (right
+  // for the user's trash-icon action, wrong for this internal reshuffle).
+  //
+  // Returns the relocated picker node (or undefined if there were no
+  // leftovers) -- NodeCell.tsx's "Select all" calls this repeatedly in a
+  // tight loop to cascade every candidate into its own line (pick one, get
+  // the leftover picker back, pick one from *that*, and so on), so it reads
+  // live store state via getState() instead of this render's closed-over
+  // tracks/nodesByTrack -- those go stale after the first iteration of a
+  // cascade that never waits for Grid to re-render in between.
+  const onSelectCandidate = async (sourceNode: NodeItem, kept: Asset, others: Asset[]): Promise<NodeItem | undefined> => {
+    const originalTrackId = sourceNode.track_id;
+    const originalStepIndex = sourceNode.step_index;
+    let relocatedPicker: NodeItem | undefined;
+
+    if (others.length === 0) {
+      await settleSoleCandidate(sourceNode);
+    } else {
+      // Attribute the branch to whatever actually produced these candidates,
+      // not to sourceNode itself: usually the preceding workflow cell in the
+      // same track ("Create image"). But sourceNode may itself be a leftover
+      // picker from an earlier split in a "Select all" cascade -- it has
+      // nothing before it in its own (freshly created) track, so in that
+      // case carry forward whatever cause its *own* track was already
+      // spawned from, rather than re-deriving one from this intermediate
+      // cell. That keeps every arrow in a cascade pointing back at the one
+      // true source instead of chaining picker -> picker -> picker.
+      const liveState = useProjectStore.getState();
+      const precedingWorkflow = Object.values(liveState.nodesById).find(
+        (n) => n.track_id === originalTrackId && n.step_index === originalStepIndex - 1 && n.kind === "workflow",
+      );
+      const ownTrack = liveState.tracks.find((t) => t.id === originalTrackId);
+      const causeNodeId = precedingWorkflow?.id ?? ownTrack?.spawned_from_node_id ?? sourceNode.id;
+
+      const liveTracks = liveState.tracks;
+      const rowIndex = liveTracks.length === 0 ? 0 : Math.max(...liveTracks.map((t) => t.row_index)) + 1;
+      const newTrack = await tracksApi.create({
+        project_id: projectId,
+        row_index: rowIndex,
+        spawned_from_node_id: causeNodeId,
+        spawned_from_output_id: kept.id,
+      });
+      addTrack(newTrack);
+
+      // 1) Create the settled single-asset node in the vacated original cell...
+      const settledNode = await nodesApi.create({
+        track_id: originalTrackId,
+        step_index: originalStepIndex,
+        kind: "asset",
+        node_type: "asset.single",
+      });
+      addNode(settledNode);
+      await assetsApi.move(kept.id, settledNode.id);
+      await refreshNodeOutputs(settledNode.id);
+
+      // 2) ...then relocate sourceNode (still holding `others`) into the new
+      // track. Only after the kept asset is safely off of it -- otherwise a
+      // crash between these two steps would leave the kept asset attached
+      // to a node about to be moved out from under the user's expectation
+      // of "this cell now shows the picked image".
+      const movedSource = await nodesApi.update(sourceNode.id, { track_id: newTrack.id });
+      addNode(movedSource);
+      await refreshNodeOutputs(movedSource.id);
+
+      relocatedPicker = movedSource;
+    }
+
+    const workflowStepIndex = originalStepIndex + 1;
     const liveNodes = Object.values(useProjectStore.getState().nodesById);
-    const hasNextStep = liveNodes.some((n) => n.track_id === sourceNode.track_id && n.step_index === workflowStepIndex);
+    const hasNextStep = liveNodes.some((n) => n.track_id === originalTrackId && n.step_index === workflowStepIndex);
     if (!hasNextStep) {
-      const workflowCell = await nodesApi.create({ track_id: sourceNode.track_id, step_index: workflowStepIndex, kind: "workflow" });
+      const workflowCell = await nodesApi.create({ track_id: originalTrackId, step_index: workflowStepIndex, kind: "workflow" });
       addNode(workflowCell);
     }
 
-    if (others.length === 0) return undefined;
-
-    // Attribute the branch to whatever actually produced these candidates,
-    // not to sourceNode itself: usually the preceding workflow cell in the
-    // same track ("Create image"). But sourceNode may itself be a leftover
-    // picker from an earlier split in a "Select all" cascade -- it has
-    // nothing before it in its own (freshly created) track, so in that case
-    // carry forward whatever cause its *own* track was already spawned
-    // from, rather than re-deriving one from this intermediate cell. That
-    // keeps every arrow in a cascade pointing back at the one true source
-    // instead of chaining picker -> picker -> picker.
-    const liveState = useProjectStore.getState();
-    const precedingWorkflow = Object.values(liveState.nodesById).find(
-      (n) => n.track_id === sourceNode.track_id && n.step_index === sourceNode.step_index - 1 && n.kind === "workflow",
-    );
-    const ownTrack = liveState.tracks.find((t) => t.id === sourceNode.track_id);
-    const causeNodeId = precedingWorkflow?.id ?? ownTrack?.spawned_from_node_id ?? sourceNode.id;
-
-    const liveTracks = liveState.tracks;
-    const rowIndex = liveTracks.length === 0 ? 0 : Math.max(...liveTracks.map((t) => t.row_index)) + 1;
-    const track = await tracksApi.create({
-      project_id: projectId,
-      row_index: rowIndex,
-      spawned_from_node_id: causeNodeId,
-      spawned_from_output_id: kept.id,
-    });
-    addTrack(track);
-
-    const pickerCell = await nodesApi.create({ track_id: track.id, step_index: sourceNode.step_index, kind: "asset" });
-    for (const asset of others) {
-      await assetsApi.move(asset.id, pickerCell.id);
-    }
-    const updatedPicker = await nodesApi.update(pickerCell.id, { is_picker: true });
-    addNode(updatedPicker);
-    await refreshNodeOutputs(pickerCell.id);
-    return updatedPicker;
+    return relocatedPicker;
   };
 
   const onCellClicked = async (node: NodeItem) => {

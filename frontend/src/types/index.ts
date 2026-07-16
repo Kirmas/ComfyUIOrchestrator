@@ -53,6 +53,9 @@ export interface NodeTemplate {
   param_schema: ParamSchema;
   defaults: Record<string, unknown>;
   created_at: string;
+  // "template.<slug>" for a real DB-backed type, "native.<slug>" for one
+  // synthesized from the backend's native registry (no DB row behind it).
+  node_type: string;
 }
 
 export interface Project {
@@ -83,6 +86,10 @@ export interface NodeItem {
   track_id: string;
   step_index: number;
   kind: NodeKind;
+  // Authoritative discriminator: "asset.select" / "asset.single" /
+  // "native.<slug>" / "template.<slug>" (see backend/app/core/node_types.py).
+  // null only for a fresh workflow cell that hasn't picked a template yet.
+  node_type: string | null;
   is_picker: boolean;
   template_id: string | null;
   inputs: InputRef[];

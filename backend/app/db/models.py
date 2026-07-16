@@ -87,7 +87,10 @@ class NodeTemplate(Base):
     __tablename__ = "node_templates"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
-    node_type_slug: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Stable identifier used by Node.node_type's "template.<slug>" form -- must
+    # be unique for that to unambiguously resolve (enforced at the DB level,
+    # see migration 0003).
+    node_type_slug: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     param_schema: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
     defaults: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
@@ -139,6 +142,16 @@ class Node(Base):
     track_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False)
     step_index: Mapped[int] = mapped_column(Integer, nullable=False)
     kind: Mapped[NodeKind] = mapped_column(String(32), default=NodeKind.workflow, nullable=False)
+    # Namespaced discriminator -- "asset.select" / "asset.single" / "native.<slug>"
+    # / "template.<slug>" -- the authoritative answer to "what specific flavor of
+    # node is this" (see core/node_types.py and memory/node_model_refactor_plan.md).
+    # "asset"/"native" are resolved via a code registry, no DB row; "template" is
+    # resolved via node_templates.node_type_slug. NULL only transiently, for a
+    # freshly-created workflow cell that hasn't picked a template yet.
+    node_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Legacy columns -- kept mirrored/derived from node_type on every write (see
+    # core/node_types.sync_legacy_fields) as a safety net, not read as
+    # authoritative by new code anymore.
     # Explicit, persistent marker for an asset-kind node holding raw, not-yet-
     # resolved generation output (set by _get_or_create_output_asset_node in
     # worker/tasks.py) -- NodeCell.tsx uses this, not the current output count

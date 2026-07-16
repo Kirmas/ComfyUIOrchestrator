@@ -18,7 +18,14 @@ PROD=/opt/comfy-orchestrator
 echo "==> syncing backend"
 cp -r "$DEV/backend/app" "$PROD/backend/"
 cp -r "$DEV/backend/requirements.txt" "$PROD/backend/"
-chown -R orchestrator:orchestrator "$PROD/backend/app" "$PROD/backend/requirements.txt"
+# alembic/versions was never synced here before (2026-07-17 incident: a new
+# migration's file only ever existed in the dev copy, so `alembic upgrade
+# head` on prod had nothing new to apply and silently no-opped -- the app
+# then started against a schema missing the column its own models.py
+# declared, 500ing on every Node query). Sync the whole alembic/ directory,
+# not just versions/, in case env.py/script.py.mako ever change too.
+cp -r "$DEV/backend/alembic" "$PROD/backend/"
+chown -R orchestrator:orchestrator "$PROD/backend/app" "$PROD/backend/requirements.txt" "$PROD/backend/alembic"
 
 echo "==> installing backend deps"
 sudo -u orchestrator "$PROD/backend/.venv/bin/pip" install -q -r "$PROD/backend/requirements.txt"

@@ -11,12 +11,13 @@ from app.config import get_settings
 from app.core import dispatcher
 from app.core.comfyui_backend import ComfyUIBackend, wait_with_timeout
 from app.core.job_backend import JobStatus as BackendJobStatus
+from app.core.node_types import resolve_effective_template, sync_legacy_fields
 from app.core.queue import job_queue
 from app.core.storage import get_storage
 from app.core.template_engine import validate_params
 from app.core.ws_manager import ws_manager
 from app.db.base import async_session_maker
-from app.db.models import Asset, Backend, Job, JobStatusEnum, Node, NodeKind, NodeStatus, NodeTemplate, Track
+from app.db.models import Asset, Backend, Job, JobStatusEnum, Node, NodeKind, NodeStatus, Track
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ async def _get_or_create_output_asset_node(db, workflow_node: Node) -> Node:
             step_index=workflow_node.step_index + 1,
             kind=NodeKind.asset,
             status=NodeStatus.running,
+            node_type="asset.select",
             is_picker=True,
         )
         db.add(asset_node)
@@ -91,7 +93,7 @@ async def _get_or_create_output_asset_node(db, workflow_node: Node) -> Node:
     return asset_node
 
 
-async def resolve_node_inputs(db, node: Node, template: NodeTemplate) -> dict[str, Any]:
+async def resolve_node_inputs(db, node: Node, param_schema: dict[str, Any] | None) -> dict[str, Any]:
     """Merge Node.inputs (InputRef list, matched positionally to image/file fields
     in param_schema) with Node.params (direct values for the rest) into the flat
     dict a JobBackend.submit() expects.
@@ -102,8 +104,11 @@ async def resolve_node_inputs(db, node: Node, template: NodeTemplate) -> dict[st
     different seeds instead of N identical (and thus ComfyUI-cached, see
     _wait_for_completion) runs of the same generation. The field is hidden
     from NodeCell's param form (frontend/src/components/NodeCell.tsx) since
-    there's nothing meaningful for the user to set on it."""
-    fields = (template.param_schema or {}).get("fields", []) if template else []
+    there's nothing meaningful for the user to set on it.
+
+    param_schema comes from resolve_effective_template's EffectiveTemplate --
+    works the same whether it's native (code registry) or template (DB) backed."""
+    fields = (param_schema or {}).get("fields", [])
     slot_fields = [f["name"] for f in fields if f.get("type") in ("image", "file")]
     seed_fields = [f["name"] for f in fields if f.get("type") == "seed"]
     storage = get_storage()
@@ -157,12 +162,18 @@ async def enqueue_node_job(node_id: str) -> None:
         if node.kind != NodeKind.workflow:
             logger.warning("enqueue_node_job: node %s is not a workflow node", node_id)
             return
-        template = await db.get(NodeTemplate, node.template_id) if node.template_id else None
-        if template:
-            validate_params(template.param_schema, node.params or {})
+        effective = await resolve_effective_template(db, node)
+        if effective:
+            validate_params(effective.param_schema, node.params or {})
 
         settings = get_settings()
         variants = min(node.requested_variants, settings.max_variants_per_node)
+        # Native execution is pure/deterministic (no seed field, no stochastic
+        # backend) -- N variants would just be N pixel-identical outputs at
+        # N times the CPU cost, so it's forced to 1 regardless of what the
+        # node/UI requested.
+        if effective and effective.is_native:
+            variants = 1
 
         # Clicking "Generate" again on a node that already ran (allowed once
         # it's done/error -- see nodes.py's generate_node) previously left the
@@ -292,12 +303,27 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
         node = await db.get(Node, job.node_id)
         track = await db.get(Track, node.track_id)
         project_id = str(track.project_id)
-        template = await db.get(NodeTemplate, node.template_id) if node.template_id else None
-        node_type_slug = template.node_type_slug if template else None
+        effective = await resolve_effective_template(db, node)
+
+        if effective is None:
+            # No template chosen yet (or it/its native handler no longer
+            # exists) -- unlike "no backend available right now", retrying
+            # this can never succeed, so fail the job outright instead of
+            # looping into waiting_for_backend forever.
+            job.status = JobStatusEnum.error
+            job.error = "no node type/template resolved for this node"
+            job.finished_at = datetime.now(UTC)
+            node.status = NodeStatus.error
+            node.error = job.error
+            await db.commit()
+            await ws_manager.broadcast(
+                project_id, {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "error", "error": job.error}
+            )
+            return
 
         choice = await dispatcher.select_backend(
             db,
-            node_type_slug,
+            effective,
             mode=node.backend_mode,
             manual_backend_id=str(node.manual_backend_id) if node.manual_backend_id else None,
             exclude_backend_ids=exclude,
@@ -315,10 +341,10 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
             return
 
         job.status = JobStatusEnum.running
-        job.backend_id = choice.backend.id
+        job.backend_id = choice.backend.id if choice.backend else None
         job.started_at = datetime.now(UTC)
         node.status = NodeStatus.running
-        node.backend_used_id = choice.backend.id
+        node.backend_used_id = choice.backend.id if choice.backend else None
         await db.commit()
         await ws_manager.broadcast(
             project_id,
@@ -326,15 +352,18 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
         )
 
         try:
-            resolved_inputs = await resolve_node_inputs(db, node, template)
+            resolved_inputs = await resolve_node_inputs(db, node, effective.param_schema)
             try:
                 external_job_id = await wait_with_timeout(
-                    choice.instance.submit(choice.capability.config, resolved_inputs), settings.job_timeout_seconds
+                    choice.instance.submit(choice.capability.config if choice.capability else {}, resolved_inputs),
+                    settings.job_timeout_seconds,
                 )
             finally:
                 # Release as soon as the backend's real queue reflects this job
                 # (or definitely never will, on failure) -- see dispatcher._reserved.
-                await dispatcher.release_backend(str(choice.backend.id))
+                # Native has no reservation to release (no Backend row at all).
+                if choice.backend:
+                    await dispatcher.release_backend(str(choice.backend.id))
             job.external_job_id = external_job_id
             await db.commit()
 
@@ -407,7 +436,7 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                 # a subclass of the builtin TimeoutError, so a transient
                 # network blip during polling used to slip past this guard
                 # and exclude the backend anyway (2026-07-14 recurrence).
-                if not isinstance(exc, (TimeoutError, httpx.TransportError)):
+                if choice.backend and not isinstance(exc, (TimeoutError, httpx.TransportError)):
                     exclude.add(str(choice.backend.id))
                 await job_queue.enqueue(run_variant_job, job_id, list(exclude))
                 return

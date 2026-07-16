@@ -182,7 +182,7 @@ function AssetNodeCell({
   const tracks = useProjectStore((s) => s.tracks);
   const loadProject = useProjectStore((s) => s.loadProject);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const isCandidatesGrid = node.is_picker;
+  const isCandidatesGrid = node.node_type === "asset.select";
 
   const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
 
@@ -383,7 +383,7 @@ function WorkflowNodeCell({ node, templates, backends, capabilities, pickingActi
   const nodesById = useProjectStore((s) => s.nodesById);
   const outputsByNode = useProjectStore((s) => s.outputsByNode);
   const refreshNodeOutputs = useProjectStore((s) => s.refreshNodeOutputs);
-  const template = templates.find((t) => t.id === node.template_id) ?? null;
+  const template = templates.find((t) => t.node_type === node.node_type) ?? null;
   const [jobs, setJobs] = useState<Job[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingSlot, setPendingSlot] = useState<number | null>(null);
@@ -450,7 +450,7 @@ function WorkflowNodeCell({ node, templates, backends, capabilities, pickingActi
     const chosen = templates.find((t) => t.id === templateId);
     const inputs = defaultInputsForSchema(chosen?.param_schema, node.inputs);
     const params = { ...(chosen?.defaults ?? {}), ...node.params };
-    const updated = await nodesApi.update(node.id, { template_id: templateId, inputs, params });
+    const updated = await nodesApi.update(node.id, { node_type: chosen?.node_type, inputs, params });
     setNode(updated);
   };
 

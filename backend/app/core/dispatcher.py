@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.api_backend import build_api_backend
 from app.core.comfyui_backend import ComfyUIBackend
 from app.core.job_backend import JobBackend
-from app.core.native_backend import build_native_backend
+from app.core.node_types import EffectiveTemplate
 from app.db.models import ApiKeyPermission, Backend, Capability, ExecutionType
 
 # Several worker tasks can call select_backend() concurrently (worker_concurrency
@@ -33,8 +33,10 @@ async def release_backend(backend_id: str) -> None:
 
 @dataclass
 class DispatchChoice:
-    backend: Backend
-    capability: Capability
+    # None for a native node type -- there's no real Backend/Capability row to
+    # point at (see core/node_types.py), it always runs right here in-process.
+    backend: Backend | None
+    capability: Capability | None
     instance: JobBackend
 
 
@@ -86,22 +88,24 @@ def _instantiate(backend: Backend, capability: Capability, permission: ApiKeyPer
             return build_api_backend(provider, api_key=permission.api_key, model_id=model_id)
         except ValueError:
             return None
-    if capability.execution_type == ExecutionType.native:
-        handler = capability.config.get("handler")
-        try:
-            return build_native_backend(handler) if handler else None
-        except ValueError:
-            return None
     return None
 
 
 async def select_backend(
     db: AsyncSession,
-    node_type_slug: str,
+    effective: EffectiveTemplate,
     mode: str = "auto",
     manual_backend_id: str | None = None,
     exclude_backend_ids: set[str] | None = None,
 ) -> DispatchChoice | None:
+    if effective.is_native:
+        # No Capability/Backend row involved at all -- native types are a code
+        # registry (see node_types.py), always available, nothing to pick
+        # between. exclude_backend_ids/mode/manual_backend_id don't apply.
+        assert effective.native is not None
+        return DispatchChoice(backend=None, capability=None, instance=effective.native.backend_cls())
+
+    node_type_slug = effective.node_type_slug
     exclude_backend_ids = exclude_backend_ids or set()
     capabilities = await eligible_capabilities(db, node_type_slug, mode, manual_backend_id)
 
