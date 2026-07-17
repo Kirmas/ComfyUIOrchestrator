@@ -384,6 +384,11 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, picking
   const outputsByNode = useProjectStore((s) => s.outputsByNode);
   const refreshNodeOutputs = useProjectStore((s) => s.refreshNodeOutputs);
   const template = templates.find((t) => t.node_type === node.node_type) ?? null;
+  // Native execution always runs in-process (no backend to pick between) and
+  // is deterministic (no seed field -- enqueue_node_job forces variants to 1
+  // server-side regardless of what's requested), so neither control means
+  // anything here.
+  const isNative = node.node_type?.startsWith("native.") ?? false;
   const [jobs, setJobs] = useState<Job[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingSlot, setPendingSlot] = useState<number | null>(null);
@@ -638,50 +643,54 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, picking
         <div onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
           {slotSourceSelects}
 
-          <div className="field-row">
-            <label>Variants</label>
-            <input
-              type="number"
-              min={1}
-              value={node.requested_variants}
-              onChange={async (e) => {
-                const updated = await nodesApi.update(node.id, { requested_variants: Number(e.target.value) });
-                setNode(updated);
-              }}
-            />
-          </div>
-
-          <div className="field-row">
-            <label>Backend</label>
-            <select
-              value={node.backend_mode}
-              onChange={async (e) => {
-                const updated = await nodesApi.update(node.id, { backend_mode: e.target.value as NodeItem["backend_mode"] });
-                setNode(updated);
-              }}
-            >
-              <option value="auto">Auto (balance)</option>
-              <option value="comfyui_only">ComfyUI only</option>
-              <option value="api_only">API only</option>
-              <option value="manual">Manual…</option>
-            </select>
-            {node.backend_mode === "manual" && (
-              <select
-                value={node.manual_backend_id ?? ""}
+          {!isNative && (
+            <div className="field-row">
+              <label>Variants</label>
+              <input
+                type="number"
+                min={1}
+                value={node.requested_variants}
                 onChange={async (e) => {
-                  const updated = await nodesApi.update(node.id, { manual_backend_id: e.target.value || null });
+                  const updated = await nodesApi.update(node.id, { requested_variants: Number(e.target.value) });
+                  setNode(updated);
+                }}
+              />
+            </div>
+          )}
+
+          {!isNative && (
+            <div className="field-row">
+              <label>Backend</label>
+              <select
+                value={node.backend_mode}
+                onChange={async (e) => {
+                  const updated = await nodesApi.update(node.id, { backend_mode: e.target.value as NodeItem["backend_mode"] });
                   setNode(updated);
                 }}
               >
-                <option value="">choose backend…</option>
-                {backends.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.name}
-                  </option>
-                ))}
+                <option value="auto">Auto (balance)</option>
+                <option value="comfyui_only">ComfyUI only</option>
+                <option value="api_only">API only</option>
+                <option value="manual">Manual…</option>
               </select>
-            )}
-          </div>
+              {node.backend_mode === "manual" && (
+                <select
+                  value={node.manual_backend_id ?? ""}
+                  onChange={async (e) => {
+                    const updated = await nodesApi.update(node.id, { manual_backend_id: e.target.value || null });
+                    setNode(updated);
+                  }}
+                >
+                  <option value="">choose backend…</option>
+                  {backends.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          )}
         </div>
       )}
 
