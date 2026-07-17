@@ -8,6 +8,7 @@
   --accent-dim: #dce6fb;
   --danger: #d1453b;
   --success: #2f9e5b;
+  --warning: #c58f00;
   color-scheme: light dark;
 }
 
@@ -20,6 +21,7 @@
     --text-dim: #9aa1ab;
     --accent: #5b8cf2;
     --accent-dim: #223154;
+    --warning: #d9a534;
   }
 }
 
@@ -150,6 +152,11 @@ input, select, textarea {
 .node-cell-asset:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+.node-cell-ref {
+  border-style: dashed;
+  border-color: var(--warning);
 }
 
 .node-cell-header {

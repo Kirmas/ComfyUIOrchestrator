@@ -54,6 +54,39 @@ async def _prev_asset_node_output(db, track_id, step_index) -> Asset | None:
     return await _selected_or_latest_output(db, prev_node)
 
 
+async def _asset_at_cell_index(db, node: Node, index: int) -> Asset | None:
+    """Position-based input resolution for the row-span paradigm (mirrors
+    the frontend's Grid.tsx effectiveRow/nodesByRowStep): slot `index` reads
+    whatever asset node's row (its track's row_index) equals this workflow
+    node's own home row (its track's row_index) + index, in the column
+    right before it. A node's row is always exactly its track's row_index --
+    "moving" a node to a different row means reassigning its track_id (see
+    Grid.tsx's dropAssetAt/applyRowMove), never a display-only override.
+    Deliberately independent of the frontend's span-sizing/collision
+    calculation -- this only cares what's actually sitting in that one grid
+    cell right now, not how big the workflow node's card is currently
+    rendered as."""
+    home_track = await db.get(Track, node.track_id)
+    if home_track is None:
+        return None
+    target_row = home_track.row_index + index
+    target_step = node.step_index - 1
+    result = await db.execute(
+        select(Node)
+        .join(Track, Track.id == Node.track_id)
+        .where(
+            Track.project_id == home_track.project_id,
+            Node.kind == NodeKind.asset,
+            Node.step_index == target_step,
+            Track.row_index == target_row,
+        )
+    )
+    asset_node = result.scalars().first()
+    if asset_node is None:
+        return None
+    return await _selected_or_latest_output(db, asset_node)
+
+
 async def find_output_asset_node(db, track_id, step_index: int) -> Node | None:
     """The current (non-discarded) asset-kind node immediately after a workflow
     node at step_index -- the one place "this generation's picture-cell" lives.
@@ -74,10 +107,17 @@ async def find_output_asset_node(db, track_id, step_index: int) -> Node | None:
     return result.scalars().first()
 
 
-async def _get_or_create_output_asset_node(db, workflow_node: Node) -> Node:
+async def _get_or_create_output_asset_node(db, workflow_node: Node, is_native: bool) -> Node:
     """A workflow node's results never attach to itself -- they materialize as
     the asset-kind node immediately after it in the track, created lazily on
-    first result and reused by every variant job of the same workflow node."""
+    first result and reused by every variant job of the same workflow node.
+
+    Native backends (is_native, see core/node_types.py) are deterministic and
+    always run exactly one variant (enqueue_node_job forces requested_variants
+    to 1 for them server-side) -- there's never more than one result to choose
+    between, so materialize straight to a settled "asset.single" instead of
+    an "asset.select" picker that would always have exactly one candidate to
+    immediately select anyway."""
     asset_node = await find_output_asset_node(db, workflow_node.track_id, workflow_node.step_index)
     if asset_node is None:
         asset_node = Node(
@@ -85,8 +125,8 @@ async def _get_or_create_output_asset_node(db, workflow_node: Node) -> Node:
             step_index=workflow_node.step_index + 1,
             kind=NodeKind.asset,
             status=NodeStatus.running,
-            node_type="asset.select",
-            is_picker=True,
+            node_type="asset.single" if is_native else "asset.select",
+            is_picker=not is_native,
         )
         db.add(asset_node)
         await db.flush()
@@ -141,6 +181,9 @@ async def resolve_node_inputs(db, node: Node, param_schema: dict[str, Any] | Non
         elif ref_type in ("upload", "explicit"):
             asset_id = ref.get("asset_id") or ref.get("output_id")
             asset = await db.get(Asset, asset_id) if asset_id else None
+        elif ref_type == "cell_index":
+            idx = ref.get("index")
+            asset = await _asset_at_cell_index(db, node, idx) if idx is not None else None
         elif ref_type == "text":
             resolved[field_name] = ref.get("value", "")
             continue
@@ -292,6 +335,38 @@ async def _wait_with_stall_detection(
         raise
 
 
+async def _materialize_job_result(db, job: Job, node: Node, effective, instance, external_job_id: str, project_id: str) -> None:
+    """Fetches a finished job's output assets and marks it done -- shared by
+    the normal dispatch path (run_variant_job) and orphan recovery
+    (_resume_orphaned_job) once each has confirmed the backend actually
+    finished successfully, so the two can never attach results differently."""
+    settings = get_settings()
+    assets = await wait_with_timeout(instance.result(external_job_id), settings.job_timeout_seconds)
+    storage = get_storage()
+    asset_node = await _get_or_create_output_asset_node(db, node, effective.is_native)
+    for asset_ref in assets:
+        key = storage.put_object(asset_ref.data, asset_ref.mime_type, prefix=f"nodes/{asset_node.id}")
+        db.add(
+            Asset(
+                node_id=asset_node.id,
+                storage_key=key,
+                mime_type=asset_ref.mime_type,
+                kind=asset_ref.kind,
+                selected=False,
+                meta=asset_ref.meta or {},
+            )
+        )
+
+    job.status = JobStatusEnum.done
+    job.progress = 100
+    job.finished_at = datetime.now(UTC)
+    await db.commit()
+    await ws_manager.broadcast(
+        project_id, {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "done", "progress": 100}
+    )
+    await ws_manager.broadcast(project_id, {"type": "node", "node_id": str(asset_node.id), "status": "running"})
+
+
 async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = None) -> None:
     settings = get_settings()
     exclude = set(exclude_backend_ids or [])
@@ -393,30 +468,7 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
             if status == BackendJobStatus.error:
                 raise RuntimeError("backend reported execution error")
 
-            assets = await wait_with_timeout(choice.instance.result(external_job_id), settings.job_timeout_seconds)
-            storage = get_storage()
-            asset_node = await _get_or_create_output_asset_node(db, node)
-            for asset_ref in assets:
-                key = storage.put_object(asset_ref.data, asset_ref.mime_type, prefix=f"nodes/{asset_node.id}")
-                db.add(
-                    Asset(
-                        node_id=asset_node.id,
-                        storage_key=key,
-                        mime_type=asset_ref.mime_type,
-                        kind=asset_ref.kind,
-                        selected=False,
-                        meta=asset_ref.meta or {},
-                    )
-                )
-
-            job.status = JobStatusEnum.done
-            job.progress = 100
-            job.finished_at = datetime.now(UTC)
-            await db.commit()
-            await ws_manager.broadcast(
-                project_id, {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "done", "progress": 100}
-            )
-            await ws_manager.broadcast(project_id, {"type": "node", "node_id": str(asset_node.id), "status": "running"})
+            await _materialize_job_result(db, job, node, effective, choice.instance, external_job_id, project_id)
 
         except Exception as exc:
             logger.exception("job %s failed", job_id)
@@ -486,13 +538,83 @@ async def _finalize_node_if_done(db, node_id, project_id: str) -> None:
         await ws_manager.broadcast(project_id, {"type": "node", "node_id": str(asset_node.id), "status": asset_node.status.value})
 
 
+async def _fail_orphaned_job(db, job: Job, project_id: str, reason: str) -> None:
+    """The fallback outcome recover_orphaned_jobs always had: nothing external
+    to check (or reconnecting to what should be there failed), so unblock the
+    cell by marking the job/node errored -- same as before this function grew
+    a real-recovery path."""
+    job.status = JobStatusEnum.error
+    job.error = reason
+    job.finished_at = datetime.now(UTC)
+    node = await db.get(Node, job.node_id)
+    if node and node.status in (NodeStatus.queued, NodeStatus.running):
+        node.status = NodeStatus.error
+        node.error = reason
+    await db.commit()
+    await ws_manager.broadcast(
+        project_id, {"type": "job", "job_id": str(job.id), "node_id": str(job.node_id), "status": "error", "error": reason}
+    )
+
+
+async def _resume_orphaned_job(job_id: str) -> None:
+    """Background continuation for an orphaned job recover_orphaned_jobs found
+    still genuinely in flight on its backend (ComfyUI wasn't restarted along
+    with us, so it may well still be working on it) -- polls it to completion
+    via the same generic _poll_until_terminal every dispatch path uses, then
+    finishes it exactly like a normal run. Doesn't resubmit anything; the
+    backend is already working on it, this only reconnects and waits."""
+    async with async_session_maker() as db:
+        job = await db.get(Job, job_id)
+        if job is None or job.status != JobStatusEnum.running:
+            return
+        node = await db.get(Node, job.node_id)
+        track = await db.get(Track, node.track_id)
+        project_id = str(track.project_id)
+        effective = await resolve_effective_template(db, node)
+        if effective is None or job.backend_id is None or job.external_job_id is None:
+            await _fail_orphaned_job(db, job, project_id, "orphaned by server restart")
+            await _finalize_node_if_done(db, node.id, project_id)
+            return
+
+        instance = await dispatcher.reconnect_instance(db, str(job.backend_id), effective.node_type_slug)
+        if instance is None:
+            await _fail_orphaned_job(db, job, project_id, "backend no longer available after restart")
+            await _finalize_node_if_done(db, node.id, project_id)
+            return
+
+        settings = get_settings()
+        try:
+            status = await wait_with_timeout(
+                _poll_until_terminal(instance, job.external_job_id), settings.job_timeout_seconds
+            )
+            if status == BackendJobStatus.error:
+                raise RuntimeError("backend reported execution error")
+            await _materialize_job_result(db, job, node, effective, instance, job.external_job_id, project_id)
+        except Exception as exc:
+            logger.exception("resumed orphaned job %s failed", job_id)
+            await _fail_orphaned_job(db, job, project_id, str(exc))
+
+        await _finalize_node_if_done(db, node.id, project_id)
+
+
 async def recover_orphaned_jobs() -> None:
     """The in-process job queue (app/core/queue.py) starts every boot with zero
-    tasks -- a job left mid-flight by a previous process (crash, dev --reload)
-    has nothing left to resume it and would otherwise stay "running" in the DB
-    forever, even after the ComfyUI instance actually finished it. Called once
-    at startup: mark those orphans as errored so the cell unblocks (Generate/
-    Re-roll become available again) instead of looking permanently stuck."""
+    tasks -- a job left mid-flight by a previous process (crash, dev --reload,
+    or a deploy restart) has nothing left to resume it, and used to always be
+    marked errored even though the real backend (ComfyUI, an API provider --
+    a separate process we didn't just restart) might still be working on it,
+    or have already finished while we were down.
+
+    Called once at startup, before job_queue.start() (queuing a follow-up here
+    is still safe -- InProcessQueue.enqueue just puts onto an asyncio.Queue,
+    which buffers fine before any worker is consuming it yet). A job only
+    gets reconnected if it actually reached a real backend (backend_id +
+    external_job_id both set) -- native execution has no external state to
+    survive a restart at all, and a job that hadn't gotten that far yet
+    (pending, or waiting_for_backend/running before submit() completed) has
+    nothing out there to check either. Those still fall back to the old
+    "orphaned by server restart" error, same as before this function learned
+    to actually reconnect."""
     async with async_session_maker() as db:
         result = await db.execute(
             select(Job).where(Job.status.in_((JobStatusEnum.pending, JobStatusEnum.running, JobStatusEnum.waiting_for_backend)))
@@ -501,21 +623,73 @@ async def recover_orphaned_jobs() -> None:
         if not jobs:
             return
 
-        node_ids = {job.node_id for job in jobs}
+        recovered = 0
+        resumed = 0
+        failed = 0
+
         for job in jobs:
-            job.status = JobStatusEnum.error
-            job.error = "orphaned by server restart"
-            job.finished_at = datetime.now(UTC)
-        await db.commit()
+            node = await db.get(Node, job.node_id)
+            track = await db.get(Track, node.track_id) if node else None
+            project_id = str(track.project_id) if track else None
 
-        for node_id in node_ids:
-            node = await db.get(Node, node_id)
-            if node and node.status in (NodeStatus.queued, NodeStatus.running):
-                node.status = NodeStatus.error
-                node.error = "orphaned by server restart"
-        await db.commit()
+            recoverable = (
+                job.status == JobStatusEnum.running
+                and job.backend_id is not None
+                and job.external_job_id is not None
+                and node is not None
+                and project_id is not None
+            )
+            if not recoverable:
+                if project_id is not None:
+                    await _fail_orphaned_job(db, job, project_id, "orphaned by server restart")
+                    await _finalize_node_if_done(db, node.id, project_id)
+                failed += 1
+                continue
 
-        logger.warning("recovered %d orphaned job(s) left running by a previous process", len(jobs))
+            try:
+                effective = await resolve_effective_template(db, node)
+                instance = (
+                    await dispatcher.reconnect_instance(db, str(job.backend_id), effective.node_type_slug)
+                    if effective is not None
+                    else None
+                )
+                if effective is None or instance is None:
+                    await _fail_orphaned_job(db, job, project_id, "orphaned by server restart")
+                    await _finalize_node_if_done(db, node.id, project_id)
+                    failed += 1
+                    continue
+
+                status = await instance.status(job.external_job_id)
+                if status == BackendJobStatus.done:
+                    await _materialize_job_result(db, job, node, effective, instance, job.external_job_id, project_id)
+                    await _finalize_node_if_done(db, node.id, project_id)
+                    recovered += 1
+                elif status == BackendJobStatus.error:
+                    await _fail_orphaned_job(db, job, project_id, "backend reported execution error")
+                    await _finalize_node_if_done(db, node.id, project_id)
+                    failed += 1
+                else:
+                    # Still genuinely in flight on the backend -- resume
+                    # waiting on it in the background instead of deciding
+                    # anything about it here (this loop shouldn't block
+                    # server startup on a long poll). Not yet terminal, so no
+                    # _finalize_node_if_done call -- _resume_orphaned_job does
+                    # that itself once it actually reaches an outcome.
+                    await job_queue.enqueue(_resume_orphaned_job, str(job.id))
+                    resumed += 1
+            except Exception:
+                logger.exception("couldn't reconnect orphaned job %s to its backend", job.id)
+                await _fail_orphaned_job(db, job, project_id, "orphaned by server restart")
+                await _finalize_node_if_done(db, node.id, project_id)
+                failed += 1
+
+        logger.warning(
+            "orphaned job recovery: %d reconnected as done, %d resumed in background, %d failed/unrecoverable (of %d total)",
+            recovered,
+            resumed,
+            failed,
+            len(jobs),
+        )
 
 
 async def cancel_job(job_id: str) -> None:

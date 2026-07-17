@@ -8,11 +8,10 @@ export function defaultInputsForSchema(schema: ParamSchema | undefined | null, e
   const slots = slotFields(schema);
   const inputs: InputRef[] = [];
   for (let i = 0; i < slots.length; i++) {
-    if (existing[i]) {
-      inputs.push(existing[i]);
-    } else {
-      inputs.push(i === 1 ? { type: "track_below_prev" } : { type: "self_prev" });
-    }
+    // Row-span paradigm: a fresh slot defaults to reading its own row
+    // offset within the workflow node's span (0, 1, 2, ... in slot order) --
+    // position is the connection now, so there's nothing left to ask.
+    inputs.push(existing[i] ?? { type: "cell_index", index: i });
   }
   return inputs;
 }

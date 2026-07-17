@@ -17,16 +17,23 @@ export interface Props {
   backends: Backend[];
   capabilities: Capability[];
   outputs: Asset[];
-  pickingActive: boolean;
-  isPickingSource: boolean;
   compareActive: boolean;
   isComparingSource: boolean;
   isLastInTrack: boolean;
+  // True for an asset node sitting inside a spanning workflow node's row
+  // range that ISN'T that workflow's actual materialized output (Grid.tsx's
+  // isWorkflowOutput) -- e.g. one manually loaded via Change 3's "+ asset" in
+  // an otherwise-empty spanned row. Drives the "not this workflow's output"
+  // badge in BaseAssetNodeView.
+  isManualPlacement: boolean;
+  // Armed via this node's own "+ ref elsewhere" button -- Grid.tsx is waiting
+  // for a click on an empty cell to complete the RefAsset placement.
+  isRefSource: boolean;
   registerRef: (nodeId: string, el: HTMLDivElement | null) => void;
-  onStartPicking: (nodeId: string, slotIndex: number) => void;
   onCellClicked: (node: NodeItem) => void;
   onSelectCandidate: (node: NodeItem, kept: Asset, others: Asset[]) => Promise<NodeItem | undefined>;
   onStartCompare: (node: NodeItem, asset: Asset) => void;
+  onStartRef: (node: NodeItem) => void;
 }
 
 // node.is_picker (explicit, persistent -- see db/models.py) forces a decision
@@ -131,6 +138,7 @@ function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImage
             <img
               src={resolveAssetUrl(asset.url)}
               alt="output"
+              draggable={false}
               onDoubleClick={() => onImageOpen(resolveAssetUrl(asset.url))}
               title="Double-click to open full size"
               style={{ cursor: "zoom-in" }}
@@ -167,14 +175,16 @@ function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImage
 function BaseAssetNodeView({
   node,
   outputs,
-  pickingActive,
   compareActive,
   isComparingSource,
   isLastInTrack,
+  isManualPlacement,
+  isRefSource,
   registerRef,
   onCellClicked,
   onSelectCandidate,
   onStartCompare,
+  onStartRef,
 }: Props) {
   const setNode = useProjectStore((s) => s.setNode);
   const refreshOutputs = useProjectStore((s) => s.refreshNodeOutputs);
@@ -191,7 +201,7 @@ function BaseAssetNodeView({
 
   // Starting a compare here just arms Grid-level state (compareFor) -- the
   // second asset comes from clicking a *different* asset node cell anywhere
-  // in the project, same click-to-complete gesture slot-picking already uses.
+  // in the project, same click-to-complete gesture the ref gesture uses.
   const startCompare = (asset: Asset) => onStartCompare(node, asset);
 
   // Deleting cascades forward (everything after this cell in the same track
@@ -290,7 +300,7 @@ function BaseAssetNodeView({
     "node-cell",
     "node-cell-asset",
     `status-${node.status}`,
-    (pickingActive || compareActive) && "picking-target",
+    compareActive && "picking-target",
     isComparingSource && "picking-source",
   );
 
@@ -300,10 +310,15 @@ function BaseAssetNodeView({
       className={cls}
       tabIndex={outputs.length === 0 && !isCandidatesGrid ? 0 : undefined}
       onPaste={handlePaste}
-      onClick={() => (pickingActive || compareActive) && onCellClicked(node)}
+      onClick={() => compareActive && onCellClicked(node)}
     >
       <div className="node-cell-header">
         <span>{isCandidatesGrid ? "Asset Select" : "Asset"}</span>
+        {isManualPlacement && (
+          <span title="Manually placed -- not this workflow's output" style={{ fontSize: 11, opacity: 0.7 }}>
+            📌
+          </span>
+        )}
         <span className="status-pill">{node.status}</span>
       </div>
 
@@ -339,6 +354,11 @@ function BaseAssetNodeView({
             </button>
           </>
         )}
+        {!isCandidatesGrid && outputs.length >= 1 && (
+          <button onClick={() => onStartRef(node)} title="Place a reference to this asset in another empty cell">
+            + ref elsewhere
+          </button>
+        )}
         {!isCandidatesGrid && (
           <button onClick={deleteCell} title="Delete this cell and everything after it in this track">
             Delete
@@ -362,6 +382,10 @@ function BaseAssetNodeView({
         <div style={{ fontSize: 10, color: "var(--accent)" }}>click another asset node to compare with…</div>
       )}
 
+      {isRefSource && (
+        <div style={{ fontSize: 10, color: "var(--warning)" }}>click an empty cell to place the reference…</div>
+      )}
+
       {fullSizeUrl && (
         <div className="image-modal-backdrop" onClick={closeImage}>
           <div className="image-modal-content" onClick={(e) => e.stopPropagation()}>
@@ -376,7 +400,7 @@ function BaseAssetNodeView({
   );
 }
 
-function BaseWorkflowNodeView({ node, templates, backends, capabilities, pickingActive, isPickingSource, isLastInTrack, registerRef, onStartPicking, onCellClicked }: Props) {
+function BaseWorkflowNodeView({ node, templates, backends, capabilities, isLastInTrack, registerRef }: Props) {
   const setNode = useProjectStore((s) => s.setNode);
   const removeNode = useProjectStore((s) => s.removeNode);
   const tracks = useProjectStore((s) => s.tracks);
@@ -390,8 +414,6 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, picking
   // anything here.
   const isNative = node.node_type?.startsWith("native.") ?? false;
   const [jobs, setJobs] = useState<Job[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [pendingSlot, setPendingSlot] = useState<number | null>(null);
   // The face only shows what's needed to glance at status and hit Generate --
   // template name, plan, and other node's worth of pixels (see NodeCell for
   // BaseAssetNodeView's compact size). Everything else (slot sources, param
@@ -473,11 +495,6 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, picking
     setNode(updated);
   };
 
-  const uploadForSlot = async (slotIndex: number, file: File) => {
-    const asset = await assetsApi.upload(file);
-    await setSlotSource(slotIndex, { type: "upload", asset_id: asset.id });
-  };
-
   const generate = async () => {
     const updated = await nodesApi.generate(node.id);
     setNode(updated);
@@ -508,33 +525,30 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, picking
     setJobs(list);
   };
 
-  const cls = cx("node-cell", `status-${node.status}`, pickingActive && "picking-target", isPickingSource && "picking-source");
+  const cls = cx("node-cell", `status-${node.status}`);
 
+  // Row-span paradigm: a slot's source is purely positional now (which row,
+  // within this node's own span, feeds it -- see cell_index in types/index.ts
+  // and Grid.tsx's rowSpanByNode/effectiveRow). The old self_prev/
+  // track_below_prev/upload/"pick cell…" dropdown doesn't apply anymore --
+  // where the input comes from is decided by dragging the source asset (or a
+  // RefAsset stand-in) to align with this row, not by choosing a ref kind
+  // here. This is just the number that says *which* row.
   const slotSourceSelects = template &&
     slotFields(template.param_schema).map((field, slotIndex) => {
       const ref = node.inputs[slotIndex];
+      const index = ref?.type === "cell_index" ? ref.index : slotIndex;
       return (
         <div key={field.name} className="slot-row">
-          <span>{field.label ?? field.name}:</span>
-          <select
-            value={ref?.type ?? "self_prev"}
-            onChange={(e) => {
-              const type = e.target.value as InputRef["type"];
-              if (type === "upload") {
-                setPendingSlot(slotIndex);
-                fileInputRef.current?.click();
-              } else if (type === "explicit") {
-                onStartPicking(node.id, slotIndex);
-              } else {
-                setSlotSource(slotIndex, { type } as InputRef);
-              }
-            }}
-          >
-            <option value="self_prev">prev asset cell</option>
-            <option value="track_below_prev">track below</option>
-            <option value="upload">upload…</option>
-            <option value="explicit">pick cell…</option>
-          </select>
+          <span>{field.label ?? field.name}: cell</span>
+          <input
+            type="number"
+            min={0}
+            value={index}
+            title="Row offset within this node's span (0 = its own row)"
+            style={{ width: 44 }}
+            onChange={(e) => setSlotSource(slotIndex, { type: "cell_index", index: Math.max(0, Number(e.target.value)) })}
+          />
         </div>
       );
     });
@@ -592,7 +606,6 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, picking
     <div
       ref={(el) => registerRef(node.id, el)}
       className={cls}
-      onClick={() => pickingActive && onCellClicked(node)}
       onDoubleClick={() => hasExtraParams && setParamsOpen(true)}
       title={hasExtraParams ? "⚙ or double-click to edit parameters" : undefined}
     >
@@ -696,18 +709,6 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, picking
 
       {hasExtraParams && <div className="node-cell-hint">⚙ for more parameters</div>}
 
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        style={{ display: "none" }}
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file && pendingSlot !== null) uploadForSlot(pendingSlot, file);
-          e.target.value = "";
-        }}
-      />
-
       {jobs.length > 0 && node.status !== "done" && node.status !== "discarded" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 3 }} onClick={(e) => e.stopPropagation()}>
           {jobs.map((job) => (
@@ -740,8 +741,6 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, picking
           </button>
         </div>
       )}
-
-      {isPickingSource && <div style={{ fontSize: 10, color: "var(--accent)" }}>picking source for input…</div>}
 
       {paramsOpen && template && (
         <div className="image-modal-backdrop" onClick={(e) => { e.stopPropagation(); setParamsOpen(false); }}>
@@ -799,20 +798,97 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, picking
   );
 }
 
+// A RefAsset is a lightweight pointer, not a real asset: kind="asset",
+// node_type="asset.refasset", inputs=[{type:"explicit", node_id, output_id}]
+// pointing at the real node/output it stands in for (see Grid.tsx's
+// createRefAssetAt). It owns no Asset row itself -- it borrows the real one
+// for display via the same resolveSlotAsset helper BaseWorkflowNodeView uses
+// for crop previews, since ref.type "explicit" resolution is identical
+// either way. This is the ONE case position-based layout can't express (the
+// real asset is already spoken for elsewhere), so it's also the only node
+// left that gets a drawn arrow (Grid.tsx's edges memo, kind "ref").
+function RefAssetNodeView({ node, registerRef }: Props) {
+  const tracks = useProjectStore((s) => s.tracks);
+  const nodesById = useProjectStore((s) => s.nodesById);
+  const outputsByNode = useProjectStore((s) => s.outputsByNode);
+  const refreshNodeOutputs = useProjectStore((s) => s.refreshNodeOutputs);
+  const removeNode = useProjectStore((s) => s.removeNode);
+  const [resolved, setResolved] = useState<Asset | null>(null);
+  const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    resolveSlotAsset(node, 0, tracks, nodesById, outputsByNode, refreshNodeOutputs).then((asset) => {
+      if (!cancelled) setResolved(asset);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node.inputs, outputsByNode]);
+
+  const deleteCell = async () => {
+    if (!confirm("Remove this reference? The real asset elsewhere is untouched.")) return;
+    await nodesApi.remove(node.id);
+    removeNode(node.id);
+  };
+
+  return (
+    <div ref={(el) => registerRef(node.id, el)} className={cx("node-cell", "node-cell-asset", "node-cell-ref", `status-${node.status}`)}>
+      <div className="node-cell-header">
+        <span>↗ Reference</span>
+        <span className="status-pill">ref</span>
+      </div>
+
+      {resolved && (
+        <div className="output-grid">
+          <div className="output-item">
+            {resolved.kind === "mesh" ? (
+              <Model3DThumb url={resolveAssetUrl(resolved.url)} />
+            ) : (
+              <img
+                src={resolveAssetUrl(resolved.url)}
+                alt="referenced output"
+                onDoubleClick={() => setFullSizeUrl(resolveAssetUrl(resolved.url))}
+                title="Double-click to open full size"
+                style={{ cursor: "zoom-in", opacity: 0.85 }}
+              />
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="node-actions">
+        <button onClick={deleteCell} title="Remove this reference (doesn't touch the real asset)">
+          Delete
+        </button>
+      </div>
+
+      {fullSizeUrl && (
+        <div className="image-modal-backdrop" onClick={() => setFullSizeUrl(null)}>
+          <div className="image-modal-content" onClick={(e) => e.stopPropagation()}>
+            <button type="button" className="image-modal-close" onClick={() => setFullSizeUrl(null)} title="Close full-size image">
+              ×
+            </button>
+            <ZoomableImage src={fullSizeUrl} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export type NodeViewComponent = ComponentType<Props>;
 
 // Per-node_type override, checked before falling back to the base view for
-// this node's `kind`. Empty today -- every existing node type (including
-// native ones) renders fine through the generic, param_schema-driven base
-// views, so there's nothing to override yet. The point of this registry is
-// the *seam*: a future node type that needs genuinely different rendering
-// (e.g. spanning multiple grid cells) gets ONE entry here pointing at its own
-// component, instead of threading another `if` through BaseWorkflowNodeView/
-// BaseAssetNodeView -- which are shared by every other node type and
-// shouldn't have to change (or risk regressing) to accommodate one outlier.
-// Register a custom view like:
-//   NODE_VIEWS["native.some_slug"] = SomeCustomNodeView;
-export const NODE_VIEWS: Record<string, NodeViewComponent> = {};
+// this node's `kind`. A future node type that needs genuinely different
+// rendering gets ONE entry here pointing at its own component, instead of
+// threading another `if` through BaseWorkflowNodeView/BaseAssetNodeView --
+// which are shared by every other node type and shouldn't have to change (or
+// risk regressing) to accommodate one outlier.
+export const NODE_VIEWS: Record<string, NodeViewComponent> = {
+  "asset.refasset": RefAssetNodeView,
+};
 
 export function NodeCell(props: Props) {
   const override = props.node.node_type ? NODE_VIEWS[props.node.node_type] : undefined;

@@ -79,7 +79,13 @@ export type InputRef =
   | { type: "track_below_prev" }
   | { type: "explicit"; node_id: string; output_id: string }
   | { type: "upload"; asset_id: string }
-  | { type: "text"; value: string };
+  | { type: "text"; value: string }
+  // Row-span paradigm positional ref: reads whatever asset node's row (its
+  // own track's row_index) equals this workflow node's own home row + index,
+  // in the column right before it. Generalizes self_prev (index 0) and
+  // track_below_prev (index 1) across every row a spanning workflow node
+  // can grow into.
+  | { type: "cell_index"; index: number };
 
 export interface NodeItem {
   id: string;

@@ -60,5 +60,24 @@ export async function resolveSlotAsset(
     return selectedOrLatest(await outputsFor(priorAssetNode.id));
   }
 
+  if (ref.type === "cell_index") {
+    // Mirrors _asset_at_cell_index in worker/tasks.py: whatever asset node's
+    // row (its track's row_index) equals this workflow node's own home row
+    // (its track's row_index) + index, one column back. A node's row is
+    // always exactly its track's row_index -- moving a node to a different
+    // row means reassigning its track_id (see Grid.tsx's dropAssetAt/
+    // applyRowMove), never a display-only override.
+    const homeTrack = tracks.find((t) => t.id === node.track_id);
+    if (!homeTrack) return null;
+    const targetRow = homeTrack.row_index + ref.index;
+    const targetStep = node.step_index - 1;
+    const assetNode = Object.values(nodesById).find((n) => {
+      if (n.kind !== "asset" || n.step_index !== targetStep) return false;
+      return tracks.find((t) => t.id === n.track_id)?.row_index === targetRow;
+    });
+    if (!assetNode) return null;
+    return selectedOrLatest(await outputsFor(assetNode.id));
+  }
+
   return null; // "text" -- no image
 }

@@ -154,11 +154,18 @@ class TrackRead(ORMModel):
 
 # ---------- InputRef (tagged union, stored as plain dict in JSONB) ----------
 class InputRef(BaseModel):
-    type: str  # self_prev | track_below_prev | explicit | upload | text
+    type: str  # self_prev | track_below_prev | explicit | upload | text | cell_index
     node_id: uuid.UUID | None = None
     output_id: uuid.UUID | None = None
     asset_id: uuid.UUID | None = None
     value: str | None = None
+    # "cell_index" only: row-span paradigm positional ref -- read whatever
+    # asset node's row (its track's row_index) equals this workflow node's
+    # own home row (its track's row_index) + index, in the column right
+    # before it. Generalizes self_prev (equivalent to index 0) and
+    # track_below_prev (index 1) into one addressing scheme that reaches
+    # every row a spanning workflow node can grow into.
+    index: int | None = None
 
 
 # ---------- Node ----------
@@ -181,12 +188,22 @@ class NodeCreate(BaseModel):
 
 class NodeUpdate(BaseModel):
     # Relocates the node to a different track (same id, same history/jobs/
-    # assets) -- used by Grid.tsx's onSelectCandidate to move a leftover
-    # picker into its new spawned track without a destructive delete+recreate
-    # (DELETE /api/nodes/{id} cascades forward through the rest of the track,
-    # which is right for the user-facing "delete this cell" action but wrong
-    # here -- this node isn't being deleted, just relocated).
+    # assets) -- used by Grid.tsx's onSelectCandidate, dropAssetAt, and
+    # applyRowMove to move a node to a different row (tracks model rows 1:1
+    # via row_index) without a destructive delete+recreate (DELETE
+    # /api/nodes/{id} cascades forward through the rest of the track, which
+    # is right for the user-facing "delete this cell" action but wrong here
+    # -- this node isn't being deleted, just relocated). This is the ONLY
+    # way a node's row changes -- there is no cosmetic/view-only position;
+    # wherever a node is displayed is exactly its track_id/step_index.
     track_id: uuid.UUID | None = None
+    # Relocates the node to a different column, used only by Grid.tsx's
+    # insertColumnsAt (shifting every node at/after an insertion point by a
+    # fixed, parity-preserving delta so a horizontal workflow drag can make
+    # room without breaking the project-wide asset/workflow alternation --
+    # see _kind_for_step). Never sent in isolation for a single node; always
+    # part of a whole-project batch that preserves every node's kind.
+    step_index: int | None = None
     node_type: str | None = None
     template_id: uuid.UUID | None = None
     inputs: list[InputRef] | None = None

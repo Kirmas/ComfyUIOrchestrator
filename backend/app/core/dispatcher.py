@@ -155,3 +155,28 @@ async def select_backend(
             _reserved[backend_id] = _reserved.get(backend_id, 0) + 1
 
     return best
+
+
+async def reconnect_instance(db: AsyncSession, backend_id: str, node_type_slug: str) -> JobBackend | None:
+    """Rebuilds the same JobBackend instance a previously-dispatched job was
+    already running on, given just the (backend, node_type_slug) select_backend
+    originally dispatched it to -- used by recover_orphaned_jobs
+    (worker/tasks.py) to reconnect an orphaned job to its real backend-side
+    state after a restart (still running there, or already finished while we
+    were down) instead of blindly failing it just because *our* process lost
+    track of it. Mirrors select_backend's own instantiation (_instantiate)
+    exactly so the two never drift apart. Returns None if the backend or its
+    capability for this node type no longer exists -- nothing to reconnect to."""
+    backend = await db.get(Backend, backend_id)
+    if backend is None:
+        return None
+    result = await db.execute(
+        select(Capability).where(Capability.backend_id == backend.id, Capability.node_type_slug == node_type_slug)
+    )
+    capability = result.scalars().first()
+    if capability is None:
+        return None
+    permission = None
+    if capability.execution_type == ExecutionType.api_call:
+        permission = await _has_api_permission(db, capability.config.get("provider", ""), node_type_slug)
+    return _instantiate(backend, capability, permission)

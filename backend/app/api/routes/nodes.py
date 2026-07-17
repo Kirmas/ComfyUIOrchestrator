@@ -23,6 +23,31 @@ def _kind_for_step(start_kind: NodeKind, step_index: int) -> NodeKind:
     return start_kind if step_index % 2 == 0 else _opposite_kind(start_kind)
 
 
+async def _ensure_slot_free(db: AsyncSession, track_id, step_index: int, exclude_node_id=None) -> None:
+    """Guards the (track_id, step_index) uniqueness invariant everything that
+    reads a track's step sequence relies on (self_prev's "nearest asset
+    before step_index" scan, cell_index's position lookup,
+    find_output_asset_node, ...) -- a second live node claiming a slot
+    already taken produces two nodes with no way to tell apart (2026-07-17
+    incident, first found via CREATE). update_node needs this same guard:
+    a node's row/column now only ever changes by reassigning track_id/
+    step_index (there's no cosmetic-only position anymore -- see
+    Grid.tsx's dropAssetAt/applyRowMove), so the identical collision is
+    just as reachable through PATCH. A discarded node doesn't count --
+    that's the re-roll pattern (reroll_node below), a fresh node
+    deliberately taking its place."""
+    stmt = select(Node).where(
+        Node.track_id == track_id,
+        Node.step_index == step_index,
+        Node.status != NodeStatus.discarded,
+    )
+    if exclude_node_id is not None:
+        stmt = stmt.where(Node.id != exclude_node_id)
+    existing = await db.execute(stmt)
+    if existing.scalars().first() is not None:
+        raise HTTPException(409, "A node already exists at this track/step")
+
+
 @router.post("", response_model=NodeRead, status_code=201)
 async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)):
     """Column kind (asset/workflow) is a project-wide pattern, not a free choice
@@ -34,6 +59,8 @@ async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)):
     if not track:
         raise HTTPException(404, "Track not found")
     project = await db.get(Project, track.project_id)
+
+    await _ensure_slot_free(db, payload.track_id, payload.step_index)
 
     if project.start_kind is None:
         project.start_kind = payload.kind if payload.step_index % 2 == 0 else _opposite_kind(payload.kind)
@@ -64,6 +91,12 @@ async def update_node(node_id: uuid.UUID, payload: NodeUpdate, db: AsyncSession 
     node = await db.get(Node, node_id)
     if not node:
         raise HTTPException(404, "Node not found")
+
+    if payload.track_id is not None or payload.step_index is not None:
+        target_track_id = payload.track_id if payload.track_id is not None else node.track_id
+        target_step = payload.step_index if payload.step_index is not None else node.step_index
+        await _ensure_slot_free(db, target_track_id, target_step, exclude_node_id=node.id)
+
     data = payload.model_dump(mode="json", exclude_unset=True)
     for field, value in data.items():
         setattr(node, field, value)

@@ -3,7 +3,11 @@ import { useEffect, useState } from "react";
 export interface Edge {
   from: string;
   to: string;
-  kind: "merge" | "spawn";
+  // "spawn": track forked from a candidate pick (unchanged). "ref": a RefAsset
+  // node pointing at the real asset node it stands in for -- the only other
+  // arrow kind left once ordinary workflow<->input/output connections switched
+  // to position (row alignment) instead of drawn arrows.
+  kind: "spawn" | "ref";
 }
 
 interface Props {
@@ -62,15 +66,18 @@ export function ArrowsOverlay({ edges, cellRefs, containerRef, deps }: Props) {
         <marker id="arrow-spawn" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
           <path d="M0,0 L6,3 L0,6 Z" fill="var(--success)" />
         </marker>
+        <marker id="arrow-ref" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill="var(--warning)" />
+        </marker>
       </defs>
       {paths.map((p, i) => (
         <path
           key={i}
           d={p.d}
           fill="none"
-          stroke={p.kind === "spawn" ? "var(--success)" : "var(--accent)"}
+          stroke={p.kind === "spawn" ? "var(--success)" : p.kind === "ref" ? "var(--warning)" : "var(--accent)"}
           strokeWidth={1.5}
-          strokeDasharray={p.kind === "spawn" ? "4 3" : undefined}
+          strokeDasharray={p.kind === "spawn" ? "4 3" : p.kind === "ref" ? "2 2" : undefined}
           markerEnd={`url(#arrow-${p.kind})`}
         />
       ))}
