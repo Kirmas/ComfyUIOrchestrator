@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { resolveAssetUrl } from "../api/client";
 import { assetsApi, jobsApi, nodesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
@@ -11,7 +11,7 @@ import { CropPreview, type CropBox } from "./CropPreview";
 import { Model3DThumb } from "./Model3DThumb";
 import { ZoomableImage } from "./ZoomableImage";
 
-interface Props {
+export interface Props {
   node: NodeItem;
   templates: NodeTemplate[];
   backends: Backend[];
@@ -164,7 +164,7 @@ function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImage
   );
 }
 
-function AssetNodeCell({
+function BaseAssetNodeView({
   node,
   outputs,
   pickingActive,
@@ -376,7 +376,7 @@ function AssetNodeCell({
   );
 }
 
-function WorkflowNodeCell({ node, templates, backends, capabilities, pickingActive, isPickingSource, isLastInTrack, registerRef, onStartPicking, onCellClicked }: Props) {
+function BaseWorkflowNodeView({ node, templates, backends, capabilities, pickingActive, isPickingSource, isLastInTrack, registerRef, onStartPicking, onCellClicked }: Props) {
   const setNode = useProjectStore((s) => s.setNode);
   const removeNode = useProjectStore((s) => s.removeNode);
   const tracks = useProjectStore((s) => s.tracks);
@@ -389,7 +389,7 @@ function WorkflowNodeCell({ node, templates, backends, capabilities, pickingActi
   const [pendingSlot, setPendingSlot] = useState<number | null>(null);
   // The face only shows what's needed to glance at status and hit Generate --
   // template name, plan, and other node's worth of pixels (see NodeCell for
-  // AssetNodeCell's compact size). Everything else (slot sources, param
+  // BaseAssetNodeView's compact size). Everything else (slot sources, param
   // fields, variants, backend) lives behind this modal so the node stays the
   // same footprint whether it has 2 fields or 20.
   const [paramsOpen, setParamsOpen] = useState(false);
@@ -790,6 +790,26 @@ function WorkflowNodeCell({ node, templates, backends, capabilities, pickingActi
   );
 }
 
+export type NodeViewComponent = ComponentType<Props>;
+
+// Per-node_type override, checked before falling back to the base view for
+// this node's `kind`. Empty today -- every existing node type (including
+// native ones) renders fine through the generic, param_schema-driven base
+// views, so there's nothing to override yet. The point of this registry is
+// the *seam*: a future node type that needs genuinely different rendering
+// (e.g. spanning multiple grid cells) gets ONE entry here pointing at its own
+// component, instead of threading another `if` through BaseWorkflowNodeView/
+// BaseAssetNodeView -- which are shared by every other node type and
+// shouldn't have to change (or risk regressing) to accommodate one outlier.
+// Register a custom view like:
+//   NODE_VIEWS["native.some_slug"] = SomeCustomNodeView;
+export const NODE_VIEWS: Record<string, NodeViewComponent> = {};
+
 export function NodeCell(props: Props) {
-  return props.node.kind === "asset" ? <AssetNodeCell {...props} /> : <WorkflowNodeCell {...props} />;
+  const override = props.node.node_type ? NODE_VIEWS[props.node.node_type] : undefined;
+  if (override) {
+    const View = override;
+    return <View {...props} />;
+  }
+  return props.node.kind === "asset" ? <BaseAssetNodeView {...props} /> : <BaseWorkflowNodeView {...props} />;
 }
