@@ -211,10 +211,22 @@ function NodeTypesSection({
     setWizard(null);
   };
 
+  // GET /api/node-templates merges real DB rows with a synthesized entry
+  // per code-registry native type (node_templates.py's _native_template_read
+  // -- see memory/native_execution_type.md), so this list isn't DB rows
+  // only. A native.* entry has no Capability concept (it runs in-process,
+  // never via a ComfyUI backend) and no DB row to delete -- "+ Add ComfyUI
+  // instance" is meaningless for one, and "delete node type" 404s instead
+  // of doing anything (db.get on its synthesized uuid5 id finds nothing,
+  // and it just reappears next reload anyway, regenerated straight from the
+  // registry). This tab is for the DB-backed template types those two
+  // actions actually apply to.
+  const editableTemplates = templates.filter((t) => !t.node_type.startsWith("native."));
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <h2 style={{ margin: 0 }}>Node types</h2>
-      {templates.map((t) => (
+      {editableTemplates.map((t) => (
         <NodeTypeCard
           key={t.id}
           template={t}

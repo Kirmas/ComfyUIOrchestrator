@@ -139,10 +139,6 @@ class TrackUpdate(BaseModel):
     row_index: int
 
 
-class TrackShift(BaseModel):
-    delta: int
-
-
 class TrackRead(ORMModel):
     id: uuid.UUID
     project_id: uuid.UUID
@@ -184,6 +180,16 @@ class NodeCreate(BaseModel):
     requested_variants: int = 1
     backend_mode: str = "auto"
     manual_backend_id: uuid.UUID | None = None
+    # Forwarding-only, not a general-purpose field: Grid.tsx's
+    # onSelectCandidate is the one caller, passing an EXISTING node's own
+    # created_by_node_id through to the fresh settled node standing in for
+    # it in the vacated cell -- that settled node is just as much this
+    # workflow's output as the picker it replaced, even though it's created
+    # here rather than by _get_or_create_output_asset_node. Never a
+    # caller-fabricated value: create_node validates it with the same
+    # _ensure_output_binding check update_node uses, so a bogus value 409s
+    # exactly like an illegal PATCH would rather than silently taking hold.
+    created_by_node_id: uuid.UUID | None = None
 
 
 class NodeUpdate(BaseModel):
@@ -231,6 +237,10 @@ class NodeRead(ORMModel):
     backend_mode: str
     manual_backend_id: uuid.UUID | None
     error: str | None
+    # Read-only -- see db/models.py's Node.created_by_node_id docstring.
+    # Never appears on NodeCreate/NodeUpdate; the only writer is
+    # _get_or_create_output_asset_node (worker/tasks.py).
+    created_by_node_id: uuid.UUID | None
     created_at: datetime
 
 

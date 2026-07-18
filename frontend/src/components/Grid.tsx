@@ -131,21 +131,54 @@ export function Grid({ projectId }: { projectId: string }) {
   const trackByRowIndex = useMemo(() => new Map(tracks.map((t) => [t.row_index, t])), [tracks]);
   const rowIndexOfTrack = (trackId: string): number => tracks.find((t) => t.id === trackId)?.row_index ?? 0;
 
-  // Whether `node` is the *actual* materialized output of the workflow cell
-  // just before it -- same track's next step (self_prev convention) or the
-  // first node of a track spawned from it (candidate-select). Anything else
-  // sitting inside a spanning workflow's row range is just parked there
-  // manually (Change 3's "+ asset" in an otherwise-empty spanned row) and
-  // gets a "not this workflow's output" badge instead.
-  const isWorkflowOutput = (node: NodeItem): boolean => {
-    const precedingWorkflow = (nodesByTrack.get(node.track_id) ?? []).find(
-      (n) => n.kind === "workflow" && n.step_index === node.step_index - 1,
-    );
-    if (precedingWorkflow) return true;
-    const track = tracks.find((t) => t.id === node.track_id);
-    const isFirstInTrack = (nodesByTrack.get(node.track_id) ?? [])[0]?.id === node.id;
-    return Boolean(isFirstInTrack && track?.spawned_from_node_id);
+  // A node with created_by_node_id set (a workflow's own materialized
+  // output, see backend's Node.created_by_node_id docstring) is rigidly
+  // bound to its creator: only allowed at the creator's own output step
+  // (creator.step_index + 1), in a row that's either within the creator's
+  // own row-span (its home row through home row + however many image/file
+  // input slots its template declares -- the same span rowSpanByNode grows
+  // real tracks for) or a track spawned from it -- exactly the tracks
+  // onSelectCandidate ever moves a settled/leftover output into once
+  // there's more results than the creator's own span has room for. A node
+  // with no creator (upload, "+ asset", RefAsset) has nothing to check here
+  // and is free to land anywhere. Mirrored by the backend's own
+  // _ensure_output_binding (api/routes/nodes.py) -- this is the
+  // fast-path/UI-facing check, that's the enforced one; a stale local
+  // `nodesById`/`tracks` snapshot here just means a 409 from there instead
+  // of a silent success, not a way to actually bypass the rule.
+  const isPositionAllowedFor = (node: NodeItem, row: number, step: number): boolean => {
+    if (!node.created_by_node_id) return true;
+    const creator = nodesById[node.created_by_node_id];
+    if (!creator) return true;
+    if (step !== creator.step_index + 1) return false;
+    const targetTrack = trackByRowIndex.get(row);
+    if (!targetTrack) return false;
+    if (targetTrack.spawned_from_node_id === creator.id) return true;
+    const creatorRow = rowIndexOfTrack(creator.track_id);
+    const template = templates.find((t) => t.node_type === creator.node_type);
+    const slotCount = template ? slotFields(template.param_schema).length : 0;
+    const span = Math.max(slotCount, 1);
+    return targetTrack.row_index >= creatorRow && targetTrack.row_index < creatorRow + span;
   };
+
+  // Whether `node` is the *actual* materialized output of some workflow --
+  // created_by_node_id is the authoritative, backend-set answer (doesn't
+  // care where the node currently sits -- see isPositionAllowedFor above),
+  // so it's the ONLY thing this checks now. Used to derive this
+  // positionally instead (same track's next step, or the first node of a
+  // track spawned from a workflow) -- dropped after it proved to cut both
+  // ways once nodes actually started moving around: it false-negatived a
+  // real output moved elsewhere in its creator's span (already fixed by
+  // checking created_by_node_id first), but it ALSO false-positived a
+  // plain manually-placed asset that just happened to land back in
+  // whatever cell looks like "the" output slot for some workflow sitting
+  // right before it (2026-07-18: a manual asset dragged onto a creator's
+  // home output cell silently lost its "not this workflow's output" badge,
+  // despite never having been that workflow's actual output). Anything
+  // with no creator is just parked there manually (Change 3's "+ asset" in
+  // an otherwise-empty spanned row, or any node that predates the
+  // created_by_node_id column, see migration 0006) and gets the badge.
+  const isWorkflowOutput = (node: NodeItem): boolean => Boolean(node.created_by_node_id);
 
   // Where a node actually renders: always exactly its own track's row_index
   // -- there's no display-only position. "Moving" a node to a different row
@@ -340,8 +373,8 @@ export function Grid({ projectId }: { projectId: string }) {
 
   // row_index is both the visible "track N" label and, via track_below_prev
   // inputs (see the edges memo above) plus the row-span paradigm's
-  // effectiveRow, an adjacency/position link -- same reason moveTrack
-  // reindexes every affected track (see its own comment). A plain delete
+  // effectiveRow, an adjacency/position link -- so a delete has to reindex
+  // every affected track, not just remove the one row. A plain delete
   // left every track after the removed one still holding its old row_index,
   // opening a gap: track labels (rendered at their position in sortedTracks,
   // an array index) desync from their own row's node cells (rendered at
@@ -369,7 +402,7 @@ export function Grid({ projectId }: { projectId: string }) {
   // their row label), then the freed rows get real, empty Track rows so the
   // spanning card has genuine grid rows to grow into rather than just a
   // bigger number with nothing backing it. Same row_index/track_below_prev
-  // caveat as moveTrack above: this reindexes every affected track's
+  // caveat as deleteTrackRow above: this reindexes every affected track's
   // row_index, which is also an adjacency link for "track below" inputs, not
   // just a display label.
   const insertTracksAt = async (position: number, count: number) => {
@@ -381,6 +414,45 @@ export function Grid({ projectId }: { projectId: string }) {
       const track = await tracksApi.create({ project_id: projectId, row_index: position + i });
       addTrack(track);
     }
+  };
+
+  // Whether inserting `count` new tracks at `position` (see insertTracksAt)
+  // would push some bound output (Node.created_by_node_id) out of its own
+  // valid range (isPositionAllowedFor's row-span check above). Uniformly
+  // shifting every track at row_index >= position preserves every RELATIVE
+  // distance between tracks that are EITHER both shifted or both left alone
+  // -- safe on its own -- but a creator and one of its own outputs can land
+  // on opposite sides of `position` (creator's row < position <= output's
+  // row): only the output shifts, stretching the gap between them by
+  // `count`, which can push it past creatorRow + span even though nothing
+  // about the workflow's own template changed. A spawned-track output
+  // (Track.spawned_from_node_id) isn't affected -- that link doesn't care
+  // about row_index at all -- only the span-based path is checked here.
+  const wouldBreakOutputBinding = (position: number, count: number): boolean =>
+    Object.values(nodesById).some((node) => {
+      if (!node.created_by_node_id) return false;
+      const creator = nodesById[node.created_by_node_id];
+      if (!creator) return false;
+      const outputTrack = tracks.find((t) => t.id === node.track_id);
+      if (outputTrack?.spawned_from_node_id === creator.id) return false;
+      const creatorRow = rowIndexOfTrack(creator.track_id);
+      const outputRow = rowIndexOfTrack(node.track_id);
+      const template = templates.find((t) => t.node_type === creator.node_type);
+      const slotCount = template ? slotFields(template.param_schema).length : 0;
+      const span = Math.max(slotCount, 1);
+      const newCreatorRow = creatorRow + (creatorRow >= position ? count : 0);
+      const newOutputRow = outputRow + (outputRow >= position ? count : 0);
+      return !(newCreatorRow <= newOutputRow && newOutputRow < newCreatorRow + span);
+    });
+
+  const addTrackAbove = async (trackId: string) => {
+    const track = tracks.find((t) => t.id === trackId);
+    if (!track) return;
+    if (wouldBreakOutputBinding(track.row_index, 1)) {
+      alert("Can't insert a track there -- it would push a workflow's own output out of its valid range. Try inserting elsewhere.");
+      return;
+    }
+    await insertTracksAt(track.row_index, 1);
   };
 
   // Column counterpart of insertTracksAt -- but unlike rows, a column has no
@@ -412,49 +484,6 @@ export function Grid({ projectId }: { projectId: string }) {
     Object.values(nodesById).some(
       (n) => n.kind === "workflow" && n.id !== excludeId && position > n.step_index - 1 && position <= n.step_index + 1,
     );
-
-  // Pure layout nudge (e.g. lining a spawned branch up under its parent's
-  // column) -- always +/-2 so asset/workflow kind alternation (keyed off
-  // step_index parity) isn't disturbed. Doesn't account for track_below_prev
-  // inputs on this track or its row_index neighbors (see shift_track's
-  // docstring in tracks.py) -- fine for a purely cosmetic nudge, but a track
-  // that feeds/is fed by one via "track below" can resolve differently after.
-  const shiftTrack = async (trackId: string, delta: number) => {
-    const updated = await tracksApi.shift(trackId, delta).catch((err) => {
-      alert(err instanceof Error ? err.message : "Couldn't shift this track.");
-      return null;
-    });
-    if (updated) for (const node of updated) addNode(node);
-  };
-
-  // row_index is both the visible "track N" label and, via track_below_prev
-  // inputs (see the edges memo above), an adjacency link to the track right
-  // below -- so a move always reindexes *every* track to a contiguous
-  // 0..N-1 run rather than just swapping the two endpoints, or a merge
-  // pointing at "row_index + 1" could end up skipping a row or landing on
-  // the wrong one.
-  const moveTrack = async (draggedId: string, targetId: string) => {
-    if (draggedId === targetId) return;
-    const ids = sortedTracks.map((t) => t.id);
-    const fromIdx = ids.indexOf(draggedId);
-    const toIdx = ids.indexOf(targetId);
-    if (fromIdx === -1 || toIdx === -1) return;
-    ids.splice(toIdx, 0, ids.splice(fromIdx, 1)[0]);
-
-    const byId = new Map(tracks.map((t) => [t.id, t]));
-    const reindexed = ids.map((id, idx) => ({ ...byId.get(id)!, row_index: idx }));
-    setTracks(reindexed);
-
-    const changed = reindexed.filter((t) => byId.get(t.id)!.row_index !== t.row_index);
-    await Promise.all(changed.map((t) => tracksApi.update(t.id, { row_index: t.row_index })));
-  };
-
-  const moveTrackStep = (trackId: string, direction: -1 | 1) => {
-    const idx = sortedTracks.findIndex((t) => t.id === trackId);
-    const targetIdx = idx + direction;
-    if (idx === -1 || targetIdx < 0 || targetIdx >= sortedTracks.length) return;
-    moveTrack(trackId, sortedTracks[targetIdx].id);
-  };
 
   const nextStepIndex = (trackId: string): number => nextStepIndexFor(nodesByTrack.get(trackId) ?? []);
 
@@ -546,11 +575,20 @@ export function Grid({ projectId }: { projectId: string }) {
       addTrack(newTrack);
 
       // 1) Create the settled single-asset node in the vacated original cell...
+      // carrying sourceNode's OWN created_by_node_id forward (not sourceNode
+      // itself -- an asset.select picker isn't a workflow, it has no
+      // step_index+1 of its own to be a creator of). This settled node is
+      // just as much the original workflow's output as the picker it's
+      // replacing, so it stays bound to the same creator (see
+      // _ensure_output_binding) rather than becoming a free-floating,
+      // unbound asset just because it happened to be created here instead
+      // of by _get_or_create_output_asset_node.
       const settledNode = await nodesApi.create({
         track_id: originalTrackId,
         step_index: originalStepIndex,
         kind: "asset",
         node_type: "asset.single",
+        created_by_node_id: sourceNode.created_by_node_id,
       });
       addNode(settledNode);
       await assetsApi.move(kept.id, settledNode.id);
@@ -601,46 +639,57 @@ export function Grid({ projectId }: { projectId: string }) {
 
   const onStartCompare = (node: NodeItem, asset: Asset) => setCompareFor({ nodeId: node.id, asset });
 
-  // Resolves the track at `row` and reassigns `node`'s track_id to it (its
-  // step_index/column is untouched) -- this IS what "moving a node to a
-  // different row" means: there's no display-only position, only track_id
-  // (tracks already model rows 1:1 via row_index). Same real relocation
-  // onSelectCandidate already used above, just driven by a drag instead of
-  // a candidate pick.
-  const moveNodeToRow = async (node: NodeItem, row: number): Promise<NodeItem> => {
+  // Resolves the track at `row` and reassigns `node`'s track_id AND
+  // step_index to land it exactly at (row, step) -- there's no
+  // display-only position, only track_id/step_index. Whether it's still
+  // "this workflow's output" or gets the manual-placement badge (📌, see
+  // isWorkflowOutput) falls out of this purely positionally, same as
+  // everything else in the row-span paradigm -- nothing extra to track
+  // here for that.
+  const moveAssetTo = async (node: NodeItem, row: number, step: number): Promise<NodeItem> => {
     const targetTrack = trackByRowIndex.get(row);
     if (!targetTrack) throw new Error(`No track at row ${row}`);
-    const updated = await nodesApi.update(node.id, { track_id: targetTrack.id });
+    const updated = await nodesApi.update(node.id, { track_id: targetTrack.id, step_index: step });
     addNode(updated);
     return updated;
   };
 
-  // Two nodes can't both sit in each other's track at once, so trading rows
-  // needs a scratch track as a temporary parking spot: park b there, move a
-  // into b's old track, move b (from the scratch track) into a's old
-  // track, then remove the scratch track.
-  const swapNodeTracks = async (a: NodeItem, b: NodeItem): Promise<void> => {
+  // Two nodes can't both sit at each other's (track, step) at once, so
+  // trading places needs a scratch track as a temporary parking spot: park
+  // b there, move a into b's old spot, move b (from the scratch track) into
+  // a's old spot, then remove the scratch track. Carries step_index along
+  // with track_id -- swapping two assets in different columns is just as
+  // valid a drag target as the same-column reorder this was originally
+  // written for.
+  const swapAssetPositions = async (a: NodeItem, b: NodeItem): Promise<void> => {
     const aTrackId = a.track_id;
+    const aStep = a.step_index;
     const bTrackId = b.track_id;
+    const bStep = b.step_index;
     const scratchRowIndex = tracks.length === 0 ? 0 : Math.max(...tracks.map((t) => t.row_index)) + 1;
     const scratch = await tracksApi.create({ project_id: projectId, row_index: scratchRowIndex });
     addTrack(scratch);
     await nodesApi.update(b.id, { track_id: scratch.id }).then(addNode);
-    await nodesApi.update(a.id, { track_id: bTrackId }).then(addNode);
-    await nodesApi.update(b.id, { track_id: aTrackId }).then(addNode);
+    await nodesApi.update(a.id, { track_id: bTrackId, step_index: bStep }).then(addNode);
+    await nodesApi.update(b.id, { track_id: aTrackId, step_index: aStep }).then(addNode);
     await tracksApi.remove(scratch.id);
     removeTrack(scratch.id);
   };
 
-  // Manual drag of an asset node onto a different row within a workflow
-  // node's span -- a real track reassignment (moveNodeToRow), so the view
-  // never has anything to say about a node's position that the model
-  // (track_id) doesn't already say too. If the target row is already taken
-  // by another repositionable asset, this is just a reorder within the same
-  // set of sibling inputs/outputs -- swap the two rows (swapNodeTracks)
-  // rather than treating it as a collision. RefAsset is a separate,
-  // deliberate action ("+ ref elsewhere") for actually reaching outside this
-  // node's own span, not something drag-and-drop falls back to.
+  // Manual drag of an asset node onto any other empty cell -- a real
+  // track_id/step_index reassignment (moveAssetTo), so the view never has
+  // anything to say about a node's position that the model doesn't already
+  // say too. Not limited to the source or destination being within some
+  // workflow's span: an asset dropped somewhere no workflow claims as its
+  // own input/output just renders with the manual-placement badge
+  // (isWorkflowOutput is purely positional, see the render below), same as
+  // one dropped inside a span but not aligned with the workflow's actual
+  // materialized output. If the target cell is already taken by another
+  // repositionable asset, this is just a reorder -- swap the two positions
+  // (swapAssetPositions) rather than treating it as a collision. RefAsset is
+  // a separate, deliberate action ("+ ref elsewhere") for pointing at an
+  // asset from a second place without moving the original, not something
+  // drag-and-drop falls back to.
   const dropAssetAt = async (targetRow: number, targetStep: number) => {
     const draggedId = draggingAssetId;
     setDraggingAssetId(null);
@@ -649,7 +698,7 @@ export function Grid({ projectId }: { projectId: string }) {
     if (!dragged || dragged.kind !== "asset") return;
 
     const draggedRow = rowIndexOfTrack(dragged.track_id);
-    if (targetRow === draggedRow) return;
+    if (targetRow === draggedRow && targetStep === dragged.step_index) return;
 
     // Refuse to start a second structural op while one's still applying its
     // (possibly multi-node) sequence of updates -- both would plan against
@@ -663,17 +712,26 @@ export function Grid({ projectId }: { projectId: string }) {
     }
     structuralOpRef.current = true;
     try {
+      if (!isPositionAllowedFor(dragged, targetRow, targetStep)) {
+        alert("This asset is a workflow output -- it can only move among its own creator's positions.");
+        return;
+      }
+
       const occupant = nodesByRowStep.get(`${targetRow}:${targetStep}`);
       if (occupant && occupant.id !== dragged.id) {
         if (occupant.kind !== "asset" || occupant.node_type === "asset.select") {
           alert("Can't swap with that cell.");
           return;
         }
-        await swapNodeTracks(dragged, occupant);
+        if (!isPositionAllowedFor(occupant, draggedRow, dragged.step_index)) {
+          alert("Can't swap -- the other cell's asset is a workflow output tied to a different position.");
+          return;
+        }
+        await swapAssetPositions(dragged, occupant);
         return;
       }
 
-      await moveNodeToRow(dragged, targetRow);
+      await moveAssetTo(dragged, targetRow, targetStep);
     } finally {
       structuralOpRef.current = false;
     }
@@ -1047,6 +1105,33 @@ export function Grid({ projectId }: { projectId: string }) {
     return cells;
   }, [draggingWorkflowId, project, tracks, maxButtonStep, nodesByRowStep]);
 
+  // Same idea as emptyWorkflowCells, but for an asset drag: every currently-
+  // empty, asset-parity cell across the WHOLE grid, not just the ones
+  // reachable from some workflow's own span (emptyReachableCells, which
+  // keeps rendering its own "+ asset" button there regardless of a drag, so
+  // it's excluded here to avoid stacking two drop targets on the same
+  // cell). A manually-placed asset isn't tied to any one workflow's
+  // territory -- moveAssetTo/isWorkflowOutput decide what a cell means
+  // purely from where it ends up, not from where it started -- so dragging
+  // one to an unrelated empty cell elsewhere on the board has to actually
+  // be reachable to drop on (2026-07-18: dragging an asset out to a cell no
+  // workflow's span reached did nothing at all -- no drop target was even
+  // rendered there).
+  const emptyAssetDropCells = useMemo(() => {
+    if (!draggingAssetId || !project?.start_kind) return [];
+    const reachable = new Set(emptyReachableCells.map(({ row, step }) => `${row}:${step}`));
+    const cells: { row: number; step: number }[] = [];
+    for (const row of tracks.map((t) => t.row_index)) {
+      for (let step = 0; step <= maxButtonStep; step++) {
+        if (kindForStep(project.start_kind, step) !== "asset") continue;
+        if (nodesByRowStep.has(`${row}:${step}`)) continue;
+        if (reachable.has(`${row}:${step}`)) continue;
+        cells.push({ row, step });
+      }
+    }
+    return cells;
+  }, [draggingAssetId, project, tracks, maxButtonStep, nodesByRowStep, emptyReachableCells]);
+
   // Places a RefAsset node (a lightweight pointer, not a copy) at (row, step),
   // referencing sourceNode's currently resolved output -- used both by the
   // drag-collision fallback above and by "+ ref elsewhere"'s click-to-complete
@@ -1131,34 +1216,11 @@ export function Grid({ projectId }: { projectId: string }) {
               track {track.row_index}
               <div style={{ display: "flex", gap: 4 }}>
                 <button
-                  onClick={() => moveTrackStep(track.id, -1)}
-                  disabled={rowIdx === 0}
-                  title="Move this track up"
+                  onClick={() => addTrackAbove(track.id)}
+                  title="Insert a new empty track above this one"
                   style={{ fontSize: 10, padding: "1px 4px" }}
                 >
-                  ↑
-                </button>
-                <button
-                  onClick={() => moveTrackStep(track.id, 1)}
-                  disabled={rowIdx === sortedTracks.length - 1}
-                  title="Move this track down"
-                  style={{ fontSize: 10, padding: "1px 4px" }}
-                >
-                  ↓
-                </button>
-                <button
-                  onClick={() => shiftTrack(track.id, -2)}
-                  title="Shift this whole track 2 columns to the left (layout only, doesn't change generation)"
-                  style={{ fontSize: 10, padding: "1px 4px" }}
-                >
-                  ←
-                </button>
-                <button
-                  onClick={() => shiftTrack(track.id, 2)}
-                  title="Shift this whole track 2 columns to the right (layout only, doesn't change generation)"
-                  style={{ fontSize: 10, padding: "1px 4px" }}
-                >
-                  →
+                  + track above
                 </button>
                 <button onClick={() => deleteTrackRow(track.id)} title="Delete this track and all its cells" style={{ fontSize: 10, padding: "1px 4px" }}>
                   ×
@@ -1295,6 +1357,24 @@ export function Grid({ projectId }: { projectId: string }) {
                 const dragged = draggingWorkflowId ? nodesById[draggingWorkflowId] : null;
                 setDraggingWorkflowId(null);
                 if (dragged) dropWorkflowAt(dragged, row, step);
+              }}
+            />
+          ))}
+
+          {emptyAssetDropCells.map(({ row, step }) => (
+            <div
+              key={`asset-drop-${row}-${step}`}
+              style={{
+                gridColumn: step + 2,
+                gridRow: row + 1,
+                border: "2px dashed var(--success)",
+                borderRadius: 8,
+                opacity: 0.5,
+              }}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                dropAssetAt(row, step);
               }}
             />
           ))}

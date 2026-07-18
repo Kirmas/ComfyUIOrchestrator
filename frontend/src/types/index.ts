@@ -106,6 +106,13 @@ export interface NodeItem {
   backend_mode: BackendMode;
   manual_backend_id: string | null;
   error: string | null;
+  // Read-only, set exactly once by the backend when a workflow node
+  // materializes its result as this (following) asset node -- see
+  // backend/app/db/models.py's Node.created_by_node_id docstring. NULL for
+  // every manually-placed asset (upload, "+ asset", RefAsset). Rigidly
+  // binds this node to its creator's own output position -- see Grid.tsx's
+  // isPositionAllowedFor.
+  created_by_node_id: string | null;
   created_at: string;
 }
 
@@ -174,4 +181,17 @@ export interface WorkflowAnalysis {
   output_nodes: WorkflowNodeInfo[];
   detected_fields: DetectedField[];
   duplicate_titles: string[];
+}
+
+// A capability's config.param_mapping entry (comfyui_workflow execution
+// type only -- see backend/app/core/template_engine.py's build_workflow).
+// node_id is what actually gets resolved against workflow_json; title is
+// carried along only for error messages / display, captured once at wizard
+// time from the same workflow_json snapshot so it can never drift out of
+// sync with it the way a title-only lookup could (two nodes sharing a
+// title, ComfyUI doesn't enforce uniqueness -- 2026-07-18 incident).
+export interface ParamMappingEntry {
+  node_id: string;
+  title: string | null;
+  input_key: string;
 }

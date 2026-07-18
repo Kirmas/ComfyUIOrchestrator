@@ -87,50 +87,133 @@ async def _asset_at_cell_index(db, node: Node, index: int) -> Asset | None:
     return await _selected_or_latest_output(db, asset_node)
 
 
-async def find_output_asset_node(db, track_id, step_index: int) -> Node | None:
-    """The current (non-discarded) asset-kind node immediately after a workflow
-    node at step_index -- the one place "this generation's picture-cell" lives.
-    Always excludes discarded nodes: a re-roll leaves the old asset node behind
-    marked discarded while a fresh one takes its place at the same step_index,
-    so an unfiltered lookup could non-deterministically land on either one
-    instead of the live cell actually shown in the UI. Shared by every call
-    site that needs to find this node (see api/routes/nodes.py's reroll_node)
-    so they can't drift out of sync on that filter again."""
+async def own_output_nodes(db, workflow_node_id) -> list[Node]:
+    """Every non-discarded asset node a workflow has ever produced --
+    Node.created_by_node_id is the authoritative link (see db/models.py's
+    docstring), set once below and never touched afterward, so this finds
+    them regardless of where drag/drop has since moved any of them (see
+    api/routes/nodes.py's _ensure_output_binding for the rule constraining
+    where that even is). Oldest first -- callers wanting "the newest" (the
+    one this generation run is/was actually working on -- see
+    _finalize_node_if_done) take [-1]; reroll_node wants all of them, to
+    discard the lot alongside the workflow node they came from."""
     result = await db.execute(
-        select(Node).where(
-            Node.track_id == track_id,
-            Node.step_index == step_index + 1,
-            Node.kind == NodeKind.asset,
-            Node.status != NodeStatus.discarded,
-        )
+        select(Node).where(Node.created_by_node_id == workflow_node_id, Node.status != NodeStatus.discarded).order_by(Node.created_at)
     )
-    return result.scalars().first()
+    return list(result.scalars().all())
+
+
+async def _claim_new_output_cell(db, workflow_node: Node, is_native: bool) -> Node:
+    """Finds an empty cell in workflow_node's own output column (its own
+    row first, same as always) and creates a fresh output node there, bound
+    via created_by_node_id -- used both for a workflow's first-ever result
+    and, for a ComfyUI node with no live picker left among its existing
+    outputs, a fresh batch of variants that doesn't disturb anything already
+    settled.
+
+    If the row's output cell is already taken by something that isn't one
+    of this workflow's own outputs (own_output_nodes came up empty, or -- in
+    the ComfyUI/ "fresh batch" case -- everything found was already
+    settled), tries growing one row down -- but only if that's safe: the
+    cell directly below, in the WORKFLOW's OWN column, must be either empty
+    or (at the very bottom of the grid) not exist yet at all. If something
+    else already sits in the workflow's own column one row down, that row
+    isn't this workflow's to grow into -- raises rather than reach past it,
+    surfacing as a normal job error (run_variant_job's own except Exception)."""
+    row = await db.get(Track, workflow_node.track_id)
+    output_step = workflow_node.step_index + 1
+
+    while True:
+        result = await db.execute(
+            select(Node).where(Node.track_id == row.id, Node.step_index == output_step, Node.status != NodeStatus.discarded)
+        )
+        if result.scalars().first() is None:
+            asset_node = Node(
+                track_id=row.id,
+                step_index=output_step,
+                kind=NodeKind.asset,
+                status=NodeStatus.running,
+                node_type="asset.single" if is_native else "asset.select",
+                is_picker=not is_native,
+                created_by_node_id=workflow_node.id,
+            )
+            db.add(asset_node)
+            await db.flush()
+            return asset_node
+
+        result = await db.execute(select(Track).where(Track.project_id == row.project_id, Track.row_index == row.row_index + 1))
+        next_row = result.scalars().first()
+        if next_row is None:
+            # The true bottom of the grid -- appending a brand-new track here
+            # never shifts anything else, so it's always safe.
+            next_row = Track(project_id=row.project_id, row_index=row.row_index + 1)
+            db.add(next_row)
+            await db.flush()
+            row = next_row
+            continue
+
+        result = await db.execute(
+            select(Node).where(
+                Node.track_id == next_row.id, Node.step_index == workflow_node.step_index, Node.status != NodeStatus.discarded
+            )
+        )
+        if result.scalars().first() is not None:
+            raise RuntimeError("No room to grow this workflow's output -- the row right below it already belongs to something else.")
+        row = next_row
+
+
+async def _clear_asset_node_outputs(db, asset_node: Node) -> None:
+    """Deletes every existing Asset under asset_node, in storage and in the
+    DB -- used only by _get_or_create_output_asset_node's native-overwrite
+    path (a deterministic node's regenerate replaces its one result rather
+    than accumulating pixel-identical reruns)."""
+    result = await db.execute(select(Asset).where(Asset.node_id == asset_node.id))
+    assets = list(result.scalars().all())
+    storage = get_storage()
+    for asset in assets:
+        storage.delete_object(asset.storage_key)
+        await db.delete(asset)
+    await db.flush()
 
 
 async def _get_or_create_output_asset_node(db, workflow_node: Node, is_native: bool) -> Node:
     """A workflow node's results never attach to itself -- they materialize as
-    the asset-kind node immediately after it in the track, created lazily on
-    first result and reused by every variant job of the same workflow node.
+    an asset-kind node bound to it via created_by_node_id (Node.created_by_node_id,
+    set here and nowhere else -- see db/models.py's docstring), created lazily
+    on first result and reused by every variant job of the same generation run.
 
-    Native backends (is_native, see core/node_types.py) are deterministic and
-    always run exactly one variant (enqueue_node_job forces requested_variants
-    to 1 for them server-side) -- there's never more than one result to choose
-    between, so materialize straight to a settled "asset.single" instead of
-    an "asset.select" picker that would always have exactly one candidate to
-    immediately select anyway."""
-    asset_node = await find_output_asset_node(db, workflow_node.track_id, workflow_node.step_index)
-    if asset_node is None:
-        asset_node = Node(
-            track_id=workflow_node.track_id,
-            step_index=workflow_node.step_index + 1,
-            kind=NodeKind.asset,
-            status=NodeStatus.running,
-            node_type="asset.single" if is_native else "asset.select",
-            is_picker=not is_native,
-        )
-        db.add(asset_node)
-        await db.flush()
-    return asset_node
+    - No existing output at all -- claims a fresh cell (_claim_new_output_cell).
+    - Native (is_native, see core/node_types.py): deterministic, always runs
+      exactly one variant (enqueue_node_job forces requested_variants to 1
+      for them server-side) -- a regenerate replaces the existing output's
+      content wholesale rather than accumulating pixel-identical reruns
+      ("maybe I fixed a bug and I'm regenerating" is the normal case here,
+      not an edge case).
+    - ComfyUI workflow node with a still-undecided picker (asset.select)
+      among its own outputs: new variants join it, old candidates untouched
+      -- the normal multi-variant-per-click case, and also what every
+      variant job after the first one in the same click converges back to.
+    - ComfyUI workflow node whose own outputs are all already settled
+      (asset.single): nothing left undecided to add to, so this is a fresh
+      batch -- claims its own fresh cell instead, leaving prior results
+      alone."""
+    existing = await own_output_nodes(db, workflow_node.id)
+
+    if not existing:
+        return await _claim_new_output_cell(db, workflow_node, is_native)
+
+    if is_native:
+        target = existing[-1]
+        await _clear_asset_node_outputs(db, target)
+        target.status = NodeStatus.running
+        target.error = None
+        return target
+
+    picker = next((n for n in existing if n.node_type == "asset.select"), None)
+    if picker is not None:
+        return picker
+
+    return await _claim_new_output_cell(db, workflow_node, is_native)
 
 
 async def resolve_node_inputs(db, node: Node, param_schema: dict[str, Any] | None) -> dict[str, Any]:
@@ -375,6 +458,20 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
         job = await db.get(Job, job_id)
         if job is None:
             return
+        if job.status == JobStatusEnum.cancelled:
+            # cancel_job (jobs.py's cancel endpoint) can mark a job cancelled
+            # while it's still sitting pending/waiting_for_backend in this
+            # in-process queue -- concurrency=4 worker loops share one FIFO,
+            # so a batch of N variant jobs enqueued together can already have
+            # several picked up before a Cancel click's own enqueue(cancel_job)
+            # gets a worker slot, and a waiting_for_backend job re-enters this
+            # function fresh on every delayed retry regardless of what
+            # happened to it while it waited. Without this check, either path
+            # would silently overwrite the cancellation back to "running" and
+            # dispatch to a backend anyway -- cancel only ever stopped the one
+            # job already that far along, not the rest of its own node's
+            # batch (2026-07-18 incident).
+            return
         node = await db.get(Node, job.node_id)
         track = await db.get(Track, node.track_id)
         project_id = str(track.project_id)
@@ -527,7 +624,15 @@ async def _finalize_node_if_done(db, node_id, project_id: str) -> None:
 
     # Flip the paired output asset-node's status alongside the workflow node that
     # feeds it -- it only exists once at least one variant produced a result.
-    asset_node = await find_output_asset_node(db, node.track_id, node.step_index)
+    # The newest of the workflow's own outputs (own_output_nodes is oldest-
+    # first) is the one this run actually touched -- created fresh, or
+    # (native's overwrite / ComfyUI's append-to-picker) reused in place, so
+    # it's never anything but the last element regardless of which of
+    # _get_or_create_output_asset_node's paths ran. Read-only lookup, unlike
+    # that function -- this must never itself decide to create/overwrite
+    # anything, just report status on whatever's already there.
+    existing_outputs = await own_output_nodes(db, node.id)
+    asset_node = existing_outputs[-1] if existing_outputs else None
     if asset_node is not None:
         asset_node.status = node.status
         asset_node.error = "source workflow failed" if node.status == NodeStatus.error else None

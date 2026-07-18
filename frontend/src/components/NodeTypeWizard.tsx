@@ -11,7 +11,7 @@ import {
   type DetectedFieldGroup,
   type FieldResolution,
 } from "../workflowMatching";
-import type { Backend, NodeTemplate, ParamField, WorkflowAnalysis } from "../types";
+import type { Backend, NodeTemplate, ParamField, ParamMappingEntry, WorkflowAnalysis } from "../types";
 
 export type WizardMode = { kind: "create" } | { kind: "add-instance"; template: NodeTemplate; excludeBackendIds: string[] };
 
@@ -270,7 +270,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
   const submitCreate = async () => {
     if (!analysis || !workflowJson || mode.kind !== "create") return;
     const paramFields: ParamField[] = [];
-    const paramMapping: Record<string, string> = {};
+    const paramMapping: Record<string, ParamMappingEntry> = {};
     const defaults: Record<string, unknown> = {};
 
     inputSlots.forEach((slot, i) => {
@@ -279,7 +279,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
       if (!node.title) throw new Error(`The LoadImage node assigned to "${slot.label}" has no title in ComfyUI -- rename it and re-export.`);
       const fieldName = `image_${i + 1}`;
       paramFields.push({ name: fieldName, type: "image", label: slot.label, required: true });
-      paramMapping[fieldName] = `${node.title}.image`;
+      paramMapping[fieldName] = { node_id: node.node_id, title: node.title, input_key: "image" };
     });
 
     for (const f of analysis.detected_fields) {
@@ -288,7 +288,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
       if (!title) throw new Error(`The node backing "${fieldLabels[f.key] ?? f.label}" has no title in ComfyUI -- rename it and re-export.`);
       const fieldType = matchTypeFor(f.type);
       paramFields.push({ name: f.key, type: fieldType, label: fieldLabels[f.key] ?? f.label, default: f.default });
-      paramMapping[f.key] = `${title}.${f.input_key}`;
+      paramMapping[f.key] = { node_id: f.node_id, title, input_key: f.input_key };
       defaults[f.key] = f.default;
     }
 
@@ -309,14 +309,14 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
 
   const submitAddInstance = async () => {
     if (!analysis || !workflowJson || mode.kind !== "add-instance") return;
-    const paramMapping: Record<string, string> = {};
+    const paramMapping: Record<string, ParamMappingEntry> = {};
 
     templateImageFields.forEach((field, i) => {
       const nodeId = imageSlotNodeIds[i];
       const node = analysis.input_image_nodes.find((n) => n.node_id === nodeId);
       if (!node) throw new Error(`Image field "${field.label ?? field.name}" has no assigned node.`);
       if (!node.title) throw new Error(`The LoadImage node assigned to "${field.label ?? field.name}" has no title in ComfyUI -- rename it and re-export.`);
-      paramMapping[field.name] = `${node.title}.image`;
+      paramMapping[field.name] = { node_id: node.node_id, title: node.title, input_key: "image" };
     });
 
     for (const field of templateOtherFields) {
@@ -327,7 +327,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
       if (!detected) throw new Error(`Field "${field.label ?? field.name}" points to a detected field that no longer exists.`);
       const title = titleOf(detected.node_id);
       if (!title) throw new Error(`The node backing "${field.label ?? field.name}" has no title in ComfyUI -- rename it and re-export.`);
-      paramMapping[field.name] = `${title}.${detected.input_key}`;
+      paramMapping[field.name] = { node_id: detected.node_id, title, input_key: detected.input_key };
     }
 
     await capabilitiesApi.create({

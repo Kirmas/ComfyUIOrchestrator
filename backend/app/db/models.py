@@ -175,6 +175,22 @@ class Node(Base):
         ForeignKey("backends.id", ondelete="SET NULL"), nullable=True
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set exactly once, by _get_or_create_output_asset_node (worker/tasks.py)
+    # when it materializes a workflow's result as a following asset node --
+    # never written anywhere else, never changed afterward. NULL for every
+    # other asset (manual upload, "+ asset", RefAsset, the settled node
+    # onSelectCandidate creates fresh in the vacated cell): those have no
+    # creator and stay freely repositionable. A non-NULL value rigidly binds
+    # the asset to that one workflow node's own output position -- see
+    # Grid.tsx's isPositionAllowedFor and api/routes/nodes.py's
+    # _ensure_output_binding, which both derive "allowed positions" as
+    # exactly the creator's own home track plus any track spawned from it,
+    # at the creator's step_index + 1. Not exposed on NodeCreate/NodeUpdate
+    # (see schemas.py) -- there is no API path that sets or moves this value
+    # except that one backend call site.
+    created_by_node_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     track: Mapped["Track"] = relationship(back_populates="nodes", foreign_keys=[track_id])

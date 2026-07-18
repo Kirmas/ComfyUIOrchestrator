@@ -13,12 +13,29 @@ param_schema shape (JSON-Schema-ish, SPEC section 3):
 }
 
 param_mapping shape (SPEC section 2.3 -- "поля ноди-шаблона -> input-и workflow"),
-keyed by template field name, value is "<ComfyUI node title>.<input key>":
+keyed by template field name, value is {"node_id", "title", "input_key"}:
 {
-  "prompt": "Positive Prompt.text",
-  "seed": "KSampler.seed",
-  "image": "Load Image.image"
+  "prompt": {"node_id": "12", "title": "Positive Prompt", "input_key": "text"},
+  "seed": {"node_id": "5", "title": "KSampler", "input_key": "seed"},
+  "image": {"node_id": "3", "title": "Load Image", "input_key": "image"}
 }
+node_id is what build_workflow() actually resolves by -- it's captured once,
+at wizard time, from the very same workflow_json snapshot stored alongside
+it in this capability's own config, so it can never go stale the way a
+title lookup can: two nodes ending up with the same title (a very real
+case -- ComfyUI doesn't enforce uniqueness, and default/copy-pasted node
+titles collide easily) previously made title-based resolution silently
+pick whichever node happened to come last in the file, corrupting whatever
+random other field shared that title (2026-07-18 incident: two ComfySwitchNode
+instances both titled "Switch (Steps)" meant setting one boolean field
+silently overwrote the other node's own switch input instead of a node it
+was never meant to touch). Re-exporting the workflow from ComfyUI always
+means re-running the wizard and regenerating both workflow_json and
+param_mapping together anyway -- title's original justification ("more
+stable across re-exports than node id") never actually applied in
+practice, since the two are never used independently of each other.
+title is kept for error messages and the UI only; build_workflow never
+falls back to it.
 
 A field can be flagged "optional": true in param_schema when it's not
 guaranteed to be meaningful for every capability of this node_type_slug --
@@ -75,18 +92,7 @@ def validate_params(param_schema: dict, params: dict[str, Any]) -> None:
                 raise TemplateValidationError(f"field '{name}' above maximum {field['max']}")
 
 
-def _title_index(workflow_json: dict) -> dict[str, str]:
-    """Map ComfyUI node title -> node id, per SPEC's resolution of open question #3
-    (title is more stable across workflow re-exports than numeric node id)."""
-    index: dict[str, str] = {}
-    for node_id, node in workflow_json.items():
-        title = (node.get("_meta") or {}).get("title")
-        if title:
-            index[title] = node_id
-    return index
-
-
-def build_workflow(workflow_json: dict, param_mapping: dict[str, str], resolved_inputs: dict[str, Any]) -> dict:
+def build_workflow(workflow_json: dict, param_mapping: dict[str, dict], resolved_inputs: dict[str, Any]) -> dict:
     """Return a deep copy of workflow_json with resolved_inputs applied per param_mapping.
 
     An input_key with further dots (e.g. "crop_region.x", from a
@@ -98,18 +104,22 @@ def build_workflow(workflow_json: dict, param_mapping: dict[str, str], resolved_
     "crop_region.x".
     """
     workflow = copy.deepcopy(workflow_json)
-    titles = _title_index(workflow)
 
     for field_name, target in param_mapping.items():
         if field_name not in resolved_inputs:
             continue
-        if "." not in target:
-            raise TemplateValidationError(f"param_mapping target '{target}' must be '<node title>.<input key>'")
-        title, input_key = target.split(".", 1)
-        node_id = titles.get(title)
-        if node_id is None:
-            raise TemplateValidationError(f"workflow has no node titled '{title}' (param_mapping for '{field_name}')")
-        inputs = workflow[node_id].setdefault("inputs", {})
+        node_id = target.get("node_id")
+        input_key = target.get("input_key")
+        if not node_id or not input_key:
+            raise TemplateValidationError(f"param_mapping entry for '{field_name}' must have node_id and input_key")
+        node = workflow.get(node_id)
+        if node is None:
+            title = target.get("title")
+            raise TemplateValidationError(
+                f"workflow has no node '{node_id}'" + (f" (titled '{title}' at mapping time)" if title else "")
+                + f" (param_mapping for '{field_name}')"
+            )
+        inputs = node.setdefault("inputs", {})
         path = input_key.split(".")
         for key in path[:-1]:
             inputs = inputs.setdefault(key, {})

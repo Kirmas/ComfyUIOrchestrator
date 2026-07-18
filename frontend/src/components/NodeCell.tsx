@@ -400,13 +400,13 @@ function BaseAssetNodeView({
   );
 }
 
-function BaseWorkflowNodeView({ node, templates, backends, capabilities, isLastInTrack, registerRef }: Props) {
+function BaseWorkflowNodeView({ node, templates, backends, capabilities, registerRef }: Props) {
   const setNode = useProjectStore((s) => s.setNode);
-  const removeNode = useProjectStore((s) => s.removeNode);
   const tracks = useProjectStore((s) => s.tracks);
   const nodesById = useProjectStore((s) => s.nodesById);
   const outputsByNode = useProjectStore((s) => s.outputsByNode);
   const refreshNodeOutputs = useProjectStore((s) => s.refreshNodeOutputs);
+  const loadProject = useProjectStore((s) => s.loadProject);
   const template = templates.find((t) => t.node_type === node.node_type) ?? null;
   // Native execution always runs in-process (no backend to pick between) and
   // is deterministic (no seed field -- enqueue_node_job forces variants to 1
@@ -452,10 +452,23 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, isLastI
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paramsOpen, template, node.inputs, cropGroups, capabilities]);
 
+  // Always available, not just for the last cell in a track -- unlike an
+  // asset cell, a workflow node's own output(s) aren't guaranteed to still
+  // be sitting right after it in the same track (_claim_new_output_cell,
+  // worker/tasks.py, can grow one into a different track entirely when the
+  // home cell was already taken), so "is this the last node in its own
+  // track" stopped meaning "does this have nothing depending on it" a while
+  // ago. The backend sweeps every one of this node's own outputs
+  // (created_by_node_id) wherever they are, not just whatever's positionally
+  // after it (see nodes.py's delete_node) -- that can touch tracks well
+  // beyond this one cell, so a full reload is simpler and safer than trying
+  // to hand-patch the store to match (same reason BaseAssetNodeView's own
+  // deleteCell already reloads instead of just removing one id).
   const deleteCell = async () => {
-    if (!confirm("Delete this cell? This can't be undone.")) return;
+    if (!confirm("Delete this workflow cell and all of its own outputs? This can't be undone.")) return;
     await nodesApi.remove(node.id);
-    removeNode(node.id);
+    const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
+    if (projectId) await loadProject(projectId);
   };
 
   useEffect(() => {
@@ -626,17 +639,15 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, isLastI
             ⚙
           </button>
         )}
-        {isLastInTrack && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              deleteCell();
-            }}
-            title="Remove this cell entirely (only the last cell in a track can be deleted)"
-          >
-            ×
-          </button>
-        )}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            deleteCell();
+          }}
+          title="Remove this workflow cell and all of its own outputs"
+        >
+          ×
+        </button>
       </div>
 
       {!template && (

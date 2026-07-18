@@ -30,6 +30,11 @@ param_schema/param_mapping JSON:
   input_key on those fields is a dotted "<input>.<subkey>" path;
   template_engine.build_workflow knows to write those back as a nested
   assignment instead of a flat one.
+- A titled switch-style node's own gate (SWITCH_CLASS_TYPES, e.g.
+  ComfySwitchNode's "switch") when left as a bare literal true/false rather
+  than wired to a separate PrimitiveBoolean -- same "titled literal widget"
+  idea as the Primitive* case above, just for a one-off toggle nobody
+  bothered breaking out into its own Primitive node.
 
 Field/node "keys" used in the result are ComfyUI node ids from the uploaded
 workflow; the caller resolves those to node titles when building param_mapping
@@ -92,6 +97,19 @@ PRIMITIVE_CLASS_TYPES = {
     "PrimitiveInt": "int",
     "PrimitiveFloat": "float",
     "PrimitiveBoolean": "bool",
+}
+
+# Switch-style nodes' own gate -- keyed by class_type -> the input key
+# holding the literal true/false. Left wired to a separate PrimitiveBoolean
+# (a link, see _is_link), that upstream node is already the field
+# (PRIMITIVE_CLASS_TYPES below); left as a bare literal instead -- no
+# PrimitiveBoolean anywhere, just a hardcoded true/false on the switch
+# itself, e.g. a one-off toggle nobody bothered breaking out -- it's just as
+# much a "promoted widget" as one, so it's detected the same way: by the
+# switch node's own title, same as PRIMITIVE_CLASS_TYPES treats a titled
+# Primitive node's "value".
+SWITCH_CLASS_TYPES: dict[str, str] = {
+    "ComfySwitchNode": "switch",
 }
 
 # Well-known nodes whose widget bundles several scalars into one dict-valued
@@ -283,6 +301,13 @@ def analyze_workflow(workflow_json: dict) -> WorkflowAnalysis:
             value = inputs.get("value")
             if title and "value" in inputs and not _is_link(value):
                 _add_field(_slugify(title), title, PRIMITIVE_CLASS_TYPES[class_type], node_id, "value", value)
+
+        switch_key = SWITCH_CLASS_TYPES.get(class_type)
+        if switch_key is not None:
+            title = (node.get("_meta") or {}).get("title")
+            switch_value = inputs.get(switch_key)
+            if title and switch_key in inputs and not _is_link(switch_value):
+                _add_field(_slugify(title), title, "bool", node_id, switch_key, switch_value)
 
     # Dedupe by node id before counting -- a single node (e.g. the one KSampler)
     # legitimately backs several detected_fields, and that must not look like

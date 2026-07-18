@@ -56,7 +56,6 @@ export const tracksApi = {
     api.post<Track>("/api/tracks", data),
   nodes: (id: string) => api.get<NodeItem[]>(`/api/tracks/${id}/nodes`),
   update: (id: string, data: { row_index: number }) => api.patch<Track>(`/api/tracks/${id}`, data),
-  shift: (id: string, delta: number) => api.post<NodeItem[]>(`/api/tracks/${id}/shift`, { delta }),
   remove: (id: string) => api.delete(`/api/tracks/${id}`),
 };
 
@@ -72,6 +71,12 @@ export const nodesApi = {
     requested_variants?: number;
     backend_mode?: string;
     manual_backend_id?: string | null;
+    // Forwarding-only: passes an EXISTING node's own created_by_node_id
+    // through to a new node standing in for it (Grid.tsx's
+    // onSelectCandidate settling a candidate into the vacated cell) --
+    // never a fresh/arbitrary value. See backend's _ensure_output_binding,
+    // which validates this exactly like a PATCH would.
+    created_by_node_id?: string | null;
   }) => api.post<NodeItem>("/api/nodes", data),
   get: (id: string) => api.get<NodeItem>(`/api/nodes/${id}`),
   update: (id: string, data: Partial<NodeItem>) => api.patch<NodeItem>(`/api/nodes/${id}`, data),

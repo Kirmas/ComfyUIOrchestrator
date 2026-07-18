@@ -1,4 +1,4 @@
-import type { Capability, ParamField } from "./types";
+import type { Capability, ParamField, ParamMappingEntry } from "./types";
 
 export interface CropGroup {
   prefix: string;
@@ -33,49 +33,33 @@ export function detectCropGroups(fields: ParamField[]): CropGroup[] {
   return groups;
 }
 
-function titleIndex(workflowJson: Record<string, unknown>): { byTitle: Map<string, string>; byId: Map<string, string> } {
-  const byTitle = new Map<string, string>();
-  const byId = new Map<string, string>();
-  for (const [nodeId, node] of Object.entries(workflowJson)) {
-    const title = (node as { _meta?: { title?: string } } | undefined)?._meta?.title;
-    if (title) {
-      byTitle.set(title, nodeId);
-      byId.set(nodeId, title);
-    }
-  }
-  return { byTitle, byId };
-}
-
 /** Traces the crop node's own "image" input back to whichever schema image
  * field feeds it, using the same param_mapping/workflow_json a capability
  * already carries (see template_engine.py's build_workflow). There's no
  * naming convention linking a crop group to an image slot -- it's pure graph
  * topology -- so this has to walk the actual workflow graph rather than
  * guess (e.g. "first image field"), which would silently be wrong whenever
- * the crop applies to a later slot, as it does here (image_2, not image_1). */
+ * the crop applies to a later slot, as it does here (image_2, not image_1).
+ * Walks entirely by node_id (param_mapping entries carry it directly, and a
+ * ComfyUI link is already [node_id, output_index]) -- no title lookup
+ * needed, so two nodes sharing a title (ComfyUI doesn't enforce uniqueness)
+ * can't misroute this the way title-string-splitting once could. */
 export function resolveCropImageField(capability: Capability | undefined, group: CropGroup, schemaFields: ParamField[]): string | null {
   if (!capability) return null;
-  const paramMapping = (capability.config?.param_mapping ?? {}) as Record<string, string>;
+  const paramMapping = (capability.config?.param_mapping ?? {}) as Record<string, ParamMappingEntry>;
   const workflowJson = (capability.config?.workflow_json ?? {}) as Record<string, unknown>;
 
-  const xTarget = paramMapping[group.xField];
-  if (!xTarget || !xTarget.includes(".")) return null;
-  const cropTitle = xTarget.split(".")[0];
+  const cropTarget = paramMapping[group.xField];
+  if (!cropTarget?.node_id) return null;
 
-  const { byTitle, byId } = titleIndex(workflowJson);
-  const cropNodeId = byTitle.get(cropTitle);
-  if (!cropNodeId) return null;
-
-  const cropNode = workflowJson[cropNodeId] as { inputs?: { image?: unknown } } | undefined;
+  const cropNode = workflowJson[cropTarget.node_id] as { inputs?: { image?: unknown } } | undefined;
   const imageRef = cropNode?.inputs?.image;
   if (!Array.isArray(imageRef) || imageRef.length < 1) return null;
   const sourceNodeId = String(imageRef[0]);
-  const sourceTitle = byId.get(sourceNodeId);
-  if (!sourceTitle) return null;
 
   const imageFieldNames = new Set(schemaFields.filter((f) => f.type === "image" || f.type === "file").map((f) => f.name));
   for (const [fieldName, target] of Object.entries(paramMapping)) {
-    if (imageFieldNames.has(fieldName) && target === `${sourceTitle}.image`) return fieldName;
+    if (imageFieldNames.has(fieldName) && target.input_key === "image" && target.node_id === sourceNodeId) return fieldName;
   }
   return null;
 }
