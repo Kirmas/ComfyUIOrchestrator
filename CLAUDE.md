@@ -2,6 +2,20 @@
 
 Full product spec: [SPEC.md](SPEC.md) — read it for architecture, data model, and what's explicitly out of MVP scope.
 
+## Grid/node domain model (read this before asking what a "chart"/"grid"/etc. is)
+
+- **The Grid** (`frontend/src/components/Grid.tsx`) is a spreadsheet-like canvas: rows are **tracks** (`Track.row_index`), columns are **steps** (`Node.step_index`). Every column strictly alternates `asset`/`workflow` kind project-wide, starting from `Project.start_kind` (`kindForStep` in Grid.tsx mirrors `_kind_for_step` in `backend/app/api/routes/nodes.py`) — there's no per-cell choice of kind, it's dictated by column parity.
+- **Node kinds**: `asset` (holds/references an image/file/mesh) and `workflow` (a ComfyUI job definition; spans multiple rows to reach its image/file input slots — see row-span below).
+- **Node.node_type discriminator** (namespaced string):
+  - `asset.single` — a settled asset with exactly one resolved output.
+  - `asset.select` — an undecided candidates picker (several generated variants, none chosen yet); never draggable, never a compare source/target, no single "the" picture yet.
+  - `asset.refasset` — a lightweight *pointer* to another node's asset (made via "+ ref elsewhere"), not a real owned `Asset` row — see `RefAssetNodeView` in `NodeCell.tsx` and `resolveSlotAsset` in `slotResolution.ts`. Its whole point is placing the same underlying asset in more than one grid cell without duplicating the file.
+  - `template.<slug>` — a workflow node backed by a DB `NodeTemplate` row, created via the node-type wizard from an uploaded ComfyUI `workflow.json`.
+  - `native.<slug>` — a workflow node backed by a hardcoded Python class in `backend/app/core/node_types.py`'s `NATIVE_NODE_TYPES` registry (code-only, no DB row, a closed developer-authored set). E.g. `native.character_chart` (`CharacterChartBackend`) composes 4 head + 4 body reference images into one character sheet; its param_schema declares 8 image slots, so it always wants an 8-row span. `GET /api/node-templates` merges native + DB templates into one list so the frontend doesn't need to know which is which.
+- **Row-span paradigm**: there is no display-only/cosmetic position override anywhere — a node's rendered position is always exactly its `track_id` + `step_index`. A workflow node's desired row-span is the number of image/file fields its template declares (`slotFields()` in `templateUtils.ts`); "moving"/"resizing" it means actually reassigning `track_id`/`step_index` on it and its dependents (`applyRowMove`/`applyColumnMove`/`applyDiagonalMove` in Grid.tsx), never a visual-only change.
+- **A workflow's materialized output is rigidly bound to its creator** (`Node.created_by_node_id`): it can only sit at `creator.step_index + 1`, in a row within the creator's own span or a track spawned from it — enforced both in Grid.tsx's `isPositionAllowedFor` (UI-facing fast path) and, authoritatively, the backend's `_ensure_output_binding` in `api/routes/nodes.py`. When moving a workflow node together with its dependents, the workflow's own PATCH must be sent before its output's PATCH, or the backend still sees the old creator position and 409s "can only move among its own creator's positions" (2026-07-18 incident, fixed by putting the workflow node first in all three move functions' ordering).
+- **Compare** (`CompareModal.tsx`, overlay slider between two resolved images) and **reference/refasset** ("↗ Reference") are two unrelated features that happen to both involve picking another node — don't conflate them.
+
 ## Where this code runs
 
 This working copy (`~/comfy-orchestrator`) is the **development copy**, owned by `keresh`, editable directly (no sudo). It is separate from the **live production copy** at `/opt/comfy-orchestrator`, owned by the `orchestrator` system user, run as systemd unit `comfy-orchestrator-api`. The two are not symlinked or synced automatically — deploying means copying dev → prod on purpose (see below).

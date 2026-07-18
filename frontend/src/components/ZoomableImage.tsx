@@ -9,8 +9,8 @@ function clampZoom(z: number): number {
 
 /** Full-size image view with scroll-to-zoom and drag-to-pan, for inspecting
  * fine detail in a generated image rather than just seeing it fit-to-screen.
- * maxWidth/maxHeight default to filling a single-image modal -- CompareModal
- * passes narrower ones so two panes fit side by side. */
+ * maxWidth/maxHeight default to filling a single-image modal; override to
+ * embed it in a smaller container. */
 export function ZoomableImage({
   src,
   maxWidth = "calc(95vw - 24px)",
@@ -25,6 +25,34 @@ export function ZoomableImage({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
+
+  // Window-level listeners, not onPointerMove/onPointerUp on the container --
+  // pointer capture redirects those back to the element regardless of where
+  // the cursor physically is, which sounds like it should be enough, but in
+  // practice the drag still stuttered/reset once the cursor left the
+  // (transform doesn't grow the layout box, so still fit-to-screen-sized)
+  // container. Binding to `window` sidesteps element-boundary behavior
+  // entirely -- there's nothing for the cursor to "leave".
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (e: PointerEvent) => {
+      const start = dragRef.current;
+      if (!start) return;
+      setPan({ x: start.panX + (e.clientX - start.startX), y: start.panY + (e.clientY - start.startY) });
+    };
+    const onEnd = () => {
+      dragRef.current = null;
+      setDragging(false);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+    };
+  }, [dragging]);
 
   // A freshly opened image should always start fit-to-screen, not wherever
   // the previous one was left zoomed/panned to.
@@ -65,18 +93,8 @@ export function ZoomableImage({
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (zoom <= MIN_ZOOM) return;
-    e.currentTarget.setPointerCapture(e.pointerId);
-    setDragging(true);
     dragRef.current = { startX: e.clientX, startY: e.clientY, panX: pan.x, panY: pan.y };
-  };
-  const onPointerMove = (e: React.PointerEvent) => {
-    if (!dragRef.current) return;
-    const start = dragRef.current;
-    setPan({ x: start.panX + (e.clientX - start.startX), y: start.panY + (e.clientY - start.startY) });
-  };
-  const endDrag = () => {
-    dragRef.current = null;
-    setDragging(false);
+    setDragging(true);
   };
 
   return (
@@ -84,9 +102,6 @@ export function ZoomableImage({
       ref={containerRef}
       className="zoomable-image"
       onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={endDrag}
-      onPointerLeave={endDrag}
       onDoubleClick={() => (zoom > MIN_ZOOM ? resetZoom() : zoomBy(2))}
     >
       <img

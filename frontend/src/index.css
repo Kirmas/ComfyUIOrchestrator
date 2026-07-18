@@ -271,7 +271,6 @@ input, select, textarea {
 .compare-modal-content {
   position: relative;
   display: flex;
-  gap: 12px;
   max-width: 95vw;
   max-height: 95vh;
   padding: 12px;
@@ -280,10 +279,79 @@ input, select, textarea {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
 }
 
-.compare-pane {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.compare-slider {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  cursor: ew-resize;
+  user-select: none;
+  /* We handle the drag ourselves -- stop the browser's own scroll/pinch from
+     fighting the pointer gesture (see ZoomableImage's same reasoning). */
+  touch-action: none;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.compare-slider-base {
+  display: block;
+  max-width: calc(95vw - 24px);
+  max-height: calc(90vh - 24px);
+  width: auto;
+  height: auto;
+  user-select: none;
+  pointer-events: none;
+}
+
+.compare-slider-overlay {
+  position: absolute;
+  inset: 0;
+}
+
+.compare-slider-overlay img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  max-width: none;
+  max-height: none;
+}
+
+.compare-slider-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.compare-slider-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.5);
+}
+
+.compare-slider-grip {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.75);
+  color: white;
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 
 .zoomable-image {

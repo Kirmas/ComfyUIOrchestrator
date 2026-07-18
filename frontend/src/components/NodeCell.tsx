@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { createPortal } from "react-dom";
 import { resolveAssetUrl } from "../api/client";
 import { assetsApi, jobsApi, nodesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
@@ -386,16 +387,26 @@ function BaseAssetNodeView({
         <div style={{ fontSize: 10, color: "var(--warning)" }}>click an empty cell to place the reference…</div>
       )}
 
-      {fullSizeUrl && (
-        <div className="image-modal-backdrop" onClick={closeImage}>
-          <div className="image-modal-content" onClick={(e) => e.stopPropagation()}>
-            <button type="button" className="image-modal-close" onClick={closeImage} title="Close full-size image">
-              ×
-            </button>
-            <ZoomableImage src={fullSizeUrl} />
-          </div>
-        </div>
-      )}
+      {fullSizeUrl &&
+        createPortal(
+          // Portalled out of this cell's DOM subtree -- the cell wrapper
+          // (Grid.tsx) is HTML5 draggable={true}, and `draggable` on an
+          // ancestor claims the whole subtree as its native drag source
+          // regardless of position:fixed/z-index, so a pan gesture started
+          // inside this modal was being hijacked into a native image-drag
+          // (the ghost/duplicate you see mid-drag) instead of reaching
+          // ZoomableImage's own pointer handling. asset.select cells aren't
+          // draggable, which is why that modal never had this problem.
+          <div className="image-modal-backdrop" onClick={closeImage}>
+            <div className="image-modal-content" onClick={(e) => e.stopPropagation()}>
+              <button type="button" className="image-modal-close" onClick={closeImage} title="Close full-size image">
+                ×
+              </button>
+              <ZoomableImage src={fullSizeUrl} />
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -818,7 +829,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
 // either way. This is the ONE case position-based layout can't express (the
 // real asset is already spoken for elsewhere), so it's also the only node
 // left that gets a drawn arrow (Grid.tsx's edges memo, kind "ref").
-function RefAssetNodeView({ node, registerRef }: Props) {
+function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: Props) {
   const tracks = useProjectStore((s) => s.tracks);
   const nodesById = useProjectStore((s) => s.nodesById);
   const outputsByNode = useProjectStore((s) => s.outputsByNode);
@@ -845,7 +856,11 @@ function RefAssetNodeView({ node, registerRef }: Props) {
   };
 
   return (
-    <div ref={(el) => registerRef(node.id, el)} className={cx("node-cell", "node-cell-asset", "node-cell-ref", `status-${node.status}`)}>
+    <div
+      ref={(el) => registerRef(node.id, el)}
+      className={cx("node-cell", "node-cell-asset", "node-cell-ref", `status-${node.status}`, compareActive && "picking-target")}
+      onClick={() => compareActive && onCellClicked(node)}
+    >
       <div className="node-cell-header">
         <span>↗ Reference</span>
         <span className="status-pill">ref</span>
@@ -875,16 +890,22 @@ function RefAssetNodeView({ node, registerRef }: Props) {
         </button>
       </div>
 
-      {fullSizeUrl && (
-        <div className="image-modal-backdrop" onClick={() => setFullSizeUrl(null)}>
-          <div className="image-modal-content" onClick={(e) => e.stopPropagation()}>
-            <button type="button" className="image-modal-close" onClick={() => setFullSizeUrl(null)} title="Close full-size image">
-              ×
-            </button>
-            <ZoomableImage src={fullSizeUrl} />
-          </div>
-        </div>
-      )}
+      {fullSizeUrl &&
+        createPortal(
+          // Portalled out of this cell's DOM subtree -- see BaseAssetNodeView's
+          // identical modal for why (Grid.tsx's cell wrapper is HTML5
+          // draggable={true}, which hijacks pan gestures started anywhere
+          // inside it, portal or not, into a native drag).
+          <div className="image-modal-backdrop" onClick={() => setFullSizeUrl(null)}>
+            <div className="image-modal-content" onClick={(e) => e.stopPropagation()}>
+              <button type="button" className="image-modal-close" onClick={() => setFullSizeUrl(null)} title="Close full-size image">
+                ×
+              </button>
+              <ZoomableImage src={fullSizeUrl} />
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

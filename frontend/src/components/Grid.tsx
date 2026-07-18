@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { assetsApi, backendsApi, capabilitiesApi, nodesApi, nodeTemplatesApi, projectsApi, tracksApi } from "../api/endpoints";
 import { useProjectWs } from "../api/useProjectWs";
 import { useProjectStore } from "../state/projectStore";
+import { resolveSlotAsset } from "../slotResolution";
 import { slotFields } from "../templateUtils";
 import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project } from "../types";
 import { ArrowsOverlay, type Edge } from "./ArrowsOverlay";
@@ -34,7 +35,11 @@ function kindForStep(startKind: NodeKind, stepIndex: number): NodeKind {
 // actually made. Resolve the chooser (select ★ one) first, then it becomes
 // pickable (node_type flips to "asset.single").
 function isPickable(node: NodeItem, outputs: Asset[]): boolean {
-  return node.kind === "asset" && node.node_type !== "asset.select" && outputs.length > 0;
+  if (node.kind !== "asset" || node.node_type === "asset.select") return false;
+  // A refasset owns no Asset row of its own (outputs is always empty for
+  // it) -- it's pickable via its borrowed/resolved asset instead, resolved
+  // on demand in resolvePrimaryOutput.
+  return node.node_type === "asset.refasset" || outputs.length > 0;
 }
 
 export function Grid({ projectId }: { projectId: string }) {
@@ -619,15 +624,21 @@ export function Grid({ projectId }: { projectId: string }) {
 
   // Shared by every gesture below that needs "whatever this node's currently
   // resolved output is" (compareFor and the ref gestures) -- picks the
-  // selected candidate if there is one, else the first output.
-  const resolvePrimaryOutput = async (nodeId: string): Promise<Asset | null> => {
-    const outputs = await nodesApi.outputs(nodeId).catch(() => []);
+  // selected candidate if there is one, else the first output. A refasset
+  // owns no Asset row of its own, so it resolves through its "explicit"
+  // input pointer instead (same mechanism as its thumbnail, see
+  // resolveSlotAsset).
+  const resolvePrimaryOutput = async (node: NodeItem): Promise<Asset | null> => {
+    if (node.node_type === "asset.refasset") {
+      return resolveSlotAsset(node, 0, tracks, nodesById, outputsByNode, refreshNodeOutputs);
+    }
+    const outputs = await nodesApi.outputs(node.id).catch(() => []);
     return outputs.find((a) => a.selected) ?? outputs[0] ?? null;
   };
 
   const onCellClicked = async (node: NodeItem) => {
     if (compareFor && compareFor.nodeId !== node.id) {
-      const asset = await resolvePrimaryOutput(node.id);
+      const asset = await resolvePrimaryOutput(node);
       if (!asset) {
         alert("This cell has no outputs yet.");
         return;
@@ -834,7 +845,17 @@ export function Grid({ projectId }: { projectId: string }) {
     // already empty by the time its own PATCH runs, since nothing further
     // back in the direction of travel can be a live occupant of a cell
     // something further ahead hasn't already left.
+    // The workflow node itself always goes first, ahead of the vacate-order
+    // rule below -- a dependent that's this workflow's own materialized
+    // output is checked server-side against its creator's CURRENT (DB) step
+    // (_ensure_output_binding in nodes.py), so if the output's PATCH lands
+    // before the workflow's own, the backend still sees the old creator
+    // position and 409s the output's move as "not its creator's own
+    // position" (2026-07-18 incident: moving a workflow node with a
+    // materialized output rejected the output's own move this way).
     const orderedMoves = [...moves].sort((a, b) => {
+      if (a.node.id === workflowNode.id) return -1;
+      if (b.node.id === workflowNode.id) return 1;
       const ra = live.rowIndexOf(a.node.track_id);
       const rb = live.rowIndexOf(b.node.track_id);
       return delta > 0 ? rb - ra : ra - rb;
@@ -913,10 +934,15 @@ export function Grid({ projectId }: { projectId: string }) {
     // sends its input straight at the cell its OWN output hasn't vacated
     // yet. Furthest-along-the-shift-first ordering (descending current step
     // for a rightward move, ascending for a leftward one) avoids it the
-    // same way.
-    const orderedMoves = [...moves].sort((a, b) =>
-      stepDelta > 0 ? b.node.step_index - a.node.step_index : a.node.step_index - b.node.step_index,
-    );
+    // same way. But the workflow node itself must still go first, ahead of
+    // that rule -- see applyRowMove's identical guard for why (its
+    // materialized output is checked server-side against the creator's
+    // CURRENT DB step, which is stale until the workflow's own PATCH lands).
+    const orderedMoves = [...moves].sort((a, b) => {
+      if (a.node.id === workflowNode.id) return -1;
+      if (b.node.id === workflowNode.id) return 1;
+      return stepDelta > 0 ? b.node.step_index - a.node.step_index : a.node.step_index - b.node.step_index;
+    });
 
     let fresh: NodeItem = workflowNode;
     for (const { node, step } of orderedMoves) {
@@ -1042,8 +1068,14 @@ export function Grid({ projectId }: { projectId: string }) {
     // its target, so it can always go first; working backwards from there,
     // by the time any other node's turn comes, whatever used to be at its
     // target (if anything in this batch) has already moved out.
+    // The workflow node itself must still go first, ahead of this projection
+    // order -- see applyRowMove's identical guard for why (a materialized
+    // output dependent is checked server-side against its creator's CURRENT
+    // DB step, stale until the workflow's own PATCH lands).
     const rowDelta = targetRow - originalRow;
     const orderedMoves = [...moves].sort((a, b) => {
+      if (a.node.id === workflowNode.id) return -1;
+      if (b.node.id === workflowNode.id) return 1;
       const projA = live.rowIndexOf(a.node.track_id) * rowDelta + a.node.step_index * stepDelta;
       const projB = live.rowIndexOf(b.node.track_id) * rowDelta + b.node.step_index * stepDelta;
       return projB - projA;
@@ -1139,7 +1171,7 @@ export function Grid({ projectId }: { projectId: string }) {
   const createRefAssetAt = async (sourceNode: NodeItem, row: number, step: number) => {
     const targetTrack = trackByRowIndex.get(row);
     if (!targetTrack) return;
-    const asset = await resolvePrimaryOutput(sourceNode.id);
+    const asset = await resolvePrimaryOutput(sourceNode);
     if (!asset) {
       alert("This asset has no resolved output yet -- can't reference it.");
       return;
