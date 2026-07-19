@@ -4,6 +4,7 @@ import type {
   Asset,
   Backend,
   Capability,
+  DetectedField,
   InputRef,
   Job,
   NodeItem,
@@ -29,6 +30,9 @@ export const capabilitiesApi = {
   create: (data: Partial<Capability>) => api.post<Capability>("/api/capabilities", data),
   update: (id: string, data: Partial<Capability>) => api.patch<Capability>(`/api/capabilities/${id}`, data),
   remove: (id: string) => api.delete(`/api/capabilities/${id}`),
+  textFields: (id: string) => api.get<DetectedField[]>(`/api/capabilities/${id}/text-fields`),
+  updateTextField: (id: string, data: { node_id: string; input_key: string; value: string }) =>
+    api.patch<Capability>(`/api/capabilities/${id}/text-fields`, data),
 };
 
 export const nodeTemplatesApi = {

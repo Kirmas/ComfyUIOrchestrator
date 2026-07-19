@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiKeysApi, backendsApi, capabilitiesApi, nodeTemplatesApi } from "../api/endpoints";
-import type { ApiKeyPermission, Backend, Capability, NodeTemplate } from "../types";
+import type { ApiKeyPermission, Backend, Capability, DetectedField, NodeTemplate } from "../types";
 import { NodeTypeWizard } from "./NodeTypeWizard";
 
 /** Delete buttons below have no other feedback mechanism -- without this, a
@@ -99,6 +99,103 @@ function BackendsSection({ items, reload }: { items: Backend[]; reload: () => vo
   );
 }
 
+/** Edits the literal prompt-shaped text values baked directly into a
+ * capability's own workflow_json (CLIPTextEncode/TextEncodeQwenImageEditPlus
+ * text, or a titled PrimitiveString(Multiline) value) that aren't already
+ * exposed as a param_schema field -- see workflow_analyzer.py's
+ * find_editable_text_fields. Until now the only way to change one of these
+ * was re-uploading the whole workflow.json for this capability. */
+function CapabilityTextFieldsModal({ capability, onClose }: { capability: Capability; onClose: () => void }) {
+  const [fields, setFields] = useState<DetectedField[] | null>(null);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [savingKey, setSavingKey] = useState<string | null>(null);
+  const [savedKey, setSavedKey] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Dragging a <textarea>'s native resize handle past the modal's edge lands
+  // the mouseup (and the click it synthesizes) directly on the backdrop --
+  // same element a real "click outside to close" click would target -- so a
+  // plain onClick={onClose} on the backdrop closed the modal mid-resize.
+  // Only treating it as "outside" when the *mousedown* also started on the
+  // backdrop itself (not just where the pointer happened to end up) tells
+  // the two apart.
+  const mouseDownOnBackdrop = useRef(false);
+
+  useEffect(() => {
+    capabilitiesApi
+      .textFields(capability.id)
+      .then((fs) => {
+        setFields(fs);
+        setValues(Object.fromEntries(fs.map((f) => [f.key, String(f.default ?? "")])));
+      })
+      .catch((err) => setLoadError(describeError(err)));
+  }, [capability.id]);
+
+  const save = async (f: DetectedField) => {
+    setSavingKey(f.key);
+    setSavedKey(null);
+    try {
+      await capabilitiesApi.updateTextField(capability.id, { node_id: f.node_id, input_key: f.input_key, value: values[f.key] ?? "" });
+      setSavedKey(f.key);
+    } catch (err) {
+      alert(describeError(err));
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  return (
+    <div
+      className="image-modal-backdrop"
+      onMouseDown={(e) => {
+        mouseDownOnBackdrop.current = e.target === e.currentTarget;
+      }}
+      onClick={() => {
+        if (mouseDownOnBackdrop.current) onClose();
+      }}
+    >
+      <div
+        className="image-modal-content"
+        onClick={(e) => e.stopPropagation()}
+        style={{ width: 860, maxWidth: "92vw", maxHeight: "85vh", overflowY: "auto", display: "flex", flexDirection: "column" }}
+      >
+        <div className="node-cell-header">
+          <span>Prompt fields</span>
+          <button className="image-modal-close" onClick={onClose} title="Close">
+            ×
+          </button>
+        </div>
+        {loadError && <div className="error-text">{loadError}</div>}
+        {fields === null && !loadError && <div style={{ fontSize: 12, color: "var(--text-dim)" }}>Loading…</div>}
+        {fields?.length === 0 && (
+          <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+            No baked-in text fields found — this workflow's prompts are all already exposed as regular params, or it has none.
+          </div>
+        )}
+        {fields?.map((f) => (
+          <div key={f.key} style={{ marginTop: 12 }}>
+            <label style={{ display: "block", fontSize: 12, marginBottom: 4, color: "var(--text-dim)" }}>{f.label}</label>
+            <textarea
+              rows={14}
+              style={{ width: "100%", minHeight: 240, resize: "vertical" }}
+              value={values[f.key] ?? ""}
+              onChange={(e) => {
+                setValues((v) => ({ ...v, [f.key]: e.target.value }));
+                setSavedKey(null);
+              }}
+            />
+            <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
+              <button disabled={savingKey === f.key} onClick={() => save(f)}>
+                {savingKey === f.key ? "Saving…" : "Save"}
+              </button>
+              {savedKey === f.key && <span style={{ fontSize: 11, color: "var(--text-dim)" }}>saved</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function NodeTypeCard({
   template,
   backends,
@@ -121,6 +218,7 @@ function NodeTypeCard({
   reloadTemplates: () => void;
 }) {
   const backendName = (id: string) => backends.find((b) => b.id === id)?.name ?? id;
+  const [promptsFor, setPromptsFor] = useState<Capability | null>(null);
 
   return (
     <div className="settings-section node-type-card">
@@ -157,12 +255,22 @@ function NodeTypeCard({
                 />
               </td>
               <td>
+                {/* Baked-in workflow_json text (prompts) is a comfyui_workflow-only
+                    concept -- api_call/native capabilities have no workflow graph
+                    for find_editable_text_fields to walk. */}
+                {c.execution_type === "comfyui_workflow" && (
+                  <button onClick={() => setPromptsFor(c)} title="Edit prompt text baked directly into this workflow">
+                    prompts
+                  </button>
+                )}
                 <button onClick={() => tryDelete(() => capabilitiesApi.remove(c.id), reloadCapabilities)}>delete</button>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
+
+      {promptsFor && <CapabilityTextFieldsModal capability={promptsFor} onClose={() => setPromptsFor(null)} />}
 
       {wizardOpen ? (
         <NodeTypeWizard

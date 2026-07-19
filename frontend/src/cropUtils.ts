@@ -45,7 +45,14 @@ export function detectCropGroups(fields: ParamField[]): CropGroup[] {
  * needed, so two nodes sharing a title (ComfyUI doesn't enforce uniqueness)
  * can't misroute this the way title-string-splitting once could. */
 export function resolveCropImageField(capability: Capability | undefined, group: CropGroup, schemaFields: ParamField[]): string | null {
-  if (!capability) return null;
+  if (!capability) {
+    // Native node types (e.g. native.crop) have no capability/workflow_json
+    // graph to walk -- but they also don't need one: there's nothing to
+    // disambiguate when the schema declares exactly one image/file field,
+    // so that's unambiguously the crop group's source.
+    const imageFields = schemaFields.filter((f) => f.type === "image" || f.type === "file");
+    return imageFields.length === 1 ? imageFields[0].name : null;
+  }
   const paramMapping = (capability.config?.param_mapping ?? {}) as Record<string, ParamMappingEntry>;
   const workflowJson = (capability.config?.workflow_json ?? {}) as Record<string, unknown>;
 

@@ -44,6 +44,9 @@ class ApiBackend:
             return JobStatus.done
         return JobStatus.pending
 
+    async def error_detail(self, job_id: str) -> str | None:
+        return _ERRORS.get(job_id)
+
     async def result(self, job_id: str) -> list[AssetRef]:
         return _RESULTS.pop(job_id, [])
 

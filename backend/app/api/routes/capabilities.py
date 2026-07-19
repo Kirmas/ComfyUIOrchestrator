@@ -4,9 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.workflow_analyzer import find_editable_text_fields
 from app.db.base import get_db
 from app.db.models import Capability
-from app.schemas.schemas import CapabilityCreate, CapabilityRead, CapabilityUpdate
+from app.schemas.schemas import CapabilityCreate, CapabilityRead, CapabilityTextFieldUpdate, CapabilityUpdate, DetectedFieldOut
 
 router = APIRouter(prefix="/api/capabilities", tags=["capabilities"])
 
@@ -48,6 +49,44 @@ async def update_capability(capability_id: uuid.UUID, payload: CapabilityUpdate,
         raise HTTPException(404, "Capability not found")
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(capability, field, value)
+    await db.commit()
+    await db.refresh(capability)
+    return capability
+
+
+@router.get("/{capability_id}/text-fields", response_model=list[DetectedFieldOut])
+async def list_capability_text_fields(capability_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Prompt-shaped literal text values baked into this capability's own
+    workflow_json (see find_editable_text_fields) -- the ones a user would
+    otherwise have to re-upload the whole workflow to change."""
+    capability = await db.get(Capability, capability_id)
+    if not capability:
+        raise HTTPException(404, "Capability not found")
+    workflow_json = capability.config.get("workflow_json")
+    if not isinstance(workflow_json, dict):
+        return []
+    param_mapping = capability.config.get("param_mapping") or {}
+    return find_editable_text_fields(workflow_json, param_mapping)
+
+
+@router.patch("/{capability_id}/text-fields", response_model=CapabilityRead)
+async def update_capability_text_field(capability_id: uuid.UUID, payload: CapabilityTextFieldUpdate, db: AsyncSession = Depends(get_db)):
+    capability = await db.get(Capability, capability_id)
+    if not capability:
+        raise HTTPException(404, "Capability not found")
+    workflow_json = capability.config.get("workflow_json")
+    if not isinstance(workflow_json, dict) or payload.node_id not in workflow_json:
+        raise HTTPException(400, f"workflow has no node '{payload.node_id}'")
+    node = workflow_json[payload.node_id]
+    if payload.input_key not in node.get("inputs", {}):
+        raise HTTPException(400, f"node '{payload.node_id}' has no input '{payload.input_key}'")
+
+    # config is a plain JSON column (no Mutable* tracking) -- an in-place
+    # nested mutation wouldn't be seen as a change by the ORM, so build a
+    # whole new config dict and reassign the attribute, same as a full
+    # PATCH /capabilities/{id} with a replaced config already does.
+    new_workflow_json = {**workflow_json, payload.node_id: {**node, "inputs": {**node["inputs"], payload.input_key: payload.value}}}
+    capability.config = {**capability.config, "workflow_json": new_workflow_json}
     await db.commit()
     await db.refresh(capability)
     return capability

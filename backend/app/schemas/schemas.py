@@ -62,6 +62,12 @@ class CapabilityRead(ORMModel):
     created_at: datetime
 
 
+class CapabilityTextFieldUpdate(BaseModel):
+    node_id: str
+    input_key: str
+    value: str
+
+
 # ---------- NodeTemplate ----------
 class NodeTemplateCreate(BaseModel):
     node_type_slug: str

@@ -31,7 +31,26 @@ logger = logging.getLogger(__name__)
 MAX_SEED_VALUE = 2**50 - 1
 
 
-async def _selected_or_latest_output(db, node: Node) -> Asset | None:
+async def _explicit_ref_asset(db, ref: dict) -> Asset | None:
+    asset_id = ref.get("asset_id") or ref.get("output_id")
+    return await db.get(Asset, asset_id) if asset_id else None
+
+
+async def selected_or_latest_output(db, node: Node) -> Asset | None:
+    """A node's settled asset -- the one flagged selected, else the most
+    recently created. asset.refasset is a special case: per its own
+    docstring (see node_types.py / CLAUDE.md's grid model section) it owns
+    no Asset row of its own, just an "explicit" InputRef pointing at the
+    real one elsewhere, so every position-based lookup that can land on one
+    (self_prev, track_below_prev, cell_index -- a ref stands in for a real
+    asset cell, so anything scanning by row/step can equally land on it)
+    needs to follow that pointer instead of querying Asset.node_id, which
+    would come up empty and silently drop the slot (2026-07-18 incident:
+    native.character_chart's compose KeyError'd on a missing head_1 because
+    that cell held a refasset)."""
+    if node.node_type == "asset.refasset":
+        ref = (node.inputs or [{}])[0]
+        return await _explicit_ref_asset(db, ref)
     result = await db.execute(select(Asset).where(Asset.node_id == node.id).order_by(Asset.created_at))
     assets = list(result.scalars().all())
     if not assets:
@@ -51,7 +70,7 @@ async def _prev_asset_node_output(db, track_id, step_index) -> Asset | None:
     prev_node = result.scalars().first()
     if prev_node is None:
         return None
-    return await _selected_or_latest_output(db, prev_node)
+    return await selected_or_latest_output(db, prev_node)
 
 
 async def _asset_at_cell_index(db, node: Node, index: int) -> Asset | None:
@@ -84,7 +103,7 @@ async def _asset_at_cell_index(db, node: Node, index: int) -> Asset | None:
     asset_node = result.scalars().first()
     if asset_node is None:
         return None
-    return await _selected_or_latest_output(db, asset_node)
+    return await selected_or_latest_output(db, asset_node)
 
 
 async def own_output_nodes(db, workflow_node_id) -> list[Node]:
@@ -262,8 +281,7 @@ async def resolve_node_inputs(db, node: Node, param_schema: dict[str, Any] | Non
             # track -- "below" needs no extra slack to skip past it.
             asset = await _prev_asset_node_output(db, below.id, node.step_index) if below else None
         elif ref_type in ("upload", "explicit"):
-            asset_id = ref.get("asset_id") or ref.get("output_id")
-            asset = await db.get(Asset, asset_id) if asset_id else None
+            asset = await _explicit_ref_asset(db, ref)
         elif ref_type == "cell_index":
             idx = ref.get("index")
             asset = await _asset_at_cell_index(db, node, idx) if idx is not None else None
@@ -563,7 +581,8 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                 )
 
             if status == BackendJobStatus.error:
-                raise RuntimeError("backend reported execution error")
+                detail = await choice.instance.error_detail(external_job_id)
+                raise RuntimeError(detail or "backend reported execution error")
 
             await _materialize_job_result(db, job, node, effective, choice.instance, external_job_id, project_id)
 
@@ -693,7 +712,8 @@ async def _resume_orphaned_job(job_id: str) -> None:
                 _poll_until_terminal(instance, job.external_job_id), settings.job_timeout_seconds
             )
             if status == BackendJobStatus.error:
-                raise RuntimeError("backend reported execution error")
+                detail = await instance.error_detail(job.external_job_id)
+                raise RuntimeError(detail or "backend reported execution error")
             await _materialize_job_result(db, job, node, effective, instance, job.external_job_id, project_id)
         except Exception as exc:
             logger.exception("resumed orphaned job %s failed", job_id)
@@ -770,7 +790,8 @@ async def recover_orphaned_jobs() -> None:
                     await _finalize_node_if_done(db, node.id, project_id)
                     recovered += 1
                 elif status == BackendJobStatus.error:
-                    await _fail_orphaned_job(db, job, project_id, "backend reported execution error")
+                    detail = await instance.error_detail(job.external_job_id)
+                    await _fail_orphaned_job(db, job, project_id, detail or "backend reported execution error")
                     await _finalize_node_if_done(db, node.id, project_id)
                     failed += 1
                 else:

@@ -44,6 +44,9 @@ class NativeBackend:
             return JobStatus.done
         return JobStatus.pending
 
+    async def error_detail(self, job_id: str) -> str | None:
+        return _ERRORS.get(job_id)
+
     async def result(self, job_id: str) -> list[AssetRef]:
         return _RESULTS.pop(job_id, [])
 
@@ -126,8 +129,25 @@ class CharacterChartBackend(NativeBackend):
         return [AssetRef(data=buf.getvalue(), mime_type="image/png", kind="image")]
 
 
+class CropBackend(NativeBackend):
+    handler = "crop"
+
+    async def _run(self, execution_config: dict, inputs: dict[str, Any]) -> list[AssetRef]:
+        image = Image.open(BytesIO(inputs["image"])).convert("RGB")
+        x = int(inputs.get("crop_x", 0))
+        y = int(inputs.get("crop_y", 0))
+        width = int(inputs.get("crop_width", image.width))
+        height = int(inputs.get("crop_height", image.height))
+        cropped = image.crop((x, y, x + width, y + height))
+
+        buf = BytesIO()
+        cropped.save(buf, format="PNG")
+        return [AssetRef(data=buf.getvalue(), mime_type="image/png", kind="image")]
+
+
 HANDLERS: dict[str, type[NativeBackend]] = {
     CharacterChartBackend.handler: CharacterChartBackend,
+    CropBackend.handler: CropBackend,
 }
 
 

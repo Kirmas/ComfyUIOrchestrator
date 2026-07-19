@@ -202,6 +202,40 @@ def _is_link(value: Any) -> bool:
     return isinstance(value, list) and len(value) == 2 and isinstance(value[0], str)
 
 
+def find_editable_text_fields(workflow_json: dict, param_mapping: dict) -> list[DetectedField]:
+    """Literal prompt-shaped text values baked directly into an *existing*
+    capability's workflow_json -- a CLIPTextEncode/TextEncodeQwenImageEditPlus
+    node's text, or a titled PrimitiveString(Multiline) node's value -- that
+    aren't already exposed as a param_schema field via param_mapping, so
+    today the only way to change them is re-uploading the whole workflow.
+    Reuses the same class_type detection analyze_workflow uses at wizard
+    time, minus the sampler-link-tracing: this walks every matching node
+    directly (wired into a sampler or not), against a workflow_json that's
+    already live on a capability rather than a fresh upload."""
+    mapped = {(target.get("node_id"), target.get("input_key")) for target in param_mapping.values()}
+    fields: list[DetectedField] = []
+    for node_id, node in workflow_json.items():
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type")
+        text_key = PROMPT_CLASS_TYPES.get(class_type)
+        if text_key is None and PRIMITIVE_CLASS_TYPES.get(class_type) == "text":
+            text_key = "value"
+        if text_key is None:
+            continue
+
+        inputs = node.get("inputs", {})
+        value = inputs.get(text_key)
+        if text_key not in inputs or _is_link(value) or (node_id, text_key) in mapped:
+            continue
+
+        title = (node.get("_meta") or {}).get("title") or class_type or node_id
+        fields.append(
+            DetectedField(key=_slugify(f"{title}_{node_id}"), label=title, type="text", node_id=node_id, input_key=text_key, default=value)
+        )
+    return fields
+
+
 def analyze_workflow(workflow_json: dict) -> WorkflowAnalysis:
     if not isinstance(workflow_json, dict):
         raise ValueError("workflow must be a JSON object of node_id -> node")

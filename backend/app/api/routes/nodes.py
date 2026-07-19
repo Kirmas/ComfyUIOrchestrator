@@ -10,7 +10,7 @@ from app.core.storage import build_asset_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Job, Node, NodeKind, NodeStatus, Project, Track
 from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeRead, NodeUpdate
-from app.worker.tasks import enqueue_node_job, own_output_nodes
+from app.worker.tasks import enqueue_node_job, own_output_nodes, selected_or_latest_output
 
 router = APIRouter(prefix="/api/nodes", tags=["nodes"])
 
@@ -219,8 +219,15 @@ async def delete_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
 @router.get("/{node_id}/outputs", response_model=list[AssetRead])
 async def list_node_outputs(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Asset).where(Asset.node_id == node_id).order_by(Asset.created_at))
-    assets = result.scalars().all()
+    # asset.refasset owns no Asset row of its own -- see selected_or_latest_output's
+    # docstring -- so its "outputs" are whatever real asset its explicit ref points at.
+    node = await db.get(Node, node_id)
+    if node is not None and node.node_type == "asset.refasset":
+        pointed = await selected_or_latest_output(db, node)
+        assets = [pointed] if pointed else []
+    else:
+        result = await db.execute(select(Asset).where(Asset.node_id == node_id).order_by(Asset.created_at))
+        assets = result.scalars().all()
     out = []
     for asset in assets:
         item = AssetRead.model_validate(asset)

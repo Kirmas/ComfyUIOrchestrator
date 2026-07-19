@@ -104,6 +104,26 @@ class ComfyUIBackend:
             # up yet, so treat that as still pending rather than an error.
             return JobStatus.error if history is not None else JobStatus.pending
 
+    async def error_detail(self, job_id: str) -> str | None:
+        """Pulls the "execution_error" message's exception_message/node_type
+        out of history["status"]["messages"] -- the same payload status()
+        already inspects for status_str/execution_error, just read for its
+        content this time instead of merely its presence. None if history is
+        gone (evicted, or the prompt never got that far) or carries no such
+        message -- callers fall back to a generic string in that case."""
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=30) as client:
+            history = await self._get_history_entry(client, job_id)
+            if history is None:
+                return None
+            for msg_type, data in history.get("status", {}).get("messages", []):
+                if msg_type == "execution_error":
+                    node_type = data.get("node_type")
+                    exception_message = data.get("exception_message")
+                    if node_type and exception_message:
+                        return f"{node_type}: {exception_message}"
+                    return exception_message or node_type
+            return None
+
     async def queue_position(self, job_id: str) -> int | None:
         """0 if currently executing, else this job's 0-based distance from the
         front of ComfyUI's pending queue, or None if it's not in the queue at

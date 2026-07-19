@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.native_backend import CharacterChartBackend, NativeBackend
+from app.core.native_backend import CharacterChartBackend, CropBackend, NativeBackend
 from app.db.models import Node, NodeTemplate
 
 
@@ -50,6 +50,21 @@ NATIVE_NODE_TYPES: dict[str, NativeNodeType] = {
         },
         defaults={"width": 7680, "height": 4320, "head_height_factor": 1.0},
         backend_cls=CharacterChartBackend,
+    ),
+    "crop": NativeNodeType(
+        slug="crop",
+        name="Crop",
+        param_schema={
+            "fields": [
+                {"name": "image", "type": "image", "label": "Image", "required": True},
+                {"name": "crop_x", "type": "int", "label": "Crop X", "default": 0},
+                {"name": "crop_y", "type": "int", "label": "Crop Y", "default": 0},
+                {"name": "crop_width", "type": "int", "label": "Crop Width", "default": 512},
+                {"name": "crop_height", "type": "int", "label": "Crop Height", "default": 512},
+            ]
+        },
+        defaults={"crop_x": 0, "crop_y": 0, "crop_width": 512, "crop_height": 512},
+        backend_cls=CropBackend,
     ),
 }
 

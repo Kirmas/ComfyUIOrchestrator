@@ -36,6 +36,13 @@ class JobBackend(Protocol):
 
     async def status(self, job_id: str) -> JobStatus: ...
 
+    async def error_detail(self, job_id: str) -> str | None:
+        """Human-readable reason for a JobStatus.error, if the backend has one
+        beyond the bare status -- e.g. the exception message a native/API
+        backend caught, or ComfyUI's own execution_error payload. None if
+        there's nothing more specific than "it errored"."""
+        ...
+
     async def result(self, job_id: str) -> list[AssetRef]: ...
 
     async def capacity(self) -> CapacityInfo: ...
