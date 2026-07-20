@@ -64,6 +64,18 @@ class Backend(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_stats: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    # api_provider kind only -- one key per Backend row, not per node type:
+    # a Capability just points its backend_id at whichever api_provider
+    # Backend it wants to use, so any number of node types can share the
+    # same key. Wanting a second key means adding a second api_provider
+    # Backend, not a second grant on the same one. `provider` is the
+    # PROVIDERS registry key (api_backend.py), e.g. "nano_banana".
+    provider: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    api_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # Max successful api_call jobs in the trailing 24h across every node type
+    # that shares this backend's key -- NULL means unlimited. See
+    # api_usage_log and dispatcher._backend_within_quota.
+    daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     capabilities: Mapped[list["Capability"]] = relationship(back_populates="backend", cascade="all, delete-orphan")
@@ -174,6 +186,12 @@ class Node(Base):
     manual_backend_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("backends.id", ondelete="SET NULL"), nullable=True
     )
+    # Explicit opt-in gate for paid api_call capabilities, independent of
+    # backend_mode -- "auto" (and even "api_only"/"manual" pointed at an
+    # api_provider backend) never make a paid call unless this is also True.
+    # Defaults False so a node never starts spending money by accident; see
+    # dispatcher.eligible_capabilities.
+    use_api: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Set exactly once, by _get_or_create_output_asset_node (worker/tasks.py)
     # when it materializes a workflow's result as a following asset node --
@@ -238,12 +256,17 @@ class Asset(Base):
     node: Mapped["Node"] = relationship(back_populates="outputs", foreign_keys=[node_id])
 
 
-class ApiKeyPermission(Base):
-    __tablename__ = "api_key_permissions"
+class ApiUsageLog(Base):
+    """One row per successful paid API call (worker/tasks.py's run_variant_job,
+    right after _materialize_job_result succeeds for an api_call capability) --
+    a rolling COUNT(*) over the trailing 24h against this table is
+    Backend.daily_limit's enforcement, chosen over a mutable used_today/
+    reset_at counter to sidestep day-rollover races between concurrent
+    workers, and it gets a spend history for free."""
+
+    __tablename__ = "api_usage_log"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
-    provider: Mapped[str] = mapped_column(String(128), nullable=False)
-    node_type_slug: Mapped[str] = mapped_column(String(128), nullable=False)
-    api_key: Mapped[str] = mapped_column(String(1024), nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    backend_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("backends.id", ondelete="CASCADE"), nullable=False)
+    node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

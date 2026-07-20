@@ -10,7 +10,7 @@ from app.core.storage import build_asset_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Job, Node, NodeKind, NodeStatus, Project, Track
 from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeRead, NodeUpdate
-from app.worker.tasks import enqueue_node_job, own_output_nodes, selected_or_latest_output
+from app.worker.tasks import enqueue_node_job, has_room_for_output, own_output_nodes, selected_or_latest_output
 
 router = APIRouter(prefix="/api/nodes", tags=["nodes"])
 
@@ -278,6 +278,23 @@ async def generate_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         raise HTTPException(400, "Only workflow-kind nodes can be generated -- asset nodes are filled by upload or by their source workflow")
     if node.status in (NodeStatus.queued, NodeStatus.running):
         raise HTTPException(409, "Node is already generating")
+
+    # Checked here, before ever touching a backend -- has_room_for_output
+    # mirrors the same search/insert-or-raise _get_or_create_output_asset_node
+    # runs once a job finishes (worker/tasks.py's _locate_output_row), so a
+    # generation that would end up unable to place its output (because doing
+    # so would split some OTHER node's own row-span apart) gets rejected
+    # up front instead of wasting a real backend generation on it. Skipped
+    # only if there's no template to resolve is_native from -- that already
+    # fails generation its own way below.
+    effective = await resolve_effective_template(db, node)
+    if effective is not None and not await has_room_for_output(db, node, effective.is_native):
+        raise HTTPException(
+            409,
+            "This node's output cell is blocked in a way that can't be resolved automatically -- inserting a row here would "
+            "split another node's own row-span apart. Move things around manually first.",
+        )
+
     await job_queue.enqueue(enqueue_node_job, str(node.id))
     node.status = NodeStatus.queued
     await db.commit()
@@ -306,7 +323,6 @@ async def reroll_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Node not found")
     if old.kind != NodeKind.workflow:
         raise HTTPException(400, "Only workflow-kind nodes can be re-rolled -- re-upload to an asset node instead")
-    old.status = NodeStatus.discarded
 
     # Discard every output the old node ever produced too (own_output_nodes,
     # not just whatever's positionally at its old cell -- see
@@ -319,6 +335,20 @@ async def reroll_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     for old_output in await own_output_nodes(db, old.id):
         old_output.status = NodeStatus.discarded
 
+    # Checked here, before creating anything -- same reasoning and same
+    # failure mode as generate_node's own pre-check (see its comment,
+    # 2026-07-20 incident): old's own prior outputs were just discarded
+    # above, so they don't count against this.
+    effective = await resolve_effective_template(db, old)
+    if effective is not None and not await has_room_for_output(db, old, effective.is_native):
+        raise HTTPException(
+            409,
+            "This node's output cell is blocked in a way that can't be resolved automatically -- inserting a row here would "
+            "split another node's own row-span apart. Move things around manually first.",
+        )
+
+    old.status = NodeStatus.discarded
+
     new_node = Node(
         track_id=old.track_id,
         step_index=old.step_index,
@@ -330,6 +360,7 @@ async def reroll_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         requested_variants=old.requested_variants,
         backend_mode=old.backend_mode,
         manual_backend_id=old.manual_backend_id,
+        use_api=old.use_api,
         status=NodeStatus.queued,
     )
     db.add(new_node)

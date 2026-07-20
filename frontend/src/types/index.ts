@@ -14,6 +14,13 @@ export interface Backend {
   is_active: boolean;
   last_heartbeat_at: string | null;
   last_stats: Record<string, unknown>;
+  // api_provider kind only -- one key per Backend row, shared by every node
+  // type that points a Capability at it. `has_api_key`/`used_today` are
+  // read-only (never the raw key; used_today is computed server-side).
+  provider: string | null;
+  has_api_key: boolean;
+  daily_limit: number | null;
+  used_today: number;
   created_at: string;
 }
 
@@ -105,6 +112,10 @@ export interface NodeItem {
   requested_variants: number;
   backend_mode: BackendMode;
   manual_backend_id: string | null;
+  // Explicit opt-in for paid api_call capabilities -- never implied by
+  // backend_mode="auto"/"api_only". See backend/app/db/models.py's
+  // Node.use_api docstring.
+  use_api: boolean;
   error: string | null;
   // Read-only, set exactly once by the backend when a workflow node
   // materializes its result as this (following) asset node -- see
@@ -141,14 +152,6 @@ export interface Job {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
-}
-
-export interface ApiKeyPermission {
-  id: string;
-  provider: string;
-  node_type_slug: string;
-  enabled: boolean;
-  created_at: string;
 }
 
 export interface ProgressEvent {

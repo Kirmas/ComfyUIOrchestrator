@@ -66,6 +66,15 @@ class GeminiImageBackend(ApiBackend):
 
     provider = "nano_banana"
     _ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    # Per Gemini's own imageConfig.aspectRatio/imageSize enums -- "Auto" (the
+    # fields' own default) deliberately omits the corresponding key from
+    # generationConfig.imageConfig entirely rather than sending it, letting
+    # the model pick instead of forcing a value. Note imageSize is honored
+    # reliably only by gemini-3-pro-image-preview as of 2026-07 -- the flash
+    # variants largely ignore it and stay ~1K regardless of what's sent
+    # (documented upstream behavior, not a bug here).
+    _AUTO_ASPECT_RATIO = "Auto"
+    _AUTO_IMAGE_SIZE = "Auto"
 
     async def _submit_request(self, execution_config: dict, inputs: dict[str, Any]) -> list[AssetRef]:
         param_mapping = execution_config.get("param_mapping", {})
@@ -83,12 +92,28 @@ class GeminiImageBackend(ApiBackend):
                     {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(value).decode("ascii")}}
                 )
 
+        body: dict[str, Any] = {"contents": [{"parts": parts}]}
+
+        image_config: dict[str, Any] = {}
+        aspect_ratio_field = param_mapping.get("aspect_ratio", "aspect_ratio")
+        aspect_ratio = inputs.get(aspect_ratio_field)
+        if aspect_ratio and aspect_ratio != self._AUTO_ASPECT_RATIO:
+            image_config["aspectRatio"] = aspect_ratio
+
+        image_size_field = param_mapping.get("image_size", "image_size")
+        image_size = inputs.get(image_size_field)
+        if image_size and image_size != self._AUTO_IMAGE_SIZE:
+            image_config["imageSize"] = image_size
+
+        if image_config:
+            body["generationConfig"] = {"imageConfig": image_config}
+
         url = self._ENDPOINT.format(model=model_id)
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 url,
                 params={"key": self.api_key},
-                json={"contents": [{"parts": parts}]},
+                json=body,
             )
             resp.raise_for_status()
             data = resp.json()

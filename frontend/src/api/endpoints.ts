@@ -1,6 +1,5 @@
 import { api } from "./client";
 import type {
-  ApiKeyPermission,
   Asset,
   Backend,
   Capability,
@@ -17,8 +16,15 @@ import type {
 
 export const backendsApi = {
   list: () => api.get<Backend[]>("/api/backends"),
-  create: (data: { name: string; kind: string; base_url?: string | null }) => api.post<Backend>("/api/backends", data),
-  update: (id: string, data: Partial<Backend>) => api.patch<Backend>(`/api/backends/${id}`, data),
+  create: (data: {
+    name: string;
+    kind: string;
+    base_url?: string | null;
+    provider?: string | null;
+    api_key?: string | null;
+    daily_limit?: number | null;
+  }) => api.post<Backend>("/api/backends", data),
+  update: (id: string, data: Partial<Backend> & { api_key?: string }) => api.patch<Backend>(`/api/backends/${id}`, data),
   remove: (id: string) => api.delete(`/api/backends/${id}`),
 };
 
@@ -75,6 +81,7 @@ export const nodesApi = {
     requested_variants?: number;
     backend_mode?: string;
     manual_backend_id?: string | null;
+    use_api?: boolean;
     // Forwarding-only: passes an EXISTING node's own created_by_node_id
     // through to a new node standing in for it (Grid.tsx's
     // onSelectCandidate settling a candidate into the vacated cell) --
@@ -112,13 +119,6 @@ export const assetsApi = {
 export const jobsApi = {
   get: (id: string) => api.get<Job>(`/api/jobs/${id}`),
   cancel: (id: string) => api.post<Job>(`/api/jobs/${id}/cancel`),
-};
-
-export const apiKeysApi = {
-  list: () => api.get<ApiKeyPermission[]>("/api/api-keys"),
-  create: (data: { provider: string; node_type_slug: string; api_key: string; enabled?: boolean }) =>
-    api.post<ApiKeyPermission>("/api/api-keys", data),
-  remove: (id: string) => api.delete(`/api/api-keys/${id}`),
 };
 
 export const logsApi = {

@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import api_keys, assets, backends, capabilities, health, jobs, logs, node_templates, nodes, projects, tracks, ws
+from app.api.routes import assets, backends, capabilities, health, jobs, logs, node_templates, nodes, projects, tracks, ws
 from app.config import get_settings
 from app.core.auth import auth_middleware
 from app.core.heartbeat import heartbeat_loop
@@ -54,7 +54,6 @@ def create_app() -> FastAPI:
         nodes.router,
         assets.router,
         jobs.router,
-        api_keys.router,
         logs.router,
     ):
         app.include_router(router)

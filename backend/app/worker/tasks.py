@@ -17,7 +17,7 @@ from app.core.storage import get_storage
 from app.core.template_engine import validate_params
 from app.core.ws_manager import ws_manager
 from app.db.base import async_session_maker
-from app.db.models import Asset, Backend, Job, JobStatusEnum, Node, NodeKind, NodeStatus, Track
+from app.db.models import ApiUsageLog, Asset, Backend, ExecutionType, Job, JobStatusEnum, Node, NodeKind, NodeStatus, Track
 
 logger = logging.getLogger(__name__)
 
@@ -122,23 +122,99 @@ async def own_output_nodes(db, workflow_node_id) -> list[Node]:
     return list(result.scalars().all())
 
 
-async def _claim_new_output_cell(db, workflow_node: Node, is_native: bool) -> Node:
-    """Finds an empty cell in workflow_node's own output column (its own
-    row first, same as always) and creates a fresh output node there, bound
-    via created_by_node_id -- used both for a workflow's first-ever result
-    and, for a ComfyUI node with no live picker left among its existing
-    outputs, a fresh batch of variants that doesn't disturb anything already
-    settled.
+async def _actual_row_span(db, node: Node, desired: int) -> int:
+    """Mirrors Grid.tsx's rowSpanByNode exactly: a workflow node's real
+    row-span stops growing the moment its OWN column hits another node
+    below it -- it can never claim more of the adjacent asset column's rows
+    as its own slots than that, regardless of how many its template asks
+    for (desired). Needed by _row_index_would_split_a_span to know how far
+    down each OTHER workflow node's dependents actually reach."""
+    if desired <= 1:
+        return 1
+    track = await db.get(Track, node.track_id)
+    span = 1
+    while span < desired:
+        result = await db.execute(
+            select(Track).where(Track.project_id == track.project_id, Track.row_index == track.row_index + span)
+        )
+        candidate = result.scalars().first()
+        if candidate is not None:
+            blocked = await db.execute(
+                select(Node).where(
+                    Node.track_id == candidate.id, Node.step_index == node.step_index, Node.status != NodeStatus.discarded
+                )
+            )
+            if blocked.scalars().first() is not None:
+                break
+        span += 1
+    return span
 
-    If the row's output cell is already taken by something that isn't one
-    of this workflow's own outputs (own_output_nodes came up empty, or -- in
-    the ComfyUI/ "fresh batch" case -- everything found was already
-    settled), tries growing one row down -- but only if that's safe: the
-    cell directly below, in the WORKFLOW's OWN column, must be either empty
-    or (at the very bottom of the grid) not exist yet at all. If something
-    else already sits in the workflow's own column one row down, that row
-    isn't this workflow's to grow into -- raises rather than reach past it,
-    surfacing as a normal job error (run_variant_job's own except Exception)."""
+
+async def _row_index_would_split_a_span(db, project_id, vacated_row_index: int) -> bool:
+    """True if inserting a blank Track at vacated_row_index (shifting every
+    Track with row_index >= vacated_row_index down by one, as
+    _locate_output_row's insert branch does) would split some OTHER
+    workflow node's row-span apart from its own row -- a node whose own row
+    sits ABOVE vacated_row_index but whose actual span (_actual_row_span)
+    reaches at or past it. That node's own row wouldn't shift (it's below
+    the threshold) while some of its cell_index-addressed dependent rows
+    would, breaking "creator row_index + offset" resolution for whatever
+    was in between (2026-07-20 incident: the first version of this
+    "insert instead of failing" fix didn't check this, and could have
+    silently corrupted an unrelated node's inputs instead of just refusing
+    the doomed generation)."""
+    result = await db.execute(
+        select(Node, Track)
+        .join(Track, Node.track_id == Track.id)
+        .where(
+            Track.project_id == project_id,
+            Node.kind == NodeKind.workflow,
+            Track.row_index < vacated_row_index,
+            Node.status != NodeStatus.discarded,
+        )
+    )
+    for node, track in result.all():
+        effective = await resolve_effective_template(db, node)
+        if effective is None:
+            continue
+        desired = len([f for f in (effective.param_schema or {}).get("fields", []) if f.get("type") in ("image", "file")])
+        span = await _actual_row_span(db, node, max(desired, 1))
+        if track.row_index + span > vacated_row_index:
+            return True
+    return False
+
+
+async def _locate_output_row(db, workflow_node: Node, *, materialize: bool) -> Track | None:
+    """Walks down from workflow_node's own row looking for a Track whose
+    output cell (workflow_node.step_index + 1) is empty. Growing into the
+    next row down needs that row's cell in the WORKFLOW's OWN column to be
+    empty too; if it's genuinely occupied by something else, this INSERTS a
+    fresh blank Track right there instead of giving up -- the same
+    operation Grid.tsx's insertTracksAt does for a manual "insert row"
+    (shift every Track at or after that row_index down by one, then create
+    a new one in the gap), just triggered here instead of by a user click.
+
+    Only when that's actually safe, though: if some OTHER workflow node's
+    own row-span would be split apart by the shift (_row_index_would_split_a_span),
+    this still raises RuntimeError instead of silently corrupting it --
+    growing into open space is fine, but not at the cost of breaking
+    something unrelated.
+
+    materialize controls side effects: True (the real claim,
+    _claim_new_output_cell) actually creates/shifts Tracks and returns one
+    to use. False (a pure read-only probe, has_room_for_output) returns
+    None instead wherever the True path would have to materialize
+    something -- the caller only needs to know whether a claim would
+    succeed (or raise) right now, not actually make one.
+
+    2026-07-20 incident/fix history: this used to always raise on a blocked
+    row, discovered only after a ComfyUI render had already finished and
+    there was nowhere to put it -- a real generation thrown away. Making
+    growth insert a row removed that failure mode for the common case, but
+    the very next iteration of that same fix (this version) had to bring
+    the raise back for the specific case where insertion itself would be
+    unsafe -- "never fails" and "never corrupts something else" turned out
+    to be in tension, and the second one wins."""
     row = await db.get(Track, workflow_node.track_id)
     output_step = workflow_node.step_index + 1
 
@@ -147,22 +223,13 @@ async def _claim_new_output_cell(db, workflow_node: Node, is_native: bool) -> No
             select(Node).where(Node.track_id == row.id, Node.step_index == output_step, Node.status != NodeStatus.discarded)
         )
         if result.scalars().first() is None:
-            asset_node = Node(
-                track_id=row.id,
-                step_index=output_step,
-                kind=NodeKind.asset,
-                status=NodeStatus.running,
-                node_type="asset.single" if is_native else "asset.select",
-                is_picker=not is_native,
-                created_by_node_id=workflow_node.id,
-            )
-            db.add(asset_node)
-            await db.flush()
-            return asset_node
+            return row
 
         result = await db.execute(select(Track).where(Track.project_id == row.project_id, Track.row_index == row.row_index + 1))
         next_row = result.scalars().first()
         if next_row is None:
+            if not materialize:
+                return None
             # The true bottom of the grid -- appending a brand-new track here
             # never shifts anything else, so it's always safe.
             next_row = Track(project_id=row.project_id, row_index=row.row_index + 1)
@@ -176,9 +243,89 @@ async def _claim_new_output_cell(db, workflow_node: Node, is_native: bool) -> No
                 Node.track_id == next_row.id, Node.step_index == workflow_node.step_index, Node.status != NodeStatus.discarded
             )
         )
-        if result.scalars().first() is not None:
-            raise RuntimeError("No room to grow this workflow's output -- the row right below it already belongs to something else.")
-        row = next_row
+        if result.scalars().first() is None:
+            row = next_row
+            continue
+
+        # Blocked: next_row's own column already belongs to something else.
+        # Safe to insert a fresh Track right there and push it (and
+        # everything from that row down) along -- but only if nothing
+        # ELSE's row-span would be torn apart by that shift: some other
+        # workflow node entirely, sitting ABOVE this row with dependents
+        # (cell_index-addressed asset slots) reaching down into or past it,
+        # would have its own row stay put while part of its span moved --
+        # breaking its input resolution silently.
+        vacated_row_index = next_row.row_index
+        if await _row_index_would_split_a_span(db, next_row.project_id, vacated_row_index):
+            raise RuntimeError(
+                "No room to grow this workflow's output -- inserting a row here would split another node's own row-span apart."
+            )
+
+        if not materialize:
+            return None
+
+        # Captured before the shift: next_row is in shift_result's own
+        # result set (its row_index >= itself, trivially), so the loop
+        # below mutates this same in-session object too (SQLAlchemy's
+        # identity map) -- reading next_row.row_index afterward would
+        # already reflect +1.
+        shift_result = await db.execute(
+            select(Track).where(Track.project_id == next_row.project_id, Track.row_index >= vacated_row_index)
+        )
+        for t in shift_result.scalars().all():
+            t.row_index += 1
+        inserted_row = Track(project_id=next_row.project_id, row_index=vacated_row_index)
+        db.add(inserted_row)
+        await db.flush()
+        row = inserted_row
+        continue
+
+
+async def _claim_new_output_cell(db, workflow_node: Node, is_native: bool) -> Node:
+    """Finds an empty cell in workflow_node's own output column (inserting
+    a row to make one if needed -- see _locate_output_row) and creates a
+    fresh output node there, bound via created_by_node_id -- used both for
+    a workflow's first-ever result and, for a ComfyUI node with no live
+    picker left among its existing outputs, a fresh batch of variants that
+    doesn't disturb anything already settled."""
+    row = await _locate_output_row(db, workflow_node, materialize=True)
+    asset_node = Node(
+        track_id=row.id,
+        step_index=workflow_node.step_index + 1,
+        kind=NodeKind.asset,
+        status=NodeStatus.running,
+        node_type="asset.single" if is_native else "asset.select",
+        is_picker=not is_native,
+        created_by_node_id=workflow_node.id,
+    )
+    db.add(asset_node)
+    await db.flush()
+    return asset_node
+
+
+async def has_room_for_output(db, workflow_node: Node, is_native: bool) -> bool:
+    """Pre-flight, read-only check for routes/nodes.py's generate/reroll
+    endpoints -- True iff _get_or_create_output_asset_node would either
+    reuse an existing output (no room needed at all) or successfully claim
+    one (inserting a row if needed) for this workflow's next result, run
+    right now before ever dispatching to a backend. False only for the
+    still-real failure mode: claiming would have to split another node's
+    own row-span apart (_row_index_would_split_a_span) to do it. Mirrors
+    _get_or_create_output_asset_node's own branching (keep the two in
+    sync): a native target or a live ComfyUI picker means an existing node
+    gets reused, not claimed, so no search is even needed in those cases."""
+    existing = await own_output_nodes(db, workflow_node.id)
+    if existing:
+        if is_native:
+            return True
+        if any(n.node_type == "asset.select" for n in existing):
+            return True
+
+    try:
+        await _locate_output_row(db, workflow_node, materialize=False)
+        return True
+    except RuntimeError:
+        return False
 
 
 async def _clear_asset_node_outputs(db, asset_node: Node) -> None:
@@ -517,6 +664,7 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
             mode=node.backend_mode,
             manual_backend_id=str(node.manual_backend_id) if node.manual_backend_id else None,
             exclude_backend_ids=exclude,
+            use_api=node.use_api,
         )
 
         if choice is None:
@@ -586,6 +734,14 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
 
             await _materialize_job_result(db, job, node, effective, choice.instance, external_job_id, project_id)
 
+            # Logged only once the call actually succeeded and produced a
+            # result -- a failed/timed-out attempt never reaches here, so
+            # daily_limit's rolling count (dispatcher._backend_within_quota)
+            # only ever reflects calls that really went out and got billed.
+            if choice.capability is not None and choice.capability.execution_type == ExecutionType.api_call and choice.backend is not None:
+                db.add(ApiUsageLog(backend_id=choice.backend.id, node_id=node.id))
+                await db.commit()
+
         except Exception as exc:
             logger.exception("job %s failed", job_id)
             job.retries += 1
@@ -628,7 +784,25 @@ async def _finalize_node_if_done(db, node_id, project_id: str) -> None:
     node = await db.get(Node, node_id)
     any_done = any(j.status == JobStatusEnum.done for j in jobs)
     any_error = any(j.status == JobStatusEnum.error for j in jobs)
-    if any_done:
+
+    # enqueue_node_job wipes this node's OLD Job rows on every fresh
+    # "Generate" click (see its own comment -- stops progress bars from
+    # piling up across repeated runs), so `jobs` here only ever reflects
+    # the CURRENT click's own batch, never history. Without this check, a
+    # later click whose own variants all fail would look identical to "this
+    # workflow has never succeeded" and overwrite an already-materialized,
+    # perfectly good result with an error status -- the underlying Asset
+    # was never touched, but the node/asset_node status lied about it
+    # (2026-07-20 incident: a paid Gemini result got hidden this way after
+    # an unrelated later ComfyUI attempt failed on the same node).
+    existing_outputs = await own_output_nodes(db, node.id)
+    asset_node = existing_outputs[-1] if existing_outputs else None
+    has_prior_content = False
+    if asset_node is not None:
+        content = await db.execute(select(Asset.id).where(Asset.node_id == asset_node.id).limit(1))
+        has_prior_content = content.scalar_one_or_none() is not None
+
+    if any_done or has_prior_content:
         node.status = NodeStatus.done
         node.error = None
     elif any_error:
@@ -641,17 +815,14 @@ async def _finalize_node_if_done(db, node_id, project_id: str) -> None:
         node.status = NodeStatus.discarded
         node.error = None
 
-    # Flip the paired output asset-node's status alongside the workflow node that
-    # feeds it -- it only exists once at least one variant produced a result.
-    # The newest of the workflow's own outputs (own_output_nodes is oldest-
+    # Flip the paired output asset-node's status alongside the workflow node
+    # that feeds it -- it only exists once at least one variant produced a
+    # result (asset_node/existing_outputs already computed above). The
+    # newest of the workflow's own outputs (own_output_nodes is oldest-
     # first) is the one this run actually touched -- created fresh, or
     # (native's overwrite / ComfyUI's append-to-picker) reused in place, so
     # it's never anything but the last element regardless of which of
-    # _get_or_create_output_asset_node's paths ran. Read-only lookup, unlike
-    # that function -- this must never itself decide to create/overwrite
-    # anything, just report status on whatever's already there.
-    existing_outputs = await own_output_nodes(db, node.id)
-    asset_node = existing_outputs[-1] if existing_outputs else None
+    # _get_or_create_output_asset_node's paths ran.
     if asset_node is not None:
         asset_node.status = node.status
         asset_node.error = "source workflow failed" if node.status == NodeStatus.error else None

@@ -1,15 +1,21 @@
 """Capability-filtered, least-loaded backend selection (SPEC section 2.4)."""
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.api_backend import build_api_backend
 from app.core.comfyui_backend import ComfyUIBackend
 from app.core.job_backend import JobBackend
 from app.core.node_types import EffectiveTemplate
-from app.db.models import ApiKeyPermission, Backend, Capability, ExecutionType
+from app.db.models import ApiUsageLog, Backend, Capability, ExecutionType
+
+# Same rolling-window choice as backends.py's used_today computation -- must
+# match exactly, or a backend could read as "over quota" in one place and
+# "fine" in the other.
+_USAGE_WINDOW = timedelta(hours=24)
 
 # Several worker tasks can call select_backend() concurrently (worker_concurrency
 # jobs dispatched in the same instant, e.g. "generate 4 variants"). capacity()
@@ -45,8 +51,16 @@ async def eligible_capabilities(
     node_type_slug: str,
     mode: str = "auto",
     manual_backend_id: str | None = None,
+    use_api: bool = False,
 ) -> list[Capability]:
-    """mode: 'auto' | 'comfyui_only' | 'api_only' | 'manual'"""
+    """mode: 'auto' | 'comfyui_only' | 'api_only' | 'manual'
+
+    use_api is a hard gate independent of mode -- Node.use_api (see
+    db/models.py) must be explicitly True for an api_call capability to ever
+    appear here, even under mode="api_only" or a manual pick of an
+    api_provider backend. Without it, "auto" mode picking whichever
+    capability happens to be eligible would silently start spending money on
+    a node the user never opted into that for."""
     stmt = (
         select(Capability)
         .join(Backend, Capability.backend_id == Backend.id)
@@ -54,6 +68,8 @@ async def eligible_capabilities(
     )
     result = await db.execute(stmt)
     capabilities = list(result.scalars().all())
+    if not use_api:
+        capabilities = [c for c in capabilities if c.execution_type != ExecutionType.api_call]
 
     if mode == "manual" and manual_backend_id:
         return [c for c in capabilities if str(c.backend_id) == str(manual_backend_id)]
@@ -64,28 +80,31 @@ async def eligible_capabilities(
     return capabilities
 
 
-async def _has_api_permission(db: AsyncSession, provider: str, node_type_slug: str) -> ApiKeyPermission | None:
-    stmt = select(ApiKeyPermission).where(
-        ApiKeyPermission.provider == provider,
-        ApiKeyPermission.node_type_slug == node_type_slug,
-        ApiKeyPermission.enabled.is_(True),
+async def _backend_within_quota(db: AsyncSession, backend: Backend) -> bool:
+    """Backend.daily_limit (see db/models.py docstring) is one key shared by
+    every node type pointed at this backend, so quota is checked per-backend,
+    not per node type. NULL means unlimited."""
+    if backend.daily_limit is None:
+        return True
+    cutoff = datetime.now(UTC) - _USAGE_WINDOW
+    count_stmt = select(func.count()).select_from(ApiUsageLog).where(
+        ApiUsageLog.backend_id == backend.id, ApiUsageLog.created_at >= cutoff
     )
-    result = await db.execute(stmt)
-    return result.scalars().first()
+    used = (await db.execute(count_stmt)).scalar_one()
+    return used < backend.daily_limit
 
 
-def _instantiate(backend: Backend, capability: Capability, permission: ApiKeyPermission | None) -> JobBackend | None:
+def _instantiate(backend: Backend, capability: Capability) -> JobBackend | None:
     if capability.execution_type == ExecutionType.comfyui_workflow:
         if not backend.base_url:
             return None
         return ComfyUIBackend(base_url=backend.base_url)
     if capability.execution_type == ExecutionType.api_call:
-        if permission is None:
+        if not backend.provider or not backend.api_key:
             return None
-        provider = capability.config.get("provider")
         model_id = capability.config.get("model_id")
         try:
-            return build_api_backend(provider, api_key=permission.api_key, model_id=model_id)
+            return build_api_backend(backend.provider, api_key=backend.api_key, model_id=model_id)
         except ValueError:
             return None
     return None
@@ -97,6 +116,7 @@ async def select_backend(
     mode: str = "auto",
     manual_backend_id: str | None = None,
     exclude_backend_ids: set[str] | None = None,
+    use_api: bool = False,
 ) -> DispatchChoice | None:
     if effective.is_native:
         # No Capability/Backend row involved at all -- native types are a code
@@ -107,7 +127,7 @@ async def select_backend(
 
     node_type_slug = effective.node_type_slug
     exclude_backend_ids = exclude_backend_ids or set()
-    capabilities = await eligible_capabilities(db, node_type_slug, mode, manual_backend_id)
+    capabilities = await eligible_capabilities(db, node_type_slug, mode, manual_backend_id, use_api)
 
     candidates: list[DispatchChoice] = []
     for capability in capabilities:
@@ -117,13 +137,10 @@ async def select_backend(
         if backend is None or not backend.is_active:
             continue
 
-        permission = None
-        if capability.execution_type == ExecutionType.api_call:
-            permission = await _has_api_permission(db, capability.config.get("provider", ""), node_type_slug)
-            if permission is None:
-                continue  # SPEC 2.4 step 3: user must have key + explicit permission
+        if capability.execution_type == ExecutionType.api_call and not await _backend_within_quota(db, backend):
+            continue  # over daily_limit -- treated exactly like the backend not being eligible at all
 
-        instance = _instantiate(backend, capability, permission)
+        instance = _instantiate(backend, capability)
         if instance is None:
             continue
         candidates.append(DispatchChoice(backend=backend, capability=capability, instance=instance))
@@ -176,7 +193,4 @@ async def reconnect_instance(db: AsyncSession, backend_id: str, node_type_slug: 
     capability = result.scalars().first()
     if capability is None:
         return None
-    permission = None
-    if capability.execution_type == ExecutionType.api_call:
-        permission = await _has_api_permission(db, capability.config.get("provider", ""), node_type_slug)
-    return _instantiate(backend, capability, permission)
+    return _instantiate(backend, capability)

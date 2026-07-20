@@ -17,12 +17,23 @@ class BackendCreate(BaseModel):
     kind: BackendKind
     base_url: str | None = None
     is_active: bool = True
+    # api_provider kind only -- see db/models.py's Backend.provider/api_key
+    # docstring: one key per Backend row, shared by every node type that
+    # points a Capability at it.
+    provider: str | None = None
+    api_key: str | None = None
+    daily_limit: int | None = None
 
 
 class BackendUpdate(BaseModel):
     name: str | None = None
     base_url: str | None = None
     is_active: bool | None = None
+    provider: str | None = None
+    # Omit to leave the stored key untouched (e.g. editing just daily_limit) --
+    # only overwritten when explicitly present in the request body.
+    api_key: str | None = None
+    daily_limit: int | None = None
 
 
 class BackendRead(ORMModel):
@@ -33,7 +44,17 @@ class BackendRead(ORMModel):
     is_active: bool
     last_heartbeat_at: datetime | None
     last_stats: dict
+    provider: str | None
+    daily_limit: int | None
     created_at: datetime
+    # Never the raw key -- just whether one is set, so the UI can show
+    # "key configured" without ever re-displaying (or re-transmitting) the
+    # secret itself.
+    has_api_key: bool = False
+    # Not an ORM column -- computed per-request in backends.list_backends
+    # (rolling 24h COUNT(*) over api_usage_log), same reasoning as 0007's
+    # used_today had on the now-removed ApiKeyPermissionRead.
+    used_today: int = 0
 
 
 # ---------- Capability ----------
@@ -186,6 +207,9 @@ class NodeCreate(BaseModel):
     requested_variants: int = 1
     backend_mode: str = "auto"
     manual_backend_id: uuid.UUID | None = None
+    # Explicit opt-in for paid api_call capabilities -- see db/models.py's
+    # Node.use_api docstring. Defaults False.
+    use_api: bool = False
     # Forwarding-only, not a general-purpose field: Grid.tsx's
     # onSelectCandidate is the one caller, passing an EXISTING node's own
     # created_by_node_id through to the fresh settled node standing in for
@@ -224,6 +248,7 @@ class NodeUpdate(BaseModel):
     status: NodeStatus | None = None
     backend_mode: str | None = None
     manual_backend_id: uuid.UUID | None = None
+    use_api: bool | None = None
     is_picker: bool | None = None
 
 
@@ -242,6 +267,7 @@ class NodeRead(ORMModel):
     requested_variants: int
     backend_mode: str
     manual_backend_id: uuid.UUID | None
+    use_api: bool
     error: str | None
     # Read-only -- see db/models.py's Node.created_by_node_id docstring.
     # Never appears on NodeCreate/NodeUpdate; the only writer is
@@ -287,17 +313,3 @@ class JobRead(ORMModel):
     finished_at: datetime | None
 
 
-# ---------- ApiKeyPermission ----------
-class ApiKeyPermissionCreate(BaseModel):
-    provider: str
-    node_type_slug: str
-    api_key: str
-    enabled: bool = True
-
-
-class ApiKeyPermissionRead(ORMModel):
-    id: uuid.UUID
-    provider: str
-    node_type_slug: str
-    enabled: bool
-    created_at: datetime

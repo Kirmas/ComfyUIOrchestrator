@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { apiKeysApi, backendsApi, capabilitiesApi, nodeTemplatesApi } from "../api/endpoints";
-import type { ApiKeyPermission, Backend, Capability, DetectedField, NodeTemplate } from "../types";
+import { backendsApi, capabilitiesApi, nodeTemplatesApi } from "../api/endpoints";
+import type { Backend, Capability, DetectedField, NodeTemplate } from "../types";
 import { NodeTypeWizard } from "./NodeTypeWizard";
+
+// Only one provider is actually wired up backend-side right now
+// (GeminiImageBackend, api_backend.py's PROVIDERS registry) -- a friendly
+// label here instead of a free-text box, with room to grow as more get
+// implemented.
+const KNOWN_PROVIDERS = [{ value: "nano_banana", label: "Google Gemini (“nano banana”)" }];
 
 /** Delete buttons below have no other feedback mechanism -- without this, a
  * failed request (network error, FK conflict, wrong API base URL) just leaves
@@ -33,16 +39,34 @@ function makeReloader<T>(fetcher: () => Promise<T>, setItems: (v: T) => void, se
       .catch((err) => setError(describeError(err)));
 }
 
+/** A paid provider's key lives on the api_provider Backend row itself -- one
+ * key per Backend, shared by every node type whose Capability points at it
+ * (see db/models.py's Backend.provider/api_key docstring). Want a second key
+ * (a second Gemini account, say)? Add a second api_provider backend, don't
+ * grant the same key twice. */
 function BackendsSection({ items, reload }: { items: Backend[]; reload: () => void }) {
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [kind, setKind] = useState<"comfyui" | "api_provider">("comfyui");
+  const [provider, setProvider] = useState(KNOWN_PROVIDERS[0].value);
+  const [apiKey, setApiKey] = useState("");
+  const [dailyLimit, setDailyLimit] = useState("");
 
   const create = async () => {
     if (!name.trim()) return;
-    await backendsApi.create({ name: name.trim(), kind, base_url: kind === "comfyui" ? baseUrl : null });
+    if (kind === "api_provider" && !apiKey.trim()) return;
+    await backendsApi.create({
+      name: name.trim(),
+      kind,
+      base_url: kind === "comfyui" ? baseUrl : null,
+      provider: kind === "api_provider" ? provider : null,
+      api_key: kind === "api_provider" ? apiKey.trim() : null,
+      daily_limit: kind === "api_provider" && dailyLimit.trim() ? Number(dailyLimit) : null,
+    });
     setName("");
     setBaseUrl("");
+    setApiKey("");
+    setDailyLimit("");
     reload();
   };
 
@@ -54,9 +78,10 @@ function BackendsSection({ items, reload }: { items: Backend[]; reload: () => vo
           <tr>
             <th>Name</th>
             <th>Kind</th>
-            <th>URL</th>
+            <th>URL / provider</th>
             <th>Active</th>
-            <th>Last heartbeat</th>
+            <th>Daily limit</th>
+            <th>Used (24h)</th>
             <th></th>
           </tr>
         </thead>
@@ -65,7 +90,17 @@ function BackendsSection({ items, reload }: { items: Backend[]; reload: () => vo
             <tr key={b.id}>
               <td>{b.name}</td>
               <td>{b.kind}</td>
-              <td>{b.base_url}</td>
+              <td>
+                {b.kind === "api_provider" ? (
+                  <>
+                    {KNOWN_PROVIDERS.find((p) => p.value === b.provider)?.label ?? b.provider ?? "(no provider)"}
+                    {" — "}
+                    {b.has_api_key ? "key set" : <span className="error-text">no key</span>}
+                  </>
+                ) : (
+                  b.base_url
+                )}
+              </td>
               <td>
                 <input
                   type="checkbox"
@@ -76,7 +111,25 @@ function BackendsSection({ items, reload }: { items: Backend[]; reload: () => vo
                   }}
                 />
               </td>
-              <td>{b.last_heartbeat_at ?? "never"}</td>
+              <td>
+                {b.kind === "api_provider" && (
+                  <input
+                    type="number"
+                    min={0}
+                    style={{ width: 70 }}
+                    placeholder="∞"
+                    defaultValue={b.daily_limit ?? ""}
+                    onBlur={async (e) => {
+                      const v = e.target.value.trim();
+                      await backendsApi.update(b.id, { daily_limit: v ? Number(v) : null });
+                      reload();
+                    }}
+                  />
+                )}
+              </td>
+              <td style={{ color: b.daily_limit != null && b.used_today >= b.daily_limit ? "var(--danger)" : undefined }}>
+                {b.kind === "api_provider" ? `${b.used_today}${b.daily_limit != null ? ` / ${b.daily_limit}` : ""}` : ""}
+              </td>
               <td>
                 <button onClick={() => tryDelete(() => backendsApi.remove(b.id), reload)}>delete</button>
               </td>
@@ -90,7 +143,21 @@ function BackendsSection({ items, reload }: { items: Backend[]; reload: () => vo
           <option value="api_provider">api_provider</option>
         </select>
         <input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
-        {kind === "comfyui" && <input placeholder="http://host:8188" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} style={{ width: 220 }} />}
+        {kind === "comfyui" ? (
+          <input placeholder="http://host:8188" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} style={{ width: 220 }} />
+        ) : (
+          <>
+            <select value={provider} onChange={(e) => setProvider(e.target.value)}>
+              {KNOWN_PROVIDERS.map((p) => (
+                <option key={p.value} value={p.value}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            <input placeholder="API key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} style={{ width: 220 }} />
+            <input placeholder="daily limit (blank = ∞)" style={{ width: 130 }} value={dailyLimit} onChange={(e) => setDailyLimit(e.target.value)} />
+          </>
+        )}
         <button className="primary" onClick={create}>
           + Add backend
         </button>
@@ -196,6 +263,190 @@ function CapabilityTextFieldsModal({ capability, onClose }: { capability: Capabi
   );
 }
 
+const ASPECT_RATIOS = ["Auto", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9", "2:1"];
+// generationConfig.imageConfig.imageSize -- reliably honored only by
+// gemini-3-pro-image-preview as of 2026-07; the flash variants largely
+// ignore it and stay ~1K regardless (see api_backend.py's docstring).
+const IMAGE_SIZES = ["Auto", "1K", "2K", "4K"];
+
+// Gemini's own image-generation model ids -- not guessable, so a picker
+// instead of a free-text box. "Custom…" escapes to a text input for
+// whatever ships next that isn't in this list yet.
+const KNOWN_GEMINI_MODELS = [
+  { value: "gemini-2.5-flash-image", label: "Gemini 2.5 Flash Image (“nano banana”)" },
+  { value: "gemini-3.1-flash-image-preview", label: "Gemini 3.1 Flash Image Preview (“nano banana 2”)" },
+  { value: "gemini-3-pro-image-preview", label: "Gemini 3 Pro Image Preview (“nano banana pro”)" },
+];
+const CUSTOM_MODEL_OPTION = "__custom__";
+
+/** Attaches a paid api_call Capability to an EXISTING template, against a
+ * backend already picked by NodeTypeCard's unified "+ Add instance" chooser
+ * -- node types themselves are still only ever created from a ComfyUI
+ * workflow.json (NodeTypeWizard); this is the "bonus" second backend a
+ * template can additionally offer. aspect_ratio/image_size are always baked
+ * on (Gemini-specific, nothing on a ComfyUI-derived template to map to --
+ * see 2026-07-20 incident where reusing a same-named ComfyUI resolution
+ * field silently sent it an invalid value). The prompt has two shapes: "master" bakes a
+ * fixed default instruction into a new "prompt" field (e.g. a Back View
+ * node's "rotate this character 180°..."); "match" instead points
+ * param_mapping.prompt at an existing text field on the template (e.g. a
+ * generic CreateImage node's own "Text String (User Prompt)" field detected
+ * from its ComfyUI workflow) so the user's own typed prompt flows straight
+ * through instead of being shadowed by a second baked field. Either way the
+ * field ends up rendered by NodeCell's existing param form (⚙), editable
+ * per-node afterward. */
+function AddApiInstanceForm({
+  template,
+  backend,
+  onSaved,
+  onCancel,
+}: {
+  template: NodeTemplate;
+  backend: Backend;
+  onSaved: () => void;
+  onCancel: () => void;
+}) {
+  const [modelId, setModelId] = useState(KNOWN_GEMINI_MODELS[0].value);
+  const [customModel, setCustomModel] = useState(false);
+  const [masterPrompt, setMasterPrompt] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fields = template.param_schema.fields ?? [];
+  // Reserved, namespaced names for whatever this form injects -- a plain
+  // "prompt"/"aspect_ratio" once silently collided with a ComfyUI-derived
+  // field of the same name (a workflow's own "Resolution Selector" node had
+  // already claimed "aspect_ratio" as a free-text field holding ComfyUI-
+  // style values like "1:1 (Square)"; ASPECT_RATIOS' Gemini-shaped enum was
+  // then never added, and the field silently sent that ComfyUI string as
+  // Gemini's aspectRatio -- not a valid value, and no new control ever
+  // appeared for the user to notice or fix). "api_"-prefixed names can't
+  // collide with anything workflow_analyzer derives from a node title.
+  const PROMPT_FIELD = "api_prompt";
+  const ASPECT_FIELD = "api_aspect_ratio";
+  const IMAGE_SIZE_FIELD = "api_image_size";
+  const hasPromptField = fields.some((f) => f.name === PROMPT_FIELD);
+  const hasAspectField = fields.some((f) => f.name === ASPECT_FIELD);
+  const hasImageSizeField = fields.some((f) => f.name === IMAGE_SIZE_FIELD);
+  // A ComfyUI-derived template can already have its own free-text field
+  // (e.g. a "Text String (User Prompt)" PrimitiveString detected by
+  // workflow_analyzer) -- for a genuinely free-prompt node type like
+  // CreateImage, that field IS the user's prompt and should just be mapped
+  // to, not shadowed by a second baked prompt field nobody asked for.
+  // Only offered when such a field actually exists; otherwise there's
+  // nothing to map to and this collapses back to the plain master-prompt case.
+  const existingTextFields = fields.filter((f) => f.type === "text");
+  const [promptMode, setPromptMode] = useState<"master" | "match">("master");
+  const [matchedField, setMatchedField] = useState(existingTextFields[0]?.name ?? "");
+
+  const save = async () => {
+    if (promptMode === "master" && !masterPrompt.trim()) return;
+    if (promptMode === "match" && !matchedField) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const promptFieldName = promptMode === "match" ? matchedField : PROMPT_FIELD;
+      const needsNewPromptField = promptMode === "master" && !hasPromptField;
+      if (needsNewPromptField || !hasAspectField || !hasImageSizeField) {
+        const newFields = [...fields];
+        if (needsNewPromptField) newFields.push({ name: PROMPT_FIELD, type: "text", label: "Prompt" });
+        if (!hasAspectField) {
+          newFields.push({ name: ASPECT_FIELD, type: "enum", label: "Aspect ratio", options: ASPECT_RATIOS });
+        }
+        if (!hasImageSizeField) {
+          newFields.push({ name: IMAGE_SIZE_FIELD, type: "enum", label: "Image size (Gemini)", options: IMAGE_SIZES });
+        }
+        await nodeTemplatesApi.update(template.id, {
+          param_schema: { ...template.param_schema, fields: newFields },
+          defaults: {
+            ...template.defaults,
+            ...(needsNewPromptField ? { [PROMPT_FIELD]: masterPrompt } : {}),
+            ...(!hasAspectField ? { [ASPECT_FIELD]: "Auto" } : {}),
+            ...(!hasImageSizeField ? { [IMAGE_SIZE_FIELD]: "Auto" } : {}),
+          },
+        });
+      }
+      await capabilitiesApi.create({
+        backend_id: backend.id,
+        node_type_slug: template.node_type_slug,
+        execution_type: "api_call",
+        config: {
+          model_id: modelId,
+          param_mapping: { prompt: promptFieldName, aspect_ratio: ASPECT_FIELD, image_size: IMAGE_SIZE_FIELD },
+        },
+      });
+      onSaved();
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="inline-form" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
+      {error && <div className="error-text">{error}</div>}
+      <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+        {backend.name} ({KNOWN_PROVIDERS.find((p) => p.value === backend.provider)?.label ?? backend.provider})
+      </div>
+      {customModel ? (
+        <input placeholder="model id" value={modelId} onChange={(e) => setModelId(e.target.value)} />
+      ) : (
+        <select
+          value={modelId}
+          onChange={(e) => {
+            if (e.target.value === CUSTOM_MODEL_OPTION) {
+              setCustomModel(true);
+              setModelId("");
+            } else {
+              setModelId(e.target.value);
+            }
+          }}
+        >
+          {KNOWN_GEMINI_MODELS.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.label}
+            </option>
+          ))}
+          <option value={CUSTOM_MODEL_OPTION}>Other (type manually)…</option>
+        </select>
+      )}
+      {existingTextFields.length > 0 && (
+        <select value={promptMode} onChange={(e) => setPromptMode(e.target.value as "master" | "match")}>
+          <option value="master">Write a master prompt (baked default)</option>
+          <option value="match">Map to an existing field (free user prompt)</option>
+        </select>
+      )}
+      {promptMode === "match" && existingTextFields.length > 0 ? (
+        <select value={matchedField} onChange={(e) => setMatchedField(e.target.value)}>
+          {existingTextFields.map((f) => (
+            <option key={f.name} value={f.name}>
+              {f.label ?? f.name}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <textarea
+          placeholder="Master prompt — the baked default instruction sent to the model (e.g. 'Generate the back view of this exact character…'). Editable per node afterward."
+          rows={3}
+          value={masterPrompt}
+          onChange={(e) => setMasterPrompt(e.target.value)}
+        />
+      )}
+      <div className="node-actions">
+        <button
+          className="primary"
+          disabled={saving || (promptMode === "master" ? !masterPrompt.trim() : !matchedField)}
+          onClick={save}
+        >
+          {saving ? "Saving…" : "Save API instance"}
+        </button>
+        <button onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function NodeTypeCard({
   template,
   backends,
@@ -219,6 +470,35 @@ function NodeTypeCard({
 }) {
   const backendName = (id: string) => backends.find((b) => b.id === id)?.name ?? id;
   const [promptsFor, setPromptsFor] = useState<Capability | null>(null);
+  // Single "+ Add instance" entry point: pick any not-yet-attached backend
+  // first, then branch by its kind -- comfyui hands off to the existing
+  // NodeTypeWizard (workflow upload + field mapping), api_provider to the
+  // lighter AddApiInstanceForm (model + prompt). Two buttons asking the user
+  // to already know which kind they want up front was the wrong shape --
+  // the backend they pick already says that.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [apiBackendId, setApiBackendId] = useState<string | null>(null);
+  const [comfyBackendId, setComfyBackendId] = useState<string | null>(null);
+  const attachedBackendIds = capabilities.map((c) => c.backend_id);
+  const pickableBackends = backends.filter((b) => !attachedBackendIds.includes(b.id));
+
+  const closeAll = () => {
+    setPickerOpen(false);
+    setApiBackendId(null);
+    setComfyBackendId(null);
+  };
+  const pickBackend = (backendId: string) => {
+    const backend = backends.find((b) => b.id === backendId);
+    if (!backend) return;
+    setPickerOpen(false);
+    if (backend.kind === "api_provider") {
+      setApiBackendId(backendId);
+    } else {
+      setComfyBackendId(backendId);
+      onOpenWizard();
+    }
+  };
+  const anyFormOpen = pickerOpen || apiBackendId !== null || wizardOpen;
 
   return (
     <div className="settings-section node-type-card">
@@ -272,17 +552,70 @@ function NodeTypeCard({
 
       {promptsFor && <CapabilityTextFieldsModal capability={promptsFor} onClose={() => setPromptsFor(null)} />}
 
-      {wizardOpen ? (
+      {pickerOpen && (
+        <div className="inline-form">
+          <select defaultValue="" onChange={(e) => e.target.value && pickBackend(e.target.value)}>
+            <option value="" disabled>
+              which backend?
+            </option>
+            {pickableBackends.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name} ({b.kind === "api_provider" ? KNOWN_PROVIDERS.find((p) => p.value === b.provider)?.label ?? b.provider : "comfyui"})
+              </option>
+            ))}
+          </select>
+          <button onClick={closeAll}>Cancel</button>
+          {pickableBackends.length === 0 && (
+            <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
+              No unattached backends — add one in Backends above first.
+            </span>
+          )}
+        </div>
+      )}
+
+      {apiBackendId &&
+        (() => {
+          const backend = backends.find((b) => b.id === apiBackendId);
+          return backend ? (
+            <AddApiInstanceForm
+              template={template}
+              backend={backend}
+              onCancel={closeAll}
+              onSaved={() => {
+                closeAll();
+                reloadCapabilities();
+                reloadTemplates();
+              }}
+            />
+          ) : null;
+        })()}
+
+      {wizardOpen && comfyBackendId && (
         <NodeTypeWizard
           backends={backends}
-          mode={{ kind: "add-instance", template, excludeBackendIds: capabilities.map((c) => c.backend_id) }}
-          onCancel={onCancelWizard}
-          onSaved={onSaved}
+          mode={{
+            kind: "add-instance",
+            template,
+            // Narrows NodeTypeWizard's own backend picker down to exactly the
+            // one already chosen in the unified picker above -- everything
+            // else (including already-attached backends) stays excluded.
+            excludeBackendIds: backends.map((b) => b.id).filter((id) => id !== comfyBackendId),
+          }}
+          onCancel={() => {
+            onCancelWizard();
+            closeAll();
+          }}
+          onSaved={() => {
+            onSaved();
+            closeAll();
+          }}
         />
-      ) : (
+      )}
+
+      {!anyFormOpen && (
         <div className="node-actions">
-          <button className="primary" onClick={onOpenWizard}>
-            + Add ComfyUI instance
+          <button className="primary" onClick={() => setPickerOpen(true)}>
+            + Add instance
           </button>
           <button
             onClick={() => tryDelete(() => nodeTemplatesApi.remove(template.id), reloadTemplates)}
@@ -360,67 +693,6 @@ function NodeTypesSection({
   );
 }
 
-function ApiKeysSection() {
-  const [items, setItems] = useState<ApiKeyPermission[]>([]);
-  const [provider, setProvider] = useState("nano_banana");
-  const [nodeTypeSlug, setNodeTypeSlug] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  const reload = makeReloader(apiKeysApi.list, setItems, setLoadError);
-  useEffect(() => {
-    reload();
-  }, []);
-
-  const create = async () => {
-    if (!nodeTypeSlug.trim() || !apiKey.trim()) return;
-    await apiKeysApi.create({ provider, node_type_slug: nodeTypeSlug.trim(), api_key: apiKey.trim() });
-    setNodeTypeSlug("");
-    setApiKey("");
-    reload();
-  };
-
-  return (
-    <div className="settings-section">
-      <h2>API provider permissions</h2>
-      <p style={{ fontSize: 12, color: "var(--text-dim)" }}>
-        Grants a paid provider's key to a specific node type (SPEC §8 open question — permission is per provider + node type).
-      </p>
-      {loadError && <div className="error-text">{loadError}</div>}
-      <table>
-        <thead>
-          <tr>
-            <th>Provider</th>
-            <th>Node type</th>
-            <th>Enabled</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((k) => (
-            <tr key={k.id}>
-              <td>{k.provider}</td>
-              <td>{k.node_type_slug}</td>
-              <td>{k.enabled ? "yes" : "no"}</td>
-              <td>
-                <button onClick={() => tryDelete(() => apiKeysApi.remove(k.id), reload)}>delete</button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div className="inline-form">
-        <input placeholder="provider (e.g. nano_banana)" value={provider} onChange={(e) => setProvider(e.target.value)} />
-        <input placeholder="node_type_slug" value={nodeTypeSlug} onChange={(e) => setNodeTypeSlug(e.target.value)} />
-        <input placeholder="API key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} style={{ width: 220 }} />
-        <button className="primary" onClick={create}>
-          + Grant
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export function Settings() {
   const [backends, setBackends] = useState<Backend[]>([]);
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
@@ -451,7 +723,6 @@ export function Settings() {
         reloadTemplates={reloadTemplates}
         reloadCapabilities={reloadCapabilities}
       />
-      <ApiKeysSection />
     </div>
   );
 }

@@ -535,6 +535,33 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     setJobs(list);
   };
 
+  // Layer 4 of the "money" protection stack (see BackendsSection in
+  // Settings.tsx for layers 1/3, Node.use_api for layer 2): even with the
+  // node's own "Use API" flag on, the last click before a paid call actually
+  // fires still has to go through an explicit confirmation.
+  const apiCapability = template
+    ? capabilities.find((c) => c.node_type_slug === template.node_type_slug && c.execution_type === "api_call" && c.enabled)
+    : undefined;
+  // Provider/key live on the Backend row now (see db/models.py's
+  // Backend.provider/api_key docstring), not on the capability's own config.
+  const apiBackend = apiCapability ? backends.find((b) => b.id === apiCapability.backend_id) : undefined;
+  const [payConfirmAction, setPayConfirmAction] = useState<null | "generate" | "reroll">(null);
+
+  const requestGenerate = () => {
+    if (node.use_api && apiCapability) setPayConfirmAction("generate");
+    else generate();
+  };
+  const requestReroll = () => {
+    if (node.use_api && apiCapability) setPayConfirmAction("reroll");
+    else reroll();
+  };
+  const confirmPaidAction = async () => {
+    const action = payConfirmAction;
+    setPayConfirmAction(null);
+    if (action === "generate") await generate();
+    else if (action === "reroll") await reroll();
+  };
+
   // Only touches Job rows (pending/running/waiting_for_backend -> cancelled)
   // -- never deletes or discards any already-produced Asset, so a variant
   // that already finished stays exactly as it is when you cancel the rest.
@@ -705,7 +732,12 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
               >
                 <option value="auto">Auto (balance)</option>
                 <option value="comfyui_only">ComfyUI only</option>
-                <option value="api_only">API only</option>
+                {/* Picking this without "Use API" checked would just never
+                    dispatch anywhere -- dispatcher.eligible_capabilities hard-
+                    gates every api_call capability on Node.use_api regardless
+                    of backend_mode, so there's nothing this option could do
+                    yet. Only offered once it could actually work. */}
+                {node.use_api && apiCapability && <option value="api_only">API only</option>}
                 <option value="manual">Manual…</option>
               </select>
               {node.backend_mode === "manual" && (
@@ -717,13 +749,31 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                   }}
                 >
                   <option value="">choose backend…</option>
-                  {backends.map((b) => (
-                    <option key={b.id} value={b.id}>
-                      {b.name}
-                    </option>
-                  ))}
+                  {backends
+                    .filter((b) => b.kind !== "api_provider" || (node.use_api && apiCapability))
+                    .map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name}
+                      </option>
+                    ))}
                 </select>
               )}
+            </div>
+          )}
+
+          {!isNative && apiCapability && (
+            <div className="field-row">
+              <label title="Explicit opt-in: even 'Auto'/'API only' backend modes never make a paid call unless this is checked.">
+                Use API (paid)
+              </label>
+              <input
+                type="checkbox"
+                checked={node.use_api}
+                onChange={async (e) => {
+                  const updated = await nodesApi.update(node.id, { use_api: e.target.checked });
+                  setNode(updated);
+                }}
+              />
             </div>
           )}
         </div>
@@ -745,7 +795,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
 
       {template && (
         <div className="node-actions" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
-          <button className="primary" onClick={generate} disabled={node.status === "queued" || node.status === "running"}>
+          <button className="primary" onClick={requestGenerate} disabled={node.status === "queued" || node.status === "running"}>
             Generate
           </button>
           {(node.status === "queued" || node.status === "running") && (
@@ -754,7 +804,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
             </button>
           )}
           {(node.status === "done" || node.status === "error") && (
-            <button onClick={reroll} title="Discard and regenerate">
+            <button onClick={requestReroll} title="Discard and regenerate">
               Re-roll
             </button>
           )}
@@ -763,6 +813,28 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
           </button>
         </div>
       )}
+
+      {payConfirmAction &&
+        createPortal(
+          <div className="image-modal-backdrop" onClick={() => setPayConfirmAction(null)}>
+            <div className="image-modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 380 }}>
+              <div className="node-cell-header">
+                <span>This is paid</span>
+              </div>
+              <p style={{ fontSize: 13 }}>
+                This will call <strong>{apiBackend?.name ?? apiBackend?.provider ?? "a paid API"}</strong>
+                {apiCapability?.config.model_id ? ` (${apiCapability.config.model_id as string})` : ""}. Continue with this generation?
+              </p>
+              <div className="node-actions">
+                <button className="primary" onClick={confirmPaidAction}>
+                  Yes, generate (paid)
+                </button>
+                <button onClick={() => setPayConfirmAction(null)}>Cancel</button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
 
       {paramsOpen && template && (
         <div className="image-modal-backdrop" onClick={(e) => { e.stopPropagation(); setParamsOpen(false); }}>
