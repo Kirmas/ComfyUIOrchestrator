@@ -139,3 +139,15 @@ def sync_legacy_fields(node: Node, effective: EffectiveTemplate | None) -> None:
     prefix, _ = parsed
     node.is_picker = prefix == "asset" and is_picker_type(node.node_type)
     node.template_id = effective.db_template.id if effective and effective.db_template else None
+
+
+# Optional, gitignored extension point (see .gitignore) for native node types
+# that must never end up in this repo's history -- nothing in this file
+# depends on it existing, and a checkout without it behaves exactly as if
+# this block weren't here at all.
+try:
+    from app.core.native_local import LOCAL_NATIVE_NODE_TYPES
+
+    NATIVE_NODE_TYPES.update(LOCAL_NATIVE_NODE_TYPES)
+except ImportError:
+    pass

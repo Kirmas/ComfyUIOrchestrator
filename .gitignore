@@ -21,3 +21,8 @@ npm-debug.log*
 
 # OS
 .DS_Store
+
+# Local, never-committed native node extensions (see node_types.py's
+# try/except import at the bottom) -- whole directory, not individual files,
+# so the ignore rule itself doesn't hint at what's in there.
+backend/app/core/native_local/
