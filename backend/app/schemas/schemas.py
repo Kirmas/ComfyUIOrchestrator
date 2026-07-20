@@ -250,6 +250,15 @@ class NodeUpdate(BaseModel):
     manual_backend_id: uuid.UUID | None = None
     use_api: bool | None = None
     is_picker: bool | None = None
+    # Explicit unbind only -- NodeCell.tsx's "detach & remove workflow"
+    # button sends `created_by_node_id: null` right before deleting the
+    # creator workflow node, so delete_node's own_output_nodes sweep no
+    # longer counts this asset as one of that workflow's outputs and
+    # doesn't cascade-delete it along with the rest. Never set to a real
+    # id via this route -- created_by_node_id is otherwise written exactly
+    # once, by worker/tasks.py's _get_or_create_output_asset_node, and
+    # never touched again (see db/models.py's docstring).
+    created_by_node_id: uuid.UUID | None = None
 
 
 class NodeRead(ORMModel):

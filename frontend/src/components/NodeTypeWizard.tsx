@@ -91,7 +91,14 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
   const [fieldLabels, setFieldLabels] = useState<Record<string, string>>({});
   const [groupLabelOverride, setGroupLabelOverride] = useState<Record<string, string>>({});
 
-  const [selectedBackendId, setSelectedBackendId] = useState("");
+  // In add-instance mode, Settings.tsx's own unified "which backend?" picker
+  // (AddInstanceForm's pickerOpen select) already narrowed availableBackends
+  // down to exactly the one the user just chose there (excludeBackendIds
+  // excludes everything else) -- re-asking here would be the same question
+  // twice. Pre-select it so step 1 just confirms and moves on.
+  const [selectedBackendId, setSelectedBackendId] = useState(
+    mode.kind === "add-instance" && availableBackends.length === 1 ? availableBackends[0].id : "",
+  );
 
   const [workflowJson, setWorkflowJson] = useState<Record<string, unknown> | null>(null);
   const [analysis, setAnalysis] = useState<WorkflowAnalysis | null>(null);
@@ -387,14 +394,20 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
                 {mode.kind === "add-instance" ? "All registered ComfyUI backends already have an instance of this node type." : "No ComfyUI backends registered yet."}
               </span>
             )}
-            <select value={selectedBackendId} onChange={(e) => setSelectedBackendId(e.target.value)}>
-              <option value="">choose backend…</option>
-              {availableBackends.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.name}
-                </option>
-              ))}
-            </select>
+            {mode.kind === "add-instance" ? (
+              // Already chosen one step up, in Settings.tsx's unified backend
+              // picker -- just confirm it instead of asking again.
+              availableBackends.length === 1 && <span>{availableBackends[0].name}</span>
+            ) : (
+              <select value={selectedBackendId} onChange={(e) => setSelectedBackendId(e.target.value)}>
+                <option value="">choose backend…</option>
+                {availableBackends.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           {mode.kind === "create" && (

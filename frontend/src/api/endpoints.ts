@@ -64,6 +64,7 @@ export const projectsApi = {
 export const tracksApi = {
   create: (data: { project_id: string; row_index: number; spawned_from_node_id?: string | null; spawned_from_output_id?: string | null }) =>
     api.post<Track>("/api/tracks", data),
+  get: (id: string) => api.get<Track>(`/api/tracks/${id}`),
   nodes: (id: string) => api.get<NodeItem[]>(`/api/tracks/${id}/nodes`),
   update: (id: string, data: { row_index: number }) => api.patch<Track>(`/api/tracks/${id}`, data),
   remove: (id: string) => api.delete(`/api/tracks/${id}`),

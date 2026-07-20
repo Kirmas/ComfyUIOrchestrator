@@ -66,10 +66,22 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (!node) {
         // The worker lazily creates the paired output asset-node on first
         // result -- the frontend doesn't know it exists until now, so fetch
-        // and insert it instead of dropping the event.
+        // and insert it instead of dropping the event. Its track can be
+        // just as new: worker/tasks.py's _locate_output_row can insert a
+        // brand-new Track (no spawned_from_node_id, so nothing else ever
+        // adds it) when the workflow's home row's output cell was already
+        // settled -- without also fetching that, the node would sit in
+        // nodesById with a track_id nothing in `tracks` recognizes, and
+        // Grid.tsx's render loop only walks known tracks, so it silently
+        // never appeared until a full reload re-fetched everything fresh
+        // (2026-07-20 incident).
         nodesApi
           .get(event.node_id)
-          .then((fetched) => {
+          .then(async (fetched) => {
+            if (!get().tracks.some((t) => t.id === fetched.track_id)) {
+              const track = await tracksApi.get(fetched.track_id);
+              get().addTrack(track);
+            }
             get().addNode(fetched);
             return get().refreshNodeOutputs(event.node_id);
           })

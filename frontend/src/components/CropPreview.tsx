@@ -34,6 +34,15 @@ export function CropPreview({ imageUrl, box, onCommit }: { imageUrl: string; box
   const dragging = useRef(false);
   const [aspectPreset, setAspectPreset] = useState<AspectPreset>("free");
   const [customRatio, setCustomRatio] = useState({ w: 4, h: 5 });
+  // Symmetry-alignment aid, not sent anywhere (same as aspectPreset above):
+  // place a point on one side of the image (e.g. an ear lobe) and its
+  // mirror -- reflected across the CROP box's own horizontal center, not
+  // the image's -- is drawn live as the crop is dragged/resized, so you can
+  // adjust the crop until the mirror lands on the matching feature on the
+  // other side. The point itself never moves with the crop box; only its
+  // mirror is recomputed from liveBox on every render.
+  const [alignPoint, setAlignPoint] = useState<{ x: number; y: number } | null>(null);
+  const [pointMode, setPointMode] = useState(false);
 
   // Only re-sync from the committed `box` prop when nothing is being
   // dragged right now -- without this guard, the onCommit round-trip
@@ -203,6 +212,25 @@ export function CropPreview({ imageUrl, box, onCommit }: { imageUrl: string; box
             />
           </span>
         )}
+        <button
+          className={pointMode ? "active" : ""}
+          style={{ fontSize: 10, padding: "1px 6px" }}
+          onClick={() => setPointMode((v) => !v)}
+          title="Click a point in the image (e.g. an ear lobe), then adjust the crop until the mirrored point -- reflected across the crop box's own center -- lands on the matching feature on the other side"
+        >
+          ⊕ mirror point
+        </button>
+        {alignPoint && (
+          <button
+            style={{ fontSize: 10, padding: "1px 6px" }}
+            onClick={() => {
+              setAlignPoint(null);
+              setPointMode(false);
+            }}
+          >
+            clear point
+          </button>
+        )}
       </div>
       <div style={{ position: "relative", userSelect: "none", lineHeight: 0 }}>
         <img
@@ -249,6 +277,58 @@ export function CropPreview({ imageUrl, box, onCommit }: { imageUrl: string; box
               />
             ))}
           </div>
+        )}
+        {pointMode && natural && (
+          <div
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (!imgRef.current) return;
+              const rect = imgRef.current.getBoundingClientRect();
+              const scale = natural.w / rect.width;
+              const x = Math.max(0, Math.min((e.clientX - rect.left) * scale, natural.w));
+              const y = Math.max(0, Math.min((e.clientY - rect.top) * scale, natural.h));
+              setAlignPoint({ x, y });
+            }}
+            style={{ position: "absolute", inset: 0, cursor: "crosshair", touchAction: "none" }}
+            title="Click to place the alignment point"
+          />
+        )}
+        {alignPoint && natural && (
+          <>
+            <div
+              style={{
+                position: "absolute",
+                left: pct(alignPoint.x, natural.w),
+                top: pct(alignPoint.y, natural.h),
+                width: 10,
+                height: 10,
+                marginLeft: -5,
+                marginTop: -5,
+                borderRadius: "50%",
+                background: "var(--warning)",
+                border: "2px solid white",
+                pointerEvents: "none",
+              }}
+              title="Alignment point"
+            />
+            <div
+              style={{
+                position: "absolute",
+                left: pct(2 * (liveBox.x + liveBox.width / 2) - alignPoint.x, natural.w),
+                top: pct(alignPoint.y, natural.h),
+                width: 10,
+                height: 10,
+                marginLeft: -5,
+                marginTop: -5,
+                borderRadius: "50%",
+                background: "transparent",
+                border: "2px solid var(--warning)",
+                pointerEvents: "none",
+              }}
+              title="Mirrored point (reflected across the crop box's own center)"
+            />
+          </>
         )}
       </div>
     </div>

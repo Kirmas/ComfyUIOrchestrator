@@ -154,48 +154,45 @@ async def update_node(node_id: uuid.UUID, payload: NodeUpdate, db: AsyncSession 
 
 @router.delete("/{node_id}", status_code=204)
 async def delete_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    """Deletes this cell and everything after it in the same track (they
-    depend on it through the linear self_prev chain, so leaving them behind
-    would just dangle). If a sibling track was spawned from the same cause as
-    this one (Grid.tsx's onSelectCandidate -- picking a different candidate
-    from the same generation), one of those siblings moves into the freed-up
-    slot instead of leaving a gap: its nodes already sit at matching
-    step_index values (spawned tracks are laid out to align), so it's a
-    straight re-parent.
+    """Deletes this one node -- an asset node never cascades to anything
+    else, not even something sitting after it in the same track: in the
+    row-span paradigm, inputs/outputs are addressed by
+    Node.created_by_node_id / cell_index, not by "whatever's next in this
+    track", so nothing genuinely depends on a plain asset that way anymore
+    (2026-07-21 incident: deleting an asset in column 0 also deleted an
+    unrelated, later asset the user had separately placed in column 2 of the
+    same track, purely because it came after it positionally -- the old
+    step_index >= this one sweep below didn't check kind or any real
+    relationship at all).
 
-    For a workflow node, also sweeps every one of its own outputs
-    (created_by_node_id, see worker/tasks.py's own_output_nodes) even if
-    some of them live in a DIFFERENT track -- the same-track step_index
-    sweep above only catches an output that's still sitting right where it
-    was first materialized; _claim_new_output_cell can grow one into another
-    track entirely when that home cell was already taken by something else,
-    and a workflow's delete has to reach those too rather than leaving them
-    behind as orphans no longer pointing at anything live."""
+    A workflow node DOES cascade, but only to its own VERIFIED outputs
+    (Node.created_by_node_id == this node's id, see worker/tasks.py's
+    own_output_nodes, which finds them regardless of which track they
+    actually live in) -- never to whatever else happens to sit after it
+    positionally.
+
+    If this node is itself a verified output of some creator workflow, and
+    that creator has a sibling track spawned from the same generation
+    (Grid.tsx's onSelectCandidate -- picking a different candidate), that
+    sibling is promoted into the freed-up slot instead of leaving a gap:
+    its nodes already sit at matching step_index values (spawned tracks are
+    laid out to align), so it's a straight re-parent."""
     node = await db.get(Node, node_id)
     if not node:
         raise HTTPException(404, "Node not found")
 
     track_id = node.track_id
-    step_index = node.step_index
-
-    result = await db.execute(
-        select(Node).where(Node.track_id == track_id, Node.step_index == step_index - 1, Node.kind == NodeKind.workflow)
-    )
-    preceding = result.scalars().first()
 
     sibling_track = None
-    if preceding is not None:
-        result = await db.execute(select(Track).where(Track.spawned_from_node_id == preceding.id, Track.id != track_id))
+    if node.created_by_node_id is not None:
+        result = await db.execute(
+            select(Track).where(Track.spawned_from_node_id == node.created_by_node_id, Track.id != track_id)
+        )
         sibling_track = result.scalars().first()
 
-    result = await db.execute(select(Node).where(Node.track_id == track_id, Node.step_index >= step_index))
-    nodes_to_delete = list(result.scalars().all())
-
+    nodes_to_delete = [node]
     if node.kind == NodeKind.workflow:
-        already = {n.id for n in nodes_to_delete}
-        for out in await own_output_nodes(db, node.id):
-            if out.id not in already:
-                nodes_to_delete.append(out)
+        nodes_to_delete.extend(await own_output_nodes(db, node.id))
 
     node_ids = [n.id for n in nodes_to_delete]
 

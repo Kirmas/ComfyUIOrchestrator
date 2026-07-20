@@ -592,8 +592,22 @@ async def _materialize_job_result(db, job: Job, node: Node, effective, instance,
     assets = await wait_with_timeout(instance.result(external_job_id), settings.job_timeout_seconds)
     storage = get_storage()
     asset_node = await _get_or_create_output_asset_node(db, node, effective.is_native)
+
+    # Surfaced on the frontend (asset cell face + candidate thumbnails) so a
+    # user comparing variants can see which backend produced which one --
+    # None for native execution (job.backend_id is never set there, see
+    # dispatcher.select_backend's DispatchChoice(backend=None, ...)), which
+    # is fine since native nodes already get their own "native" marker.
+    backend_name = None
+    if job.backend_id:
+        backend = await db.get(Backend, job.backend_id)
+        backend_name = backend.name if backend else None
+
     for asset_ref in assets:
         key = storage.put_object(asset_ref.data, asset_ref.mime_type, prefix=f"nodes/{asset_node.id}")
+        meta = dict(asset_ref.meta or {})
+        if backend_name:
+            meta["backend_name"] = backend_name
         db.add(
             Asset(
                 node_id=asset_node.id,
@@ -601,7 +615,7 @@ async def _materialize_job_result(db, job: Job, node: Node, effective, instance,
                 mime_type=asset_ref.mime_type,
                 kind=asset_ref.kind,
                 selected=False,
-                meta=asset_ref.meta or {},
+                meta=meta,
             )
         )
 

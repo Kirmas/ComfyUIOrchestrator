@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { assetsApi, backendsApi, capabilitiesApi, nodesApi, nodeTemplatesApi, projectsApi, tracksApi } from "../api/endpoints";
 import { useProjectWs } from "../api/useProjectWs";
 import { useProjectStore } from "../state/projectStore";
 import { resolveSlotAsset } from "../slotResolution";
 import { slotFields } from "../templateUtils";
-import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project } from "../types";
+import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project, Track } from "../types";
+import { cx } from "../utils";
 import { ArrowsOverlay, type Edge } from "./ArrowsOverlay";
 import { CompareModal } from "./CompareModal";
 import { NodeCell } from "./NodeCell";
@@ -88,6 +89,72 @@ export function Grid({ projectId }: { projectId: string }) {
   const [emptyTrackSkip, setEmptyTrackSkip] = useState<Record<string, number>>({});
   const containerRef = useRef<HTMLDivElement>(null);
   const cellRefs = useRef(new Map<string, HTMLDivElement>()).current;
+  // Click-drag panning of the grid's own scroll container, armed only when
+  // the pointerdown didn't land on a node cell or any interactive control
+  // (button/input/select/etc, and anything HTML5-draggable) -- letting it
+  // start from those would fight their own click/drag gestures. Panning
+  // itself is just scrolling containerRef by the drag delta, not a
+  // transform -- the grid's own layout (track labels, cell positions)
+  // never needs to know panning happened at all.
+  const [isPanning, setIsPanning] = useState(false);
+  // Mouse-wheel zoom, 5 discrete levels (-2..+2, index 2 == 0 == today's
+  // 100% size). Applied as a CSS transform: scale() on gridWrapperRef,
+  // never touching layout (gridTemplateColumns/Rows) itself -- an outer
+  // sizer div (below, sized to naturalSize * zoomScale) gives the scroll
+  // container the correct scaled scroll extent, since transform alone
+  // doesn't change an element's own layout box/offsetWidth. naturalSize is
+  // gridWrapperRef's un-scaled size (ResizeObserver -- transform doesn't
+  // affect what that reports on the element carrying it), kept in sync
+  // whenever real content (tracks/nodes) changes its footprint.
+  const ZOOM_SCALES = [0.6, 0.8, 1, 1.2, 1.4];
+  const [zoomIndex, setZoomIndex] = useState(2);
+  const zoomScale = ZOOM_SCALES[zoomIndex];
+  const gridWrapperRef = useRef<HTMLDivElement>(null);
+  const [naturalSize, setNaturalSize] = useState({ w: 0, h: 0 });
+
+  useEffect(() => {
+    const el = gridWrapperRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => setNaturalSize({ w: el.offsetWidth, h: el.offsetHeight }));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  // Plain wheel, no modifier needed -- panning already took over scrolling
+  // (see onBackgroundPointerDown above), so the wheel is free to mean zoom
+  // instead. Attached as a native (non-React) listener because React's own
+  // onWheel is passive by default; calling preventDefault() there just
+  // warns and does nothing, and without it the browser would ALSO scroll
+  // the container on every zoom step. Re-centers on the cursor: converts
+  // the point under it to "natural" (unscaled) coordinates before changing
+  // scale, then restores that same point under the cursor at the new
+  // scale, on the next frame once the sizer div has picked up the resize.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      setZoomIndex((idx) => {
+        const nextIdx = e.deltaY < 0 ? Math.min(ZOOM_SCALES.length - 1, idx + 1) : Math.max(0, idx - 1);
+        if (nextIdx === idx) return idx;
+        const rect = el.getBoundingClientRect();
+        const offsetX = e.clientX - rect.left;
+        const offsetY = e.clientY - rect.top;
+        const oldScale = ZOOM_SCALES[idx];
+        const newScale = ZOOM_SCALES[nextIdx];
+        const naturalX = (el.scrollLeft + offsetX) / oldScale;
+        const naturalY = (el.scrollTop + offsetY) / oldScale;
+        requestAnimationFrame(() => {
+          el.scrollLeft = naturalX * newScale - offsetX;
+          el.scrollTop = naturalY * newScale - offsetY;
+        });
+        return nextIdx;
+      });
+    };
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Guards the auto-expand effect below against firing WHILE any multi-node
   // structural operation (its own insert, or a manual dropAssetAt/
   // dropWorkflowAt drag) is still applying its updates one at a time. Each
@@ -211,6 +278,24 @@ export function Grid({ projectId }: { projectId: string }) {
   // This is the *desired* size -- see rowSpanByNode below for what actually
   // fits right now, and the auto-expand effect further down for closing the
   // gap between the two by inserting real track rows.
+  //
+  // A prior version of this measured each output's actual row OFFSET from
+  // this node's home row (rowIndexOfTrack(out.track_id) - creatorRow)
+  // instead of counting spawned tracks, to also reach rows the BACKEND
+  // grows into (worker/tasks.py's _locate_output_row, which doesn't tag its
+  // inserted Track with spawned_from_node_id). That fed back on itself: the
+  // auto-expand effect's insertTracksAt(position, count) shifts every track
+  // at row_index >= position down by count -- including this node's own
+  // output tracks whenever they sit at or past the insertion point -- which
+  // increases their measured offset, which increases desired again next
+  // render, which inserts again, forever (2026-07-20 incident: a project's
+  // track count jumped from ~18 to 55 and climbing before this was caught).
+  // Counting spawned tracks instead is immune to that: insertTracksAt never
+  // changes how many tracks are spawned_from_node_id-tagged to this node,
+  // only their row_index, so the desired value it feeds back into is
+  // stable. The tradeoff (reverted along with this) is the backend-grown-row
+  // case above doesn't stretch the merged cell to visually reach it -- a
+  // narrower, real bug, not an infinite one.
   const desiredRowSpanByNode = useMemo(() => {
     const map = new Map<string, number>();
     for (const node of Object.values(nodesById)) {
@@ -270,6 +355,34 @@ export function Grid({ projectId }: { projectId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodesById, rowSpanByNode, tracks]);
 
+  // Every asset-kind node whose very next cell (same row, step+1) is empty
+  // and not claimed by some other workflow's spanning card gets its own
+  // "+ step" offer -- not just whichever node happens to be its track's
+  // current tail. The per-track button below used to be the ONLY way to
+  // add a workflow step, anchored to nextStepIndexFor's notion of "the
+  // track's last node" -- so an asset dragged into an early, previously-
+  // empty column of an already-long track (e.g. relocated there manually)
+  // had no "+ step" anywhere near it: the track's real tail was still way
+  // out past its other, unrelated cells, several columns over (2026-07-20
+  // incident: an asset moved to column 0 of a track that already reached
+  // column 8 got no button until scrolled all the way out to column 9).
+  // Checking every asset node individually instead covers the track's tail
+  // case too (nothing else claims the cell right after it either), so this
+  // replaces that per-track "+ step" entirely rather than living alongside it.
+  const assetNextStepCells = useMemo(() => {
+    const list: { node: NodeItem; row: number; step: number }[] = [];
+    for (const node of Object.values(nodesById)) {
+      if (node.kind !== "asset") continue;
+      const row = effectiveRow(node);
+      const step = node.step_index + 1;
+      if (nodesByRowStep.has(`${row}:${step}`)) continue;
+      if (blockingNodeByCell.has(`${row}:${step}`)) continue;
+      list.push({ node, row, step });
+    }
+    return list;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodesById, nodesByRowStep, blockingNodeByCell, tracks]);
+
   // requiredKind matters for callers that need the *next* step to stay a
   // specific kind (e.g. "+ step" after a manually-filled asset cell always
   // wants a workflow cell right there) -- a blocked column is always
@@ -300,9 +413,9 @@ export function Grid({ projectId }: { projectId: string }) {
       const lastNode = trackNodes[trackNodes.length - 1];
       const base = nextStepIndexFor(trackNodes);
       const step = trackNodes.length === 0 ? base + (emptyTrackSkip[track.id] ?? 0) : base;
-      // Mirrors canAddStep's constraint below: a "+ step" after a
-      // manually-filled asset cell always needs to land on a workflow-parity
-      // column, so it may have to skip an extra column beyond a merely-free one.
+      // Mirrors assetNextStepCells' own constraint: a "+ step" after an
+      // asset cell always needs to land on a workflow-parity column, so it
+      // may have to skip an extra column beyond a merely-free one.
       const requiredKind = lastNode?.kind === "asset" ? "workflow" : undefined;
       max = Math.max(max, nextFreeStep(track.row_index, step, requiredKind));
     }
@@ -398,6 +511,69 @@ export function Grid({ projectId }: { projectId: string }) {
     const toShift = remaining.filter((t) => t.row_index > deletedRow);
     setTracks(remaining.map((t) => (t.row_index > deletedRow ? { ...t, row_index: t.row_index - 1 } : t)));
     await Promise.all(toShift.map((t) => tracksApi.update(t.id, { row_index: t.row_index - 1 })));
+  };
+
+  // Manual, one-shot recompute of a workflow node's own row-span -- a button
+  // press (NodeCell's "⤢"), never an automatic effect. An earlier version
+  // tried to keep desiredRowSpanByNode itself reactive to real output row
+  // offsets so the card would grow/shrink on its own, but that fed back on
+  // itself through insertTracksAt (which shifts a node's own already-placed
+  // outputs down while making room, growing their measured offset, which
+  // grows the desired span again, forever -- 2026-07-20 incident, a
+  // project's track count went from ~18 to 55 before it was caught). Doing
+  // this as a deliberate, single pass instead can't loop: it computes the
+  // true minimum once, removes trailing rows down to it, and stops -- it
+  // never re-triggers itself just because a track moved.
+  const shrinkWorkflowToFit = async (node: NodeItem) => {
+    if (structuralOpRef.current) {
+      alert("Another move is still in progress -- try again in a moment.");
+      return;
+    }
+    structuralOpRef.current = true;
+    try {
+      const template = templates.find((t) => t.node_type === node.node_type);
+      const inputSlots = template ? slotFields(template.param_schema).length : 0;
+      const start = effectiveRow(node);
+      const achieved = rowSpanByNode.get(node.id) ?? 1;
+
+      const computeNeeded = () => {
+        const live = useProjectStore.getState();
+        const rowOf = (trackId: string) => live.tracks.find((t) => t.id === trackId)?.row_index ?? 0;
+        let maxOutputOffset = 0;
+        for (const out of Object.values(live.nodesById)) {
+          if (out.created_by_node_id !== node.id) continue;
+          maxOutputOffset = Math.max(maxOutputOffset, rowOf(out.track_id) - start);
+        }
+        return Math.max(inputSlots, maxOutputOffset + 1, 1);
+      };
+
+      const needed = computeNeeded();
+      if (needed >= achieved) {
+        alert("Nothing to shrink -- this card is already at its minimum needed size.");
+        return;
+      }
+
+      // Bottom-up: removing the lowest excess row first never disturbs the
+      // row_index of anything still above it in this same pass.
+      for (let r = start + achieved - 1; r >= start + needed; r--) {
+        const live = useProjectStore.getState();
+        const track = live.tracks.find((t) => t.row_index === r);
+        if (!track) continue;
+        const hasAnyNode = Object.values(live.nodesById).some((n) => n.track_id === track.id);
+        if (hasAnyNode) {
+          alert(`Row ${r} still has content in another track -- stopped shrinking there.`);
+          break;
+        }
+        await tracksApi.remove(track.id);
+        removeTrack(track.id);
+        const remaining = useProjectStore.getState().tracks;
+        const toShift = remaining.filter((t) => t.row_index > r);
+        setTracks(remaining.map((t) => (t.row_index > r ? { ...t, row_index: t.row_index - 1 } : t)));
+        await Promise.all(toShift.map((t) => tracksApi.update(t.id, { row_index: t.row_index - 1 })));
+      }
+    } finally {
+      structuralOpRef.current = false;
+    }
   };
 
   // Makes room for a workflow node's full desired span (see the auto-expand
@@ -563,28 +739,78 @@ export function Grid({ projectId }: { projectId: string }) {
       // cell. That keeps every arrow in a cascade pointing back at the one
       // true source instead of chaining picker -> picker -> picker.
       const liveState = useProjectStore.getState();
-      const precedingWorkflow = Object.values(liveState.nodesById).find(
+      const liveTracks = liveState.tracks;
+      const liveNodes = Object.values(liveState.nodesById);
+      const rowIndexOfLive = (trackId: string) => liveTracks.find((t) => t.id === trackId)?.row_index ?? 0;
+      const originalRow = rowIndexOfLive(originalTrackId);
+
+      const precedingWorkflow = liveNodes.find(
         (n) => n.track_id === originalTrackId && n.step_index === originalStepIndex - 1 && n.kind === "workflow",
       );
-      const ownTrack = liveState.tracks.find((t) => t.id === originalTrackId);
+      const ownTrack = liveTracks.find((t) => t.id === originalTrackId);
       const causeNodeId = precedingWorkflow?.id ?? ownTrack?.spawned_from_node_id ?? sourceNode.id;
 
-      const liveTracks = liveState.tracks;
-      const rowIndex = liveTracks.length === 0 ? 0 : Math.max(...liveTracks.map((t) => t.row_index)) + 1;
-      const newTrack = await tracksApi.create({
-        project_id: projectId,
-        row_index: rowIndex,
-        spawned_from_node_id: causeNodeId,
-        spawned_from_output_id: kept.id,
-      });
-      addTrack(newTrack);
+      // If the causing workflow's own row-span already has an unused row at
+      // this same output column -- its span is sized for its image/file
+      // input slots, and an output can land on any row within it per
+      // _ensure_output_binding, not just its own home row -- park the
+      // leftover picker there directly instead of spawning a brand-new
+      // track. A new spawned track should only be the fallback once the
+      // existing span genuinely has no room left; before this, every
+      // leftover picker got a fresh spawned track unconditionally, growing
+      // the workflow's visible row-span by one more than it needs even when
+      // an empty row was already sitting right there, unused, inside its
+      // own span (2026-07-20 incident: picking a candidate out of a 4-row
+      // workflow node visibly grew it to 5 rows and dropped the leftover
+      // picker into a new, distant track instead of the empty row already
+      // inside it).
+      let targetTrack: Track | undefined;
+      if (precedingWorkflow) {
+        const template = templates.find((t) => t.node_type === precedingWorkflow.node_type);
+        const slotCount = template ? slotFields(template.param_schema).length : 0;
+        const span = Math.max(slotCount, 1);
+        const creatorRow = rowIndexOfLive(precedingWorkflow.track_id);
+        const nodesByRowStepLive = new Map<string, NodeItem>();
+        for (const n of liveNodes) nodesByRowStepLive.set(`${rowIndexOfLive(n.track_id)}:${n.step_index}`, n);
+        for (let r = creatorRow; r < creatorRow + span; r++) {
+          if (r === originalRow || nodesByRowStepLive.has(`${r}:${originalStepIndex}`)) continue;
+          targetTrack = liveTracks.find((t) => t.row_index === r);
+          if (targetTrack) break;
+        }
+      }
 
-      // 1) Create the settled single-asset node in the vacated original cell...
-      // carrying sourceNode's OWN created_by_node_id forward (not sourceNode
-      // itself -- an asset.select picker isn't a workflow, it has no
-      // step_index+1 of its own to be a creator of). This settled node is
-      // just as much the original workflow's output as the picker it's
-      // replacing, so it stays bound to the same creator (see
+      let movedSource: NodeItem;
+      if (targetTrack) {
+        movedSource = await nodesApi.update(sourceNode.id, { track_id: targetTrack.id });
+        addNode(movedSource);
+      } else {
+        const rowIndex = liveTracks.length === 0 ? 0 : Math.max(...liveTracks.map((t) => t.row_index)) + 1;
+        const newTrack = await tracksApi.create({
+          project_id: projectId,
+          row_index: rowIndex,
+          spawned_from_node_id: causeNodeId,
+          spawned_from_output_id: kept.id,
+        });
+        addTrack(newTrack);
+
+        // Relocate sourceNode (still holding `others`) into the new track
+        // FIRST, to actually vacate its original slot -- the backend's
+        // _ensure_slot_free (nodes.py) rejects creating a node at a
+        // (track_id, step_index) some other live node still occupies, and
+        // sourceNode hadn't moved yet if the settled node was created before
+        // this: that 409'd every time there were leftovers, leaving the new
+        // (empty) track added to the grid with neither the settled node nor
+        // the move having happened (2026-07-20 incident).
+        movedSource = await nodesApi.update(sourceNode.id, { track_id: newTrack.id });
+        addNode(movedSource);
+      }
+
+      // ...then create the settled single-asset node in the now-vacated
+      // original cell, carrying sourceNode's OWN created_by_node_id forward
+      // (not sourceNode itself -- an asset.select picker isn't a workflow,
+      // it has no step_index+1 of its own to be a creator of). This settled
+      // node is just as much the original workflow's output as the picker
+      // it's replacing, so it stays bound to the same creator (see
       // _ensure_output_binding) rather than becoming a free-floating,
       // unbound asset just because it happened to be created here instead
       // of by _get_or_create_output_asset_node.
@@ -598,14 +824,6 @@ export function Grid({ projectId }: { projectId: string }) {
       addNode(settledNode);
       await assetsApi.move(kept.id, settledNode.id);
       await refreshNodeOutputs(settledNode.id);
-
-      // 2) ...then relocate sourceNode (still holding `others`) into the new
-      // track. Only after the kept asset is safely off of it -- otherwise a
-      // crash between these two steps would leave the kept asset attached
-      // to a node about to be moved out from under the user's expectation
-      // of "this cell now shows the picked image".
-      const movedSource = await nodesApi.update(sourceNode.id, { track_id: newTrack.id });
-      addNode(movedSource);
       await refreshNodeOutputs(movedSource.id);
 
       relocatedPicker = movedSource;
@@ -730,7 +948,10 @@ export function Grid({ projectId }: { projectId: string }) {
 
       const occupant = nodesByRowStep.get(`${targetRow}:${targetStep}`);
       if (occupant && occupant.id !== dragged.id) {
-        if (occupant.kind !== "asset" || occupant.node_type === "asset.select") {
+        // asset.select is just as swappable as any other asset node now --
+        // dragging moves the whole picker, so trading places with one is no
+        // different from trading places with a settled asset.single.
+        if (occupant.kind !== "asset") {
           alert("Can't swap with that cell.");
           return;
         }
@@ -772,6 +993,10 @@ export function Grid({ projectId }: { projectId: string }) {
       if (node.kind !== "workflow") return 1;
       const template = templates.find((t) => t.node_type === node.node_type);
       const inputSlots = template ? slotFields(template.param_schema).length : 0;
+      // Mirrors desiredRowSpanByNode's own formula above (spawned-track
+      // count, not output row offset -- see that memo's comment for why the
+      // offset-based version fed back into an infinite growth loop via
+      // insertTracksAt).
       const spawnedRows = liveTracks.filter((t) => t.spawned_from_node_id === node.id).length;
       const desired = Math.max(inputSlots, 1 + spawnedRows, 1);
       const start = rowIndexOf(node.track_id);
@@ -1221,10 +1446,59 @@ export function Grid({ projectId }: { projectId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodesById, desiredRowSpanByNode, rowSpanByNode, tracks, templatesLoaded]);
 
+  const onBackgroundPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return; // left button only -- middle/right keep their own browser behavior
+    const target = e.target as HTMLElement;
+    if (target.closest("button, input, select, textarea, a, .node-cell, [draggable='true']")) return;
+    const container = containerRef.current;
+    if (!container) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startScrollLeft = container.scrollLeft;
+    const startScrollTop = container.scrollTop;
+    setIsPanning(true);
+    const onMove = (ev: PointerEvent) => {
+      container.scrollLeft = startScrollLeft - (ev.clientX - startX);
+      container.scrollTop = startScrollTop - (ev.clientY - startY);
+    };
+    const onUp = () => {
+      setIsPanning(false);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+
   return (
-    <div className="main-area" ref={containerRef}>
-      <div className="grid-wrapper">
-        <ArrowsOverlay edges={edges} cellRefs={cellRefs} containerRef={containerRef} deps={[nodesById, tracks]} />
+    <div
+      className={cx("main-area", isPanning && "panning")}
+      ref={containerRef}
+      onPointerDown={onBackgroundPointerDown}
+    >
+      {/* A sibling of the scaled sizer/grid-wrapper below, not a descendant --
+          transform: scale() on an ancestor would otherwise hijack this as
+          its own containing block instead of the real viewport/scroll
+          container, breaking position: sticky. Mouse wheel over the canvas
+          zooms (onBackgroundPointerDown's pan took over plain scrolling). */}
+      <div className="zoom-indicator">
+        zoom {zoomIndex > 2 ? `+${zoomIndex - 2}` : zoomIndex - 2} ({Math.round(zoomScale * 100)}%)
+        <button onClick={() => setZoomIndex(2)} title="Reset zoom to 0 (100%)" disabled={zoomIndex === 2}>
+          reset
+        </button>
+      </div>
+      {/* A sibling of the scaled grid-wrapper, not a descendant -- its path
+          coordinates are already computed in real (post-transform) pixels
+          via getBoundingClientRect (see ArrowsOverlay), so nesting it inside
+          an ancestor with transform: scale() would scale the SVG itself a
+          SECOND time on top of that, breaking every arrow at any zoom level
+          other than 1 (2026-07-21 incident). */}
+      <ArrowsOverlay edges={edges} cellRefs={cellRefs} containerRef={containerRef} deps={[nodesById, tracks, zoomScale]} />
+      <div style={{ width: naturalSize.w * zoomScale, height: naturalSize.h * zoomScale }}>
+        <div ref={gridWrapperRef} className="grid-wrapper" style={{ transform: `scale(${zoomScale})`, transformOrigin: "0 0" }}>
         <div
           className="grid-canvas"
           style={{
@@ -1268,13 +1542,17 @@ export function Grid({ projectId }: { projectId: string }) {
               const row = effectiveRow(node);
               const gridRow = node.kind === "workflow" ? `${row + 1} / span ${rowSpanByNode.get(node.id) ?? 1}` : row + 1;
               // A still-undecided candidates picker ("asset.select") has no
-              // single well-defined picture to grab (same reason isPickable
-              // above excludes it). A refasset still occupies a real (row,
-              // column) slot like any other asset node, so it's just as
-              // repositionable -- only dragging is meaningless for workflow
-              // cells (their own start row isn't draggable, only their span
-              // grows/shrinks automatically).
-              const isDraggableAsset = node.kind === "asset" && node.node_type !== "asset.select";
+              // single well-defined picture to grab for compare/ref/pick
+              // (isPickable above still excludes it for that reason), but
+              // dragging moves the whole picker -- all its candidates
+              // together, none singled out -- so that's unambiguous and
+              // just as valid a reposition as asset.single/refasset. A
+              // refasset still occupies a real (row, column) slot like any
+              // other asset node, so it's just as repositionable -- only
+              // dragging is meaningless for workflow cells (their own start
+              // row isn't draggable, only their span grows/shrinks
+              // automatically).
+              const isDraggableAsset = node.kind === "asset";
               const isDraggableWorkflow = node.kind === "workflow";
               return (
                 <div
@@ -1332,6 +1610,7 @@ export function Grid({ projectId }: { projectId: string }) {
                     onSelectCandidate={onSelectCandidate}
                     onStartCompare={onStartCompare}
                     onStartRef={onStartRef}
+                    onShrinkToFit={shrinkWorkflowToFit}
                   />
                 </div>
               );
@@ -1413,80 +1692,124 @@ export function Grid({ projectId }: { projectId: string }) {
 
           {sortedTracks.map((track, rowIdx) => {
             const showStartChoice = project?.start_kind == null;
-            // A workflow cell always grows its own next step on its own --
-            // draft (choose a template, generate) or done (its output already
-            // materialized the following asset cell) -- so "+ step" would
-            // only ever add a premature, redundant slot after it. It's only
-            // ever needed after a manually-filled asset cell (no generation
-            // involved, so nothing auto-chains forward from it).
-            const lastNode = (nodesByTrack.get(track.id) ?? []).slice(-1)[0];
-            const canAddStep = !showStartChoice && lastNode?.kind === "asset";
+            const trackNodes = nodesByTrack.get(track.id) ?? [];
+            const firstNode = trackNodes[0];
+            // A track's own leading columns (before its first node) can be
+            // just as unreachable as a wholly empty track's, even when the
+            // track already has real content further out -- e.g. one of
+            // character_chart's 8 input-slot tracks, each holding only its
+            // own reference photo at step 6, with columns 0-5 never touched.
+            // assetNextStepCells (every asset offers "+ step" once the cell
+            // right after IT is empty) doesn't reach those leading columns
+            // at all, since there's no asset node sitting in them to anchor
+            // to -- only a track with literally ZERO nodes got a button
+            // here before (2026-07-20 incident: a track with unrelated
+            // content starting at step 6 showed nothing for its own empty
+            // steps 0-5). `ceiling` is where this leading gap ends: the
+            // first real node's own column, or unbounded for a wholly empty
+            // track.
+            const ceiling = firstNode ? firstNode.step_index : Infinity;
+            if (ceiling === 0) return null;
             // A track with no cells yet (freshly added via "+ New track")
             // has nothing to auto-chain its first cell either -- same
-            // problem as the asset case above, just for whichever column its
-            // button currently sits on. Unlike the very first track in the
-            // project, it's not a free choice: start_kind already fixes what
-            // kind every column is, so show the one button that matches
-            // instead of asking -- but "empty" lets the user push that
-            // button (and the kind it offers) out to the next column, for
-            // tracks that shouldn't start where the pattern says.
-            const rawButtonStep = !showStartChoice && !lastNode ? nextStepIndex(track.id) + (emptyTrackSkip[track.id] ?? 0) : nextStepIndex(track.id);
+            // problem as an asset cell with an empty next column, just for
+            // whichever column its button currently sits on. Unlike the very
+            // first track in the project, it's not a free choice: start_kind
+            // already fixes what kind every column is, so show the one
+            // button that matches instead of asking -- but "empty" lets the
+            // user push that button (and the kind it offers) out to the next
+            // column, for tracks that shouldn't start where the pattern says.
+            const rawButtonStep = !showStartChoice ? emptyTrackSkip[track.id] ?? 0 : 0;
             // If this track's own next slot lands inside another track's
             // spanning workflow card (blockingNodeByCell), auto-advance past it
             // -- that cell is already visually and physically taken, so
             // offering a button there would let the user create a node right
             // on top of it.
-            const buttonStep = showStartChoice
-              ? rawButtonStep
-              : nextFreeStep(track.row_index, rawButtonStep, canAddStep ? "workflow" : undefined);
-            const emptyTrackKind = !showStartChoice && !lastNode ? kindForStep(project!.start_kind!, buttonStep) : null;
+            const buttonStep = showStartChoice ? rawButtonStep : nextFreeStep(track.row_index, rawButtonStep);
+            if (buttonStep >= ceiling) return null;
+            const emptyTrackKind = !showStartChoice ? kindForStep(project!.start_kind!, buttonStep) : null;
             const skipColumn = () => setEmptyTrackSkip((prev) => ({ ...prev, [track.id]: (prev[track.id] ?? 0) + 1 }));
+            // The column right after buttonStep is just as reachable, and its
+            // kind is always the opposite one by construction (parity
+            // alternates every column) -- offer it too, right away, instead
+            // of making the user click "empty" first just to reveal it. A
+            // brand-new track with nothing in it yet is the common case this
+            // matters for: both "start with an asset" and "start straight
+            // into a workflow, no asset first" should be one click each, not
+            // one click to skip plus one to create (2026-07-20: only
+            // buttonStep's own button showed; the very next column, just as
+            // free, needed an extra "empty" click to even see).
+            const secondStep = buttonStep + 1;
+            const secondKind = emptyTrackKind === "asset" ? "workflow" : emptyTrackKind === "workflow" ? "asset" : null;
+            const secondAvailable =
+              secondKind !== null && secondStep < ceiling && !blockingNodeByCell.has(`${track.row_index}:${secondStep}`);
             return (
-              <div
-                key={`add-${track.id}`}
-                style={{ gridColumn: buttonStep + 2, gridRow: rowIdx + 1, alignSelf: "center", display: "flex", gap: 4 }}
-              >
-                {showStartChoice ? (
-                  <>
-                    <button onClick={() => addStep(track.id, "asset")} title="First column in this project: asset cells (manual upload)">
-                      + start with asset
-                    </button>
-                    <button onClick={() => addStep(track.id, "workflow")} title="First column in this project: workflow cells">
-                      + start with workflow
-                    </button>
-                  </>
-                ) : canAddStep ? (
-                  <button onClick={() => addStep(track.id, undefined, buttonStep)} title="Add a workflow cell after this manually-filled asset cell">
-                    + step
-                  </button>
-                ) : emptyTrackKind === "asset" ? (
-                  refFor ? (
-                    <button onClick={() => completeRefAt(track.row_index, buttonStep)} title="Place the reference here">
-                      place ref here
-                    </button>
-                  ) : (
+              <Fragment key={track.id}>
+                <div
+                  style={{ gridColumn: buttonStep + 2, gridRow: rowIdx + 1, alignSelf: "center", display: "flex", gap: 4 }}
+                >
+                  {showStartChoice ? (
                     <>
-                      <button onClick={() => addStep(track.id, "asset", buttonStep)} title="This column in this track: asset cell (manual upload)">
-                        + asset
+                      <button onClick={() => addStep(track.id, "asset")} title="First column in this project: asset cells (manual upload)">
+                        + start with asset
+                      </button>
+                      <button onClick={() => addStep(track.id, "workflow")} title="First column in this project: workflow cells">
+                        + start with workflow
+                      </button>
+                    </>
+                  ) : emptyTrackKind === "asset" ? (
+                    refFor ? (
+                      <button onClick={() => completeRefAt(track.row_index, buttonStep)} title="Place the reference here">
+                        place ref here
+                      </button>
+                    ) : (
+                      <>
+                        <button onClick={() => addStep(track.id, "asset", buttonStep)} title="This column in this track: asset cell (manual upload)">
+                          + asset
+                        </button>
+                        <button onClick={skipColumn} title="Leave this column blank for this track and offer the next one instead">
+                          empty
+                        </button>
+                      </>
+                    )
+                  ) : emptyTrackKind === "workflow" ? (
+                    <>
+                      <button onClick={() => addStep(track.id, "workflow", buttonStep)} title="This column in this track: workflow cell">
+                        + step
                       </button>
                       <button onClick={skipColumn} title="Leave this column blank for this track and offer the next one instead">
                         empty
                       </button>
                     </>
-                  )
-                ) : emptyTrackKind === "workflow" ? (
-                  <>
-                    <button onClick={() => addStep(track.id, "workflow", buttonStep)} title="This column in this track: workflow cell">
-                      + step
-                    </button>
-                    <button onClick={skipColumn} title="Leave this column blank for this track and offer the next one instead">
-                      empty
-                    </button>
-                  </>
-                ) : null}
-              </div>
+                  ) : null}
+                </div>
+                {!showStartChoice && secondAvailable && (
+                  <div style={{ gridColumn: secondStep + 2, gridRow: rowIdx + 1, alignSelf: "center", display: "flex", gap: 4 }}>
+                    {secondKind === "asset" ? (
+                      <button onClick={() => addStep(track.id, "asset", secondStep)} title="This column in this track: asset cell (manual upload)">
+                        + asset
+                      </button>
+                    ) : (
+                      <button onClick={() => addStep(track.id, "workflow", secondStep)} title="This column in this track: workflow cell -- no asset needed first">
+                        + step
+                      </button>
+                    )}
+                  </div>
+                )}
+              </Fragment>
             );
           })}
+
+          {assetNextStepCells.map(({ node, row, step }) => (
+            <div
+              key={`add-asset-${node.id}`}
+              style={{ gridColumn: step + 2, gridRow: row + 1, alignSelf: "center", display: "flex", gap: 4 }}
+            >
+              <button onClick={() => addStep(node.track_id, undefined, step)} title="Add a workflow cell after this asset cell">
+                + step
+              </button>
+            </div>
+          ))}
         </div>
 
         <div style={{ marginTop: 16 }}>
@@ -1501,6 +1824,7 @@ export function Grid({ projectId }: { projectId: string }) {
               Cancel reference
             </button>
           )}
+        </div>
         </div>
       </div>
 

@@ -12,6 +12,20 @@ import { CropPreview, type CropBox } from "./CropPreview";
 import { Model3DThumb } from "./Model3DThumb";
 import { ZoomableImage } from "./ZoomableImage";
 
+// Shared by CandidatesGrid and SingleOutput -- resolution (read off the
+// loaded <img>, not stored anywhere) plus, when known, which backend
+// produced this asset, in one overlay instead of two competing for the same
+// bottom-of-thumbnail spot.
+function AssetMetaTag({ dims, backendName }: { dims: { w: number; h: number } | undefined; backendName: string | undefined }) {
+  if (!dims && !backendName) return null;
+  const parts = [dims ? `${dims.w}×${dims.h}` : null, backendName ?? null].filter((p): p is string => p !== null);
+  return (
+    <span className="asset-meta-tag" title={parts.join(" · ")}>
+      {parts.join(" · ")}
+    </span>
+  );
+}
+
 export interface Props {
   node: NodeItem;
   templates: NodeTemplate[];
@@ -35,6 +49,12 @@ export interface Props {
   onSelectCandidate: (node: NodeItem, kept: Asset, others: Asset[]) => Promise<NodeItem | undefined>;
   onStartCompare: (node: NodeItem, asset: Asset) => void;
   onStartRef: (node: NodeItem) => void;
+  // Manual, one-shot recompute of a workflow node's own row-span, removing
+  // any trailing EMPTY rows it doesn't actually need down to the minimum
+  // (its input slot count, or further if one of its own outputs still
+  // reaches lower) -- see Grid.tsx's shrinkWorkflowToFit for why this is a
+  // deliberate button press rather than an automatic effect.
+  onShrinkToFit: (node: NodeItem) => void;
 }
 
 // node.is_picker (explicit, persistent -- see db/models.py) forces a decision
@@ -55,6 +75,7 @@ function CandidatesGrid({
   onImageOpen: (url: string) => void;
   onCompare: (asset: Asset) => void;
 }) {
+  const [dimsById, setDimsById] = useState<Record<string, { w: number; h: number }>>({});
   return (
     // No stopPropagation here (unlike the buttons below) -- the thumbnail is
     // most of a cell's tappable area, especially on a phone, so it has to let
@@ -66,11 +87,16 @@ function CandidatesGrid({
           {asset.kind === "mesh" ? (
             <Model3DThumb url={resolveAssetUrl(asset.url)} />
           ) : (
-            <>
+            <div className="output-thumb">
               <img
                 src={resolveAssetUrl(asset.url)}
                 alt="output"
                 onDoubleClick={() => onImageOpen(resolveAssetUrl(asset.url))}
+                onLoad={(e) => {
+                  const img = e.currentTarget;
+                  if (!img) return;
+                  setDimsById((d) => ({ ...d, [asset.id]: { w: img.naturalWidth, h: img.naturalHeight } }));
+                }}
                 title="Double-click to open full size"
                 style={{ cursor: "zoom-in" }}
               />
@@ -98,7 +124,11 @@ function CandidatesGrid({
               >
                 ⇄
               </button>
-            </>
+              <AssetMetaTag
+                dims={dimsById[asset.id]}
+                backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
+              />
+            </div>
           )}
           <div style={{ display: "flex", gap: 4, marginTop: 2 }}>
             <button
@@ -129,18 +159,24 @@ function CandidatesGrid({
 }
 
 function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImageOpen: (url: string) => void; onCompare: (asset: Asset) => void }) {
+  const [dims, setDims] = useState<{ w: number; h: number } | undefined>(undefined);
   return (
     <div className="output-grid">
       <div className="output-item">
         {asset.kind === "mesh" ? (
           <Model3DThumb url={resolveAssetUrl(asset.url)} />
         ) : (
-          <>
+          <div className="output-thumb">
             <img
               src={resolveAssetUrl(asset.url)}
               alt="output"
               draggable={false}
               onDoubleClick={() => onImageOpen(resolveAssetUrl(asset.url))}
+              onLoad={(e) => {
+                const img = e.currentTarget;
+                if (!img) return;
+                setDims({ w: img.naturalWidth, h: img.naturalHeight });
+              }}
               title="Double-click to open full size"
               style={{ cursor: "zoom-in" }}
             />
@@ -166,7 +202,8 @@ function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImage
             >
               ⇄
             </button>
-          </>
+            <AssetMetaTag dims={dims} backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined} />
+          </div>
         )}
       </div>
     </div>
@@ -205,14 +242,39 @@ function BaseAssetNodeView({
   // in the project, same click-to-complete gesture the ref gesture uses.
   const startCompare = (asset: Asset) => onStartCompare(node, asset);
 
-  // Deleting cascades forward (everything after this cell in the same track
-  // depends on it) and may promote a sibling spawned-track into the freed-up
-  // slot (see nodes.py's delete_node) -- either can touch tracks/nodes well
-  // beyond this one cell, so a full reload is simpler and safer than trying
-  // to hand-patch the store to match.
+  // Deletes only this one node -- never anything else in the track (see
+  // nodes.py's delete_node: an asset never cascades to whatever's next
+  // positionally). May still promote a sibling spawned-track into the
+  // freed-up slot if this asset was itself a verified workflow output with
+  // a leftover-picker sibling, which can touch a track beyond this one
+  // cell, so a full reload is simpler and safer than trying to hand-patch
+  // the store to match.
   const deleteCell = async () => {
-    if (!confirm("Delete this cell and everything after it in this track? This can't be undone.")) return;
+    if (!confirm("Delete this cell? This can't be undone.")) return;
     await nodesApi.remove(node.id);
+    const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
+    if (projectId) await loadProject(projectId);
+  };
+
+  // "The source doesn't matter anymore, I just want to keep this result and
+  // get rid of the workflow that made it" -- clears created_by_node_id
+  // FIRST so delete_node's own_output_nodes sweep (nodes.py) no longer
+  // counts this asset as one of that workflow's outputs, then deletes the
+  // workflow node itself (which still cascades to any OTHER still-pending
+  // result of the same generation the user didn't explicitly keep). Once
+  // unbound, this asset is also free to move anywhere -- isPositionAllowedFor/
+  // _ensure_output_binding only constrain nodes that still have a creator.
+  const detachFromWorkflow = async () => {
+    const creatorId = node.created_by_node_id;
+    if (!creatorId) return;
+    if (
+      !confirm(
+        "Detach this asset from its workflow? The workflow node (and any other still-pending result of the same generation) will be deleted -- this asset stays. Can't be undone.",
+      )
+    )
+      return;
+    await nodesApi.update(node.id, { created_by_node_id: null });
+    await nodesApi.remove(creatorId);
     const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
     if (projectId) await loadProject(projectId);
   };
@@ -360,8 +422,16 @@ function BaseAssetNodeView({
             + ref elsewhere
           </button>
         )}
+        {!isCandidatesGrid && node.created_by_node_id && (
+          <button
+            onClick={detachFromWorkflow}
+            title="Unbind this asset from its creator workflow, then delete that workflow -- this asset stays, and is then free to move anywhere"
+          >
+            detach ✂
+          </button>
+        )}
         {!isCandidatesGrid && (
-          <button onClick={deleteCell} title="Delete this cell and everything after it in this track">
+          <button onClick={deleteCell} title="Delete this cell only">
             Delete
           </button>
         )}
@@ -411,7 +481,7 @@ function BaseAssetNodeView({
   );
 }
 
-function BaseWorkflowNodeView({ node, templates, backends, capabilities, registerRef }: Props) {
+function BaseWorkflowNodeView({ node, templates, backends, capabilities, registerRef, onShrinkToFit }: Props) {
   const setNode = useProjectStore((s) => s.setNode);
   const tracks = useProjectStore((s) => s.tracks);
   const nodesById = useProjectStore((s) => s.nodesById);
@@ -576,7 +646,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     setJobs(list);
   };
 
-  const cls = cx("node-cell", `status-${node.status}`);
+  const cls = cx("node-cell", `status-${node.status}`, isNative && "node-cell-native");
 
   // Row-span paradigm: a slot's source is purely positional now (which row,
   // within this node's own span, feeds it -- see cell_index in types/index.ts
@@ -662,6 +732,11 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     >
       <div className="node-cell-header">
         <span>{template?.name ?? "(choose template)"}</span>
+        {isNative && (
+          <span className="native-pill" title="Native node type: built into the backend code, not a DB-stored workflow.json template">
+            native
+          </span>
+        )}
         <span className="status-pill">{node.status}</span>
         {hasExtraParams && (
           // Double-click still works (desktop), but it's an unreliable gesture
@@ -680,6 +755,15 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
         <button
           onClick={(e) => {
             e.stopPropagation();
+            onShrinkToFit(node);
+          }}
+          title="Recompute this card's height and remove any empty extra rows it doesn't actually need"
+        >
+          ⤢
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
             deleteCell();
           }}
           title="Remove this workflow cell and all of its own outputs"
@@ -693,11 +777,27 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
           <option value="" disabled>
             Select node type…
           </option>
-          {templates.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.name}
-            </option>
-          ))}
+          {/* Grouped so native (code-registry, no DB row) and template.<slug>
+              (uploaded workflow.json) types are visually distinguishable
+              here too, not just on the placed cell. */}
+          <optgroup label="Native">
+            {templates
+              .filter((t) => t.node_type.startsWith("native."))
+              .map((t) => (
+                <option key={t.id} value={t.id}>
+                  ⚡ {t.name}
+                </option>
+              ))}
+          </optgroup>
+          <optgroup label="Templates">
+            {templates
+              .filter((t) => !t.node_type.startsWith("native."))
+              .map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+          </optgroup>
         </select>
       )}
 
