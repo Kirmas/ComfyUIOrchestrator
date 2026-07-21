@@ -3,12 +3,14 @@ import { createPortal } from "react-dom";
 import { resolveAssetUrl } from "../api/client";
 import { assetsApi, jobsApi, nodesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
+import { detectMaskGroups, resolveMaskImageField } from "../maskUtils";
 import { resolveSlotAsset } from "../slotResolution";
 import { useProjectStore } from "../state/projectStore";
 import { defaultInputsForSchema, slotFields } from "../templateUtils";
 import type { Asset, Backend, Capability, InputRef, Job, NodeItem, NodeTemplate } from "../types";
 import { cx } from "../utils";
 import { CropPreview, type CropBox } from "./CropPreview";
+import { MaskPreview } from "./MaskPreview";
 import { Model3DThumb } from "./Model3DThumb";
 import { ZoomableImage } from "./ZoomableImage";
 
@@ -533,6 +535,36 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paramsOpen, template, node.inputs, cropGroups, capabilities]);
 
+  const maskGroups = useMemo(() => (template ? detectMaskGroups(template.param_schema.fields ?? []) : []), [template]);
+  const [maskImages, setMaskImages] = useState<Record<string, string | null>>({});
+
+  useEffect(() => {
+    if (!paramsOpen || !template || maskGroups.length === 0) {
+      setMaskImages({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const slots = slotFields(template.param_schema);
+      const next: Record<string, string | null> = {};
+      for (const group of maskGroups) {
+        const fieldName = resolveMaskImageField(template.param_schema.fields ?? []);
+        const slotIndex = fieldName ? slots.findIndex((f) => f.name === fieldName) : -1;
+        if (slotIndex < 0) {
+          next[group.maskField] = null;
+          continue;
+        }
+        const asset = await resolveSlotAsset(node, slotIndex, tracks, nodesById, outputsByNode, refreshNodeOutputs);
+        next[group.maskField] = asset ? resolveAssetUrl(asset.url) : null;
+      }
+      if (!cancelled) setMaskImages(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paramsOpen, template, node.inputs, maskGroups]);
+
   // Always available, not just for the last cell in a track -- unlike an
   // asset cell, a workflow node's own output(s) aren't guaranteed to still
   // be sitting right after it in the same track (_claim_new_output_cell,
@@ -678,6 +710,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     () => new Set(cropGroups.flatMap((g) => [g.xField, g.yField, g.widthField, g.heightField])),
     [cropGroups],
   );
+  const maskFieldNames = useMemo(() => new Set(maskGroups.map((g) => g.maskField)), [maskGroups]);
 
   const paramFieldInputs = template &&
     (template.param_schema.fields ?? [])
@@ -685,7 +718,8 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
       // (resolve_node_inputs in worker/tasks.py) -- nothing for the user to set.
       // Crop-group fields render as one draggable box instead (see cropGroups
       // below) -- 4 raw x/y/width/height numbers are one entity, not 4 params.
-      .filter((f) => f.type !== "image" && f.type !== "file" && f.type !== "seed" && !cropFieldNames.has(f.name))
+      // Mask fields render as a paint canvas instead (see maskGroups below).
+      .filter((f) => f.type !== "image" && f.type !== "file" && f.type !== "seed" && !cropFieldNames.has(f.name) && !maskFieldNames.has(f.name))
       .map((field) => (
         <div key={field.name} className="field-row">
           <label>{field.label ?? field.name}</label>
@@ -721,7 +755,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
         </div>
       ));
 
-  const hasExtraParams = Boolean((paramFieldInputs && paramFieldInputs.length > 0) || cropGroups.length > 0);
+  const hasExtraParams = Boolean((paramFieldInputs && paramFieldInputs.length > 0) || cropGroups.length > 0 || maskGroups.length > 0);
 
   return (
     <div
@@ -936,58 +970,89 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
           document.body,
         )}
 
-      {paramsOpen && template && (
-        <div className="image-modal-backdrop" onClick={(e) => { e.stopPropagation(); setParamsOpen(false); }}>
-          <div className="params-modal-content" onClick={(e) => e.stopPropagation()}>
-            <button type="button" className="image-modal-close" onClick={() => setParamsOpen(false)} title="Close">
-              ×
-            </button>
-            <div className="node-cell-header">
-              <span>{template.name}</span>
-              <span className="status-pill">{node.status}</span>
+      {paramsOpen &&
+        template &&
+        createPortal(
+          // Portal to document.body -- this cell sits inside Grid's pan/zoom
+          // transform (Grid.tsx), which establishes a new containing block for
+          // any `position: fixed` descendant per the CSS transform spec.
+          // Rendered in place (as this used to be), the backdrop's "fixed"
+          // stops being viewport-relative and the modal opens hundreds of
+          // pixels off-screen -- surfaced by MaskPreview's paint canvas, which
+          // is tall enough to actually need the params-modal-content scroll
+          // area, but it silently applied to CropPreview too. The other three
+          // image-modal-backdrop usages in this file already portal for the
+          // same reason.
+          <div className="image-modal-backdrop" onClick={(e) => { e.stopPropagation(); setParamsOpen(false); }}>
+            <div className="params-modal-content" onClick={(e) => e.stopPropagation()}>
+              <button type="button" className="image-modal-close" onClick={() => setParamsOpen(false)} title="Close">
+                ×
+              </button>
+              <div className="node-cell-header">
+                <span>{template.name}</span>
+                <span className="status-pill">{node.status}</span>
+              </div>
+
+              {cropGroups.map((group) => {
+                const box: CropBox = {
+                  x: Number(node.params[group.xField] ?? 0),
+                  y: Number(node.params[group.yField] ?? 0),
+                  width: Number(node.params[group.widthField] ?? 0),
+                  height: Number(node.params[group.heightField] ?? 0),
+                };
+                const imageUrl = cropImages[group.prefix];
+                return (
+                  <div key={group.prefix} className="field-row">
+                    <label>{group.prefix.charAt(0).toUpperCase() + group.prefix.slice(1)}</label>
+                    {imageUrl ? (
+                      <CropPreview
+                        imageUrl={imageUrl}
+                        box={box}
+                        onCommit={async (next) => {
+                          const updated = await nodesApi.update(node.id, {
+                            params: {
+                              ...node.params,
+                              [group.xField]: Math.round(next.x),
+                              [group.yField]: Math.round(next.y),
+                              [group.widthField]: Math.round(next.width),
+                              [group.heightField]: Math.round(next.height),
+                            },
+                          });
+                          setNode(updated);
+                        }}
+                      />
+                    ) : (
+                      <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                        No source image to preview yet -- x={box.x}, y={box.y}, w={box.width}, h={box.height}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {maskGroups.map((group) => {
+                const imageUrl = maskImages[group.maskField];
+                return (
+                  <div key={group.maskField} className="field-row">
+                    <label>{group.label}</label>
+                    {imageUrl ? (
+                      <MaskPreview
+                        imageUrl={imageUrl}
+                        maskPng={(node.params[group.maskField] as string) ?? null}
+                        onCommit={(maskPng) => updateParam(group.maskField, maskPng)}
+                      />
+                    ) : (
+                      <div style={{ fontSize: 11, color: "var(--text-dim)" }}>No source image to paint on yet</div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {paramFieldInputs}
             </div>
-
-            {cropGroups.map((group) => {
-              const box: CropBox = {
-                x: Number(node.params[group.xField] ?? 0),
-                y: Number(node.params[group.yField] ?? 0),
-                width: Number(node.params[group.widthField] ?? 0),
-                height: Number(node.params[group.heightField] ?? 0),
-              };
-              const imageUrl = cropImages[group.prefix];
-              return (
-                <div key={group.prefix} className="field-row">
-                  <label>{group.prefix.charAt(0).toUpperCase() + group.prefix.slice(1)}</label>
-                  {imageUrl ? (
-                    <CropPreview
-                      imageUrl={imageUrl}
-                      box={box}
-                      onCommit={async (next) => {
-                        const updated = await nodesApi.update(node.id, {
-                          params: {
-                            ...node.params,
-                            [group.xField]: Math.round(next.x),
-                            [group.yField]: Math.round(next.y),
-                            [group.widthField]: Math.round(next.width),
-                            [group.heightField]: Math.round(next.height),
-                          },
-                        });
-                        setNode(updated);
-                      }}
-                    />
-                  ) : (
-                    <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
-                      No source image to preview yet -- x={box.x}, y={box.y}, w={box.width}, h={box.height}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-
-            {paramFieldInputs}
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

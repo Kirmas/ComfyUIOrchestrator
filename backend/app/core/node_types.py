@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.native_backend import CharacterChartBackend, CropBackend, NativeBackend
+from app.core.native_backend import CharacterChartBackend, CropBackend, MaskBackend, NativeBackend
 from app.db.models import Node, NodeTemplate
 
 
@@ -65,6 +65,18 @@ NATIVE_NODE_TYPES: dict[str, NativeNodeType] = {
         },
         defaults={"crop_x": 0, "crop_y": 0, "crop_width": 512, "crop_height": 512},
         backend_cls=CropBackend,
+    ),
+    "mask": NativeNodeType(
+        slug="mask",
+        name="Paint Mask",
+        param_schema={
+            "fields": [
+                {"name": "image", "type": "image", "label": "Image", "required": True},
+                {"name": "mask_png", "type": "mask", "label": "Mask", "optional": True},
+            ]
+        },
+        defaults={},
+        backend_cls=MaskBackend,
     ),
 }
 

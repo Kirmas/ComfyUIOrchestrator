@@ -36,7 +36,9 @@ export interface Capability {
 
 export interface ParamField {
   name: string;
-  type: "image" | "text" | "int" | "float" | "seed" | "enum" | "file" | "bool";
+  // "mask" is a params-stored bilevel PNG (base64), not a workflow input
+  // slot -- see native.mask in node_types.py and MaskPreview.tsx.
+  type: "image" | "text" | "int" | "float" | "seed" | "enum" | "file" | "bool" | "mask";
   label?: string;
   required?: boolean;
   // Not every capability for this node_type_slug has to honor this field --

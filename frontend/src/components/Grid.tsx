@@ -1449,7 +1449,15 @@ export function Grid({ projectId }: { projectId: string }) {
   const onBackgroundPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return; // left button only -- middle/right keep their own browser behavior
     const target = e.target as HTMLElement;
-    if (target.closest("button, input, select, textarea, a, .node-cell, [draggable='true']")) return;
+    // .image-modal-backdrop covers every modal in the app (crop/mask paint
+    // canvases, compare slider, zoom, pay-confirm, ...) -- they're all
+    // createPortal'd to document.body (see NodeCell.tsx), so they're outside
+    // this container in the real DOM, but React's synthetic pointerdown still
+    // bubbles up the *React* tree to here regardless of portal target. Without
+    // this exclusion, any pointerdown inside a modal (e.g. painting a mask)
+    // arms this pan-drag, whose window-level pointermove then visibly drags
+    // the grid underneath the modal as the user interacts with it.
+    if (target.closest("button, input, select, textarea, a, .node-cell, [draggable='true'], .image-modal-backdrop")) return;
     const container = containerRef.current;
     if (!container) return;
     e.preventDefault();
