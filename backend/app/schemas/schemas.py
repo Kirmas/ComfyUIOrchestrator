@@ -155,21 +155,24 @@ class ProjectRead(ORMModel):
 
 
 # ---------- Track ----------
+# Ordering is a doubly-linked list now (Track.prev/next_track_id), not a dense
+# row_index -- see core/track_order.py. Placement is expressed relatively:
+# "after this track", or "at the head", else append at the tail.
 class TrackCreate(BaseModel):
     project_id: uuid.UUID
-    row_index: int
+    # Insert the new track immediately after this one. None + place_at_head
+    # False (the default) appends at the tail.
+    after_track_id: uuid.UUID | None = None
+    place_at_head: bool = False
     spawned_from_node_id: uuid.UUID | None = None
     spawned_from_output_id: uuid.UUID | None = None
-
-
-class TrackUpdate(BaseModel):
-    row_index: int
 
 
 class TrackRead(ORMModel):
     id: uuid.UUID
     project_id: uuid.UUID
-    row_index: int
+    prev_track_id: uuid.UUID | None
+    next_track_id: uuid.UUID | None
     spawned_from_node_id: uuid.UUID | None
     spawned_from_output_id: uuid.UUID | None
     created_at: datetime
@@ -220,6 +223,16 @@ class NodeCreate(BaseModel):
     # _ensure_output_binding check update_node uses, so a bogus value 409s
     # exactly like an illegal PATCH would rather than silently taking hold.
     created_by_node_id: uuid.UUID | None = None
+
+
+class NodeMove(BaseModel):
+    # Intent only -- "put this node at grid (row, column)". The backend owns
+    # ALL of the placement logic (allowed-position/output-binding checks,
+    # carrying a workflow's dependents along, collision handling); the client
+    # just names where the user dropped it. target_row is a position in the
+    # project's track list order (core/track_order.py), not a stored number.
+    target_row: int
+    target_step: int
 
 
 class NodeUpdate(BaseModel):
@@ -282,6 +295,10 @@ class NodeRead(ORMModel):
     # Never appears on NodeCreate/NodeUpdate; the only writer is
     # _get_or_create_output_asset_node (worker/tasks.py).
     created_by_node_id: uuid.UUID | None
+    # Read-only -- see db/models.py's Node.collapse_target_id docstring.
+    # Never appears on NodeCreate/NodeUpdate; the only writers are
+    # POST /api/nodes/{id}/collapse and .../expand.
+    collapse_target_id: uuid.UUID | None
     created_at: datetime
 
 

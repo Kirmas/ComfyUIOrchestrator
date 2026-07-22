@@ -57,6 +57,16 @@ export interface Props {
   // reaches lower) -- see Grid.tsx's shrinkWorkflowToFit for why this is a
   // deliberate button press rather than an automatic effect.
   onShrinkToFit: (node: NodeItem) => void;
+  // Set for a workflow node that's the *creator* half of a collapsed chain
+  // (see Grid.tsx's collapseInfoByNode and db/models.py's
+  // Node.collapse_target_id docstring) -- assetId is the pass-through
+  // asset's own id (what the expand action targets), consumerId is the
+  // second workflow node's id (neither of these renders its own cell --
+  // see Grid.tsx's hiddenChainNodeIds -- so this is the only place their
+  // ids are reachable for the "view chain" popup), combinedLabel joins
+  // both workflow names (e.g. "Crop+Upscale"). Undefined for a node that
+  // isn't a collapsed chain's creator.
+  collapseInfo?: { assetId: string; consumerId: string; combinedLabel: string };
 }
 
 // node.is_picker (explicit, persistent -- see db/models.py) forces a decision
@@ -281,6 +291,27 @@ function BaseAssetNodeView({
     if (projectId) await loadProject(projectId);
   };
 
+  // Only offered when this asset is unambiguously a workflow's own output
+  // (created_by_node_id set) and not already collapsed -- the backend
+  // (collapse_node, nodes.py) does the real eligibility check (sole output,
+  // sole consumer right after it, not referenced elsewhere) and 409s with a
+  // specific reason if it doesn't hold; that's surfaced here rather than
+  // trying to duplicate the same graph check client-side just to grey the
+  // button out preemptively.
+  // Collapsing hides this cell's own wrapper entirely once Grid.tsx's
+  // hiddenChainNodeIds picks up the fresh collapse_target_id from this
+  // setNode -- the corresponding "expand" trigger lives on the creator
+  // workflow node's own card instead (BaseWorkflowNodeView's expandChain),
+  // since that's the only cell left once this one disappears.
+  const collapseChain = async () => {
+    try {
+      const updated = await nodesApi.collapse(node.id);
+      setNode(updated);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Couldn't collapse this chain.");
+    }
+  };
+
   const uploadFiles = async (files: File[]) => {
     for (const file of files) {
       await nodesApi.uploadAsset(node.id, file);
@@ -361,6 +392,12 @@ function BaseAssetNodeView({
     await refreshOutputs(node.id);
   };
 
+  // A collapsed asset (node.collapse_target_id set) never reaches this
+  // component at all -- Grid.tsx's hiddenChainNodeIds skips its wrapper div
+  // entirely, letting its creator workflow node's own cell span the 3
+  // columns the whole chain used to occupy as one card instead. expandChain
+  // above still exists for the "not yet collapsed, offer the button" case.
+
   const cls = cx(
     "node-cell",
     "node-cell-asset",
@@ -432,6 +469,14 @@ function BaseAssetNodeView({
             detach ✂
           </button>
         )}
+        {!isCandidatesGrid && node.created_by_node_id && (
+          <button
+            onClick={collapseChain}
+            title="Fold this asset and its creator/consumer workflow nodes into one card, and lock them from regenerating -- for a finished chain (e.g. crop then upscale) you just want the lineage of, not the intermediate steps"
+          >
+            ⛶ collapse chain
+          </button>
+        )}
         {!isCandidatesGrid && (
           <button onClick={deleteCell} title="Delete this cell only">
             Delete
@@ -483,13 +528,14 @@ function BaseAssetNodeView({
   );
 }
 
-function BaseWorkflowNodeView({ node, templates, backends, capabilities, registerRef, onShrinkToFit }: Props) {
+function BaseWorkflowNodeView({ node, templates, backends, capabilities, registerRef, onShrinkToFit, collapseInfo }: Props) {
   const setNode = useProjectStore((s) => s.setNode);
   const tracks = useProjectStore((s) => s.tracks);
   const nodesById = useProjectStore((s) => s.nodesById);
   const outputsByNode = useProjectStore((s) => s.outputsByNode);
   const refreshNodeOutputs = useProjectStore((s) => s.refreshNodeOutputs);
   const loadProject = useProjectStore((s) => s.loadProject);
+  const reloadTracks = useProjectStore((s) => s.reloadTracks);
   const template = templates.find((t) => t.node_type === node.node_type) ?? null;
   // Native execution always runs in-process (no backend to pick between) and
   // is deterministic (no seed field -- enqueue_node_job forces variants to 1
@@ -503,6 +549,10 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   // fields, variants, backend) lives behind this modal so the node stays the
   // same footprint whether it has 2 fields or 20.
   const [paramsOpen, setParamsOpen] = useState(false);
+  // Read-only peek at the 3 hidden cells of a collapsed chain (this node,
+  // the pass-through asset, the consumer workflow -- see collapseInfo's
+  // docstring) -- no editing, no slot resolution, just "what was this".
+  const [viewChainOpen, setViewChainOpen] = useState(false);
 
   const cropGroups = useMemo(() => (template ? detectCropGroups(template.param_schema.fields ?? []) : []), [template]);
   const [cropImages, setCropImages] = useState<Record<string, string | null>>({});
@@ -584,6 +634,21 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     if (projectId) await loadProject(projectId);
   };
 
+  // collapseInfo.assetId is the pass-through asset's own id -- the same one
+  // BaseAssetNodeView's own expand button targets (see Grid.tsx's
+  // collapseInfoByNode). Offered here too since that asset cell is now a
+  // minimized placeholder, not the natural place to look for this action.
+  const expandChain = async () => {
+    if (!collapseInfo) return;
+    try {
+      await nodesApi.expand(collapseInfo.assetId);
+      const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
+      if (projectId) await loadProject(projectId);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Couldn't expand this chain.");
+    }
+  };
+
   useEffect(() => {
     if (node.status !== "running" && node.status !== "queued") return;
     let cancelled = false;
@@ -605,6 +670,11 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     const params = { ...(chosen?.defaults ?? {}), ...node.params };
     const updated = await nodesApi.update(node.id, { node_type: chosen?.node_type, inputs, params });
     setNode(updated);
+    // Assigning a template can make the backend materialize this workflow's
+    // input-slot rows (ensure_span_rows) -- re-fetch the track list so those
+    // new empty rows actually appear.
+    const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
+    if (projectId) await reloadTracks(projectId);
   };
 
   const updateParam = async (name: string, value: unknown) => {
@@ -755,7 +825,11 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
         </div>
       ));
 
-  const hasExtraParams = Boolean((paramFieldInputs && paramFieldInputs.length > 0) || cropGroups.length > 0 || maskGroups.length > 0);
+  // Locked/history (see collapseInfo) means there's no regeneration left to
+  // tune params for, so the params modal/gear/hint are all just noise here --
+  // suppressed outright rather than shown-but-pointless.
+  const hasExtraParams =
+    !collapseInfo && Boolean((paramFieldInputs && paramFieldInputs.length > 0) || cropGroups.length > 0 || maskGroups.length > 0);
 
   return (
     <div
@@ -765,10 +839,22 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
       title={hasExtraParams ? "⚙ or double-click to edit parameters" : undefined}
     >
       <div className="node-cell-header">
-        <span>{template?.name ?? "(choose template)"}</span>
-        {isNative && (
+        <span>{collapseInfo?.combinedLabel ?? template?.name ?? "(choose template)"}</span>
+        {isNative && !collapseInfo && (
           <span className="native-pill" title="Native node type: built into the backend code, not a DB-stored workflow.json template">
             native
+          </span>
+        )}
+        {collapseInfo && (
+          // Replaces the native pill rather than sitting alongside it -- two
+          // badges plus the status pill and 3 icon buttons was overflowing
+          // the header row (2026-07-21, reported from a real collapsed cell
+          // on prod).
+          <span
+            className="native-pill"
+            title="Part of a collapsed chain -- generate/re-roll/discard are locked; expand to work on these cells individually again"
+          >
+            🔗 collapsed
           </span>
         )}
         <span className="status-pill">{node.status}</span>
@@ -784,6 +870,17 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
             title="Edit parameters"
           >
             ⚙
+          </button>
+        )}
+        {collapseInfo && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setViewChainOpen(true);
+            }}
+            title="See the 3 hidden cells this card folds together, read-only"
+          >
+            👁
           </button>
         )}
         <button
@@ -927,7 +1024,15 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
 
       {node.error && <div className="error-text">{node.error}</div>}
 
-      {template && (
+      {template && collapseInfo && (
+        <div className="node-actions" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+          <button onClick={expandChain} title="Show this chain's cells individually again, unlocking generate/re-roll/discard">
+            ⛶ expand
+          </button>
+        </div>
+      )}
+
+      {template && !collapseInfo && (
         <div className="node-actions" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
           <button className="primary" onClick={requestGenerate} disabled={node.status === "queued" || node.status === "running"}>
             Generate
@@ -1053,6 +1158,50 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
           </div>,
           document.body,
         )}
+
+      {viewChainOpen &&
+        collapseInfo &&
+        createPortal(
+          <div className="image-modal-backdrop" onClick={() => setViewChainOpen(false)}>
+            <div className="params-modal-content" onClick={(e) => e.stopPropagation()}>
+              <button type="button" className="image-modal-close" onClick={() => setViewChainOpen(false)} title="Close">
+                ×
+              </button>
+              <div className="node-cell-header">
+                <span>{collapseInfo.combinedLabel}</span>
+              </div>
+              {[node, nodesById[collapseInfo.assetId], nodesById[collapseInfo.consumerId]].map((n, i) =>
+                n ? <ChainMemberView key={n.id} node={n} templates={templates} outputs={outputsByNode[n.id] ?? []} /> : <div key={i} />,
+              )}
+            </div>
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+}
+
+// Read-only summary of one node inside a collapsed chain's "view chain"
+// popup (BaseWorkflowNodeView above) -- no slot resolution, no editing, no
+// generate/reroll -- just enough to see what this cell used to be.
+function ChainMemberView({ node, templates, outputs }: { node: NodeItem; templates: NodeTemplate[]; outputs: Asset[] }) {
+  const template = templates.find((t) => t.node_type === node.node_type);
+  return (
+    <div className="field-row" style={{ flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
+      <label>
+        {node.kind === "asset" ? "Asset" : (template?.name ?? node.node_type ?? "?")} <span className="status-pill">{node.status}</span>
+      </label>
+      {node.kind === "asset" ? (
+        outputs[0] ? (
+          <img src={resolveAssetUrl(outputs[0].url)} alt="" style={{ maxWidth: 200, borderRadius: 4 }} />
+        ) : (
+          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>no output</span>
+        )
+      ) : Object.keys(node.params).length > 0 ? (
+        <pre style={{ fontSize: 11, whiteSpace: "pre-wrap", margin: 0 }}>{JSON.stringify(node.params, null, 2)}</pre>
+      ) : (
+        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>no params</span>
+      )}
     </div>
   );
 }

@@ -74,9 +74,25 @@ export interface Project {
   created_at: string;
 }
 
+// Backend-computed derived layout (GET /api/projects/{id}/layout). The client
+// renders workflow spans / blocked cells from this instead of recomputing the
+// span formula (which used to drift between the two sides).
+export interface GridLayout {
+  spans: Record<string, { desired: number; achieved: number }>;
+  blocked_cells: [number, number][];
+}
+
 export interface Track {
   id: string;
   project_id: string;
+  // Ordering is a doubly-linked list on the backend (prev/next). row_index is
+  // NOT sent by the API anymore -- it's derived client-side from a track's
+  // position in list order (the store assigns it in setTracks) purely for
+  // rendering/positional math, and never round-trips to the server. This is
+  // what killed the old reindex-on-every-delete data-loss bug: there's no
+  // stored number left to gap or desync.
+  prev_track_id: string | null;
+  next_track_id: string | null;
   row_index: number;
   spawned_from_node_id: string | null;
   spawned_from_output_id: string | null;
@@ -126,6 +142,14 @@ export interface NodeItem {
   // binds this node to its creator's own output position -- see Grid.tsx's
   // isPositionAllowedFor.
   created_by_node_id: string | null;
+  // Read-only, set only via POST /api/nodes/{id}/collapse|expand -- lives on
+  // the pass-through asset node of a workflow -> asset -> workflow chain
+  // (this asset's own created_by_node_id is that chain's first workflow;
+  // this field, once set, points at the second). Non-null folds the 3-cell
+  // chain into one card in NodeCell.tsx and locks both workflow nodes (no
+  // generate/reroll/discard) since collapsing is for finished history the
+  // user doesn't intend to regenerate.
+  collapse_target_id: string | null;
   created_at: string;
 }
 

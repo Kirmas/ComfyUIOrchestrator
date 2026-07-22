@@ -44,20 +44,9 @@ function isPickable(node: NodeItem, outputs: Asset[]): boolean {
 }
 
 export function Grid({ projectId }: { projectId: string }) {
-  const { tracks, nodesById, outputsByNode, loadProject, applyProgressEvent, addTrack, addNode, removeTrack, refreshNodeOutputs, setTracks } =
+  const { tracks, nodesById, outputsByNode, spans, blockedCells, loadProject, reloadTracks, applyProgressEvent, addTrack, addNode, removeTrack, refreshNodeOutputs } =
     useProjectStore();
   const [templates, setTemplates] = useState<NodeTemplate[]>([]);
-  // desiredRowSpanByNode looks up each workflow's template to count its
-  // image/file input slots -- until this first resolves, `templates` is `[]`
-  // and that lookup silently reads as "0 slots", making every workflow's
-  // desired span look smaller than it really is. The auto-expand effect
-  // reacts to that transient (wrong) value just like a real one, which can
-  // insert/move real track rows before the correct template data ever
-  // arrives (2026-07-17 incident: rows shifted on a plain page load, no drag
-  // involved). Gate span-desire and the auto-expand effect on this instead
-  // of just checking `templates.length` -- an unlikely-but-real project with
-  // zero templates at all must still be treated as "loaded", not "pending".
-  const [templatesLoaded, setTemplatesLoaded] = useState(false);
   const [backends, setBackends] = useState<Backend[]>([]);
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
   const [project, setProject] = useState<Project | null>(null);
@@ -171,10 +160,7 @@ export function Grid({ projectId }: { projectId: string }) {
   useEffect(() => {
     loadProject(projectId);
     reloadProject();
-    nodeTemplatesApi.list().then((list) => {
-      setTemplates(list);
-      setTemplatesLoaded(true);
-    });
+    nodeTemplatesApi.list().then(setTemplates);
     backendsApi.list().then(setBackends);
     capabilitiesApi.list().then(setCapabilities);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -203,35 +189,10 @@ export function Grid({ projectId }: { projectId: string }) {
   const trackByRowIndex = useMemo(() => new Map(tracks.map((t) => [t.row_index, t])), [tracks]);
   const rowIndexOfTrack = (trackId: string): number => tracks.find((t) => t.id === trackId)?.row_index ?? 0;
 
-  // A node with created_by_node_id set (a workflow's own materialized
-  // output, see backend's Node.created_by_node_id docstring) is rigidly
-  // bound to its creator: only allowed at the creator's own output step
-  // (creator.step_index + 1), in a row that's either within the creator's
-  // own row-span (its home row through home row + however many image/file
-  // input slots its template declares -- the same span rowSpanByNode grows
-  // real tracks for) or a track spawned from it -- exactly the tracks
-  // onSelectCandidate ever moves a settled/leftover output into once
-  // there's more results than the creator's own span has room for. A node
-  // with no creator (upload, "+ asset", RefAsset) has nothing to check here
-  // and is free to land anywhere. Mirrored by the backend's own
-  // _ensure_output_binding (api/routes/nodes.py) -- this is the
-  // fast-path/UI-facing check, that's the enforced one; a stale local
-  // `nodesById`/`tracks` snapshot here just means a 409 from there instead
-  // of a silent success, not a way to actually bypass the rule.
-  const isPositionAllowedFor = (node: NodeItem, row: number, step: number): boolean => {
-    if (!node.created_by_node_id) return true;
-    const creator = nodesById[node.created_by_node_id];
-    if (!creator) return true;
-    if (step !== creator.step_index + 1) return false;
-    const targetTrack = trackByRowIndex.get(row);
-    if (!targetTrack) return false;
-    if (targetTrack.spawned_from_node_id === creator.id) return true;
-    const creatorRow = rowIndexOfTrack(creator.track_id);
-    const template = templates.find((t) => t.node_type === creator.node_type);
-    const slotCount = template ? slotFields(template.param_schema).length : 0;
-    const span = Math.max(slotCount, 1);
-    return targetTrack.row_index >= creatorRow && targetTrack.row_index < creatorRow + span;
-  };
+  // (Output-binding placement rules used to be mirrored here as
+  // isPositionAllowedFor -- deleted. The backend's _ensure_output_binding is
+  // now the only copy; the client sends a move intent and the backend accepts
+  // or 409s. No more "keep these two in sync".)
 
   // Whether `node` is the *actual* materialized output of some workflow --
   // created_by_node_id is the authoritative, backend-set answer (doesn't
@@ -275,7 +236,7 @@ export function Grid({ projectId }: { projectId: string }) {
   // holding one of its materialized outputs on the other (its own home
   // track's next step, plus one more per sibling track spawned from a
   // multi-select in its candidates grid -- see onSelectCandidate below).
-  // This is the *desired* size -- see rowSpanByNode below for what actually
+  // This is the *desired* size -- see spans below for what actually
   // fits right now, and the auto-expand effect further down for closing the
   // gap between the two by inserting real track rows.
   //
@@ -296,17 +257,55 @@ export function Grid({ projectId }: { projectId: string }) {
   // stable. The tradeoff (reverted along with this) is the backend-grown-row
   // case above doesn't stretch the merged cell to visually reach it -- a
   // narrower, real bug, not an infinite one.
-  const desiredRowSpanByNode = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const node of Object.values(nodesById)) {
-      if (node.kind !== "workflow") continue;
-      const template = templates.find((t) => t.node_type === node.node_type);
-      const inputSlots = template ? slotFields(template.param_schema).length : 0;
-      const spawnedRows = tracks.filter((t) => t.spawned_from_node_id === node.id).length;
-      map.set(node.id, Math.max(inputSlots, 1 + spawnedRows, 1));
+  // (Span formulas spans / spans / blockedCells
+  // used to be computed here -- deleted. The backend now computes them
+  // (core/grid_layout.py, GET /projects/{id}/layout) and the store exposes
+  // them as `spans` (per workflow: {desired, achieved}) and `blockedCells` (a
+  // Set of "row:col"). This killed the frontend/backend span-drift bug class.)
+  const spanDesired = (nodeId: string): number => spans[nodeId]?.desired ?? 1;
+  const spanAchieved = (nodeId: string): number => spans[nodeId]?.achieved ?? 1;
+
+  // Which workflow node is the *first* half of a collapsed chain
+  // (Node.collapse_target_id, set via the pass-through asset node's own
+  // "Collapse chain" button -- see db/models.py's docstring): only the
+  // creator gets an entry now (used for its combined label, its expand
+  // button, and to span it across the 3 columns the whole chain used to
+  // occupy -- see hiddenNodeIds/gridColumn below). The consumer and the
+  // pass-through asset itself don't render their own cell at all anymore
+  // (2026-07-21: shrinking their *content* while still drawing 3 separate
+  // bordered boxes side by side didn't read as "one cell" the way the user
+  // actually wanted -- they wanted the old positions visually gone, not
+  // just minimized).
+  const collapseInfoByNode = useMemo(() => {
+    const map = new Map<string, { assetId: string; consumerId: string; combinedLabel: string }>();
+    for (const asset of Object.values(nodesById)) {
+      if (asset.kind !== "asset" || !asset.collapse_target_id || !asset.created_by_node_id) continue;
+      const creator = nodesById[asset.created_by_node_id];
+      const consumer = nodesById[asset.collapse_target_id];
+      if (!creator || !consumer) continue;
+      const creatorName = templates.find((t) => t.node_type === creator.node_type)?.name ?? creator.node_type ?? "?";
+      const consumerName = templates.find((t) => t.node_type === consumer.node_type)?.name ?? consumer.node_type ?? "?";
+      map.set(creator.id, { assetId: asset.id, consumerId: consumer.id, combinedLabel: `${creatorName}+${consumerName}` });
     }
     return map;
-  }, [nodesById, templates, tracks]);
+  }, [nodesById, templates]);
+
+  // The pass-through asset and the consumer workflow node of every collapsed
+  // chain -- skipped entirely from the main render loop below (no wrapper
+  // div at all, not even a minimized one) so the creator's own cell, spanning
+  // all 3 columns, is the only thing left where 3 separate boxes used to sit.
+  // Collapse eligibility (collapse_node, nodes.py) already guarantees nothing
+  // else in the project explicitly references the pass-through asset, so
+  // nothing else needs a DOM ref into a cell that's about to not exist.
+  const hiddenChainNodeIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const asset of Object.values(nodesById)) {
+      if (asset.kind !== "asset" || !asset.collapse_target_id) continue;
+      ids.add(asset.id);
+      ids.add(asset.collapse_target_id);
+    }
+    return ids;
+  }, [nodesById]);
 
   // What actually fits *right now*, without overlapping another node: capped
   // at the first row (going down from its own) that's already taken by an
@@ -315,46 +314,10 @@ export function Grid({ projectId }: { projectId: string }) {
   // pattern (see kindForStep), so a wholly unrelated workflow cell routinely
   // sits at the very same column a few tracks down (e.g. two independently
   // created chains that happen to reach the same step). This is only ever a
-  // *transient* value: whenever it falls short of desiredRowSpanByNode, the
+  // *transient* value: whenever it falls short of spans, the
   // auto-expand effect below inserts real track rows to close the gap, so
   // rendering always has a collision-safe size to use even in the brief
   // window before that finishes.
-  const rowSpanByNode = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const node of Object.values(nodesById)) {
-      if (node.kind !== "workflow") continue;
-      const desired = desiredRowSpanByNode.get(node.id) ?? 1;
-      const start = effectiveRow(node);
-      let span = 1;
-      while (span < desired && !nodesByRowStep.has(`${start + span}:${node.step_index}`)) span++;
-      map.set(node.id, span);
-    }
-    return map;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodesById, desiredRowSpanByNode, tracks, nodesByRowStep]);
-
-  // Rows a spanning workflow node covers in ITS OWN column, one track row
-  // down from its own start -- a completely unrelated track sharing that
-  // exact column (every track fills every column independently, see
-  // kindForStep) has to treat that cell as taken, or its own "+ step"/"+
-  // asset" button would render right on top of the spanning card, and
-  // clicking it would create a real node overlapping it. Maps to the actual
-  // occupying node (not just a boolean) so any caller can say *which*
-  // workflow card is responsible for a given blocked cell.
-  const blockingNodeByCell = useMemo(() => {
-    const map = new Map<string, NodeItem>();
-    for (const node of Object.values(nodesById)) {
-      if (node.kind !== "workflow") continue;
-      const start = effectiveRow(node);
-      const span = rowSpanByNode.get(node.id) ?? 1;
-      for (let r = start + 1; r < start + span; r++) {
-        map.set(`${r}:${node.step_index}`, node);
-      }
-    }
-    return map;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodesById, rowSpanByNode, tracks]);
-
   // Every asset-kind node whose very next cell (same row, step+1) is empty
   // and not claimed by some other workflow's spanning card gets its own
   // "+ step" offer -- not just whichever node happens to be its track's
@@ -373,15 +336,19 @@ export function Grid({ projectId }: { projectId: string }) {
     const list: { node: NodeItem; row: number; step: number }[] = [];
     for (const node of Object.values(nodesById)) {
       if (node.kind !== "asset") continue;
+      // A collapsed chain's pass-through asset doesn't render its own cell
+      // at all (see hiddenChainNodeIds) -- nothing for a "+ step" offer to
+      // anchor next to, and it's locked/history besides.
+      if (hiddenChainNodeIds.has(node.id)) continue;
       const row = effectiveRow(node);
       const step = node.step_index + 1;
       if (nodesByRowStep.has(`${row}:${step}`)) continue;
-      if (blockingNodeByCell.has(`${row}:${step}`)) continue;
+      if (blockedCells.has(`${row}:${step}`)) continue;
       list.push({ node, row, step });
     }
     return list;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodesById, nodesByRowStep, blockingNodeByCell, tracks]);
+  }, [nodesById, nodesByRowStep, blockedCells, tracks, hiddenChainNodeIds]);
 
   // requiredKind matters for callers that need the *next* step to stay a
   // specific kind (e.g. "+ step" after a manually-filled asset cell always
@@ -393,7 +360,7 @@ export function Grid({ projectId }: { projectId: string }) {
   const nextFreeStep = (rowIndex: number, step: number, requiredKind?: NodeKind): number => {
     let s = step;
     while (
-      blockingNodeByCell.has(`${rowIndex}:${s}`) ||
+      blockedCells.has(`${rowIndex}:${s}`) ||
       (requiredKind && project?.start_kind != null && kindForStep(project.start_kind, s) !== requiredKind)
     ) {
       s++;
@@ -421,17 +388,17 @@ export function Grid({ projectId }: { projectId: string }) {
     }
     return Math.max(max, maxStep);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tracks, nodesByTrack, maxStep, emptyTrackSkip, blockingNodeByCell]);
+  }, [tracks, nodesByTrack, maxStep, emptyTrackSkip, blockedCells]);
 
   const maxRowSpanBottom = useMemo(() => {
     let max = sortedTracks.length;
     for (const node of Object.values(nodesById)) {
       if (node.kind !== "workflow") continue;
-      max = Math.max(max, effectiveRow(node) + (rowSpanByNode.get(node.id) ?? 1));
+      max = Math.max(max, effectiveRow(node) + (spanAchieved(node.id)));
     }
     return max;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodesById, rowSpanByNode, sortedTracks, tracks]);
+  }, [nodesById, spans, sortedTracks, tracks]);
 
   // Rows a spanning workflow node's merged cell covers but that have no node
   // in its input/output column yet -- offered as manual "+ asset" drop
@@ -440,8 +407,18 @@ export function Grid({ projectId }: { projectId: string }) {
     const map = new Map<string, { row: number; step: number }>();
     for (const node of Object.values(nodesById)) {
       if (node.kind !== "workflow") continue;
+      // The consumer half of a collapsed chain doesn't render its own cell
+      // (hiddenChainNodeIds) -- without this, its own still-unfilled input
+      // slots (e.g. a 2nd/3rd image field never wired up) kept offering "+
+      // asset" placeholders with no visible card left nearby to explain them
+      // (2026-07-21, reported from a real "Crop+UpscaleHead" collapsed cell
+      // on prod: dashed boxes floating in what should just be reclaimed
+      // blank space). Collapsed also means locked/history -- soliciting a
+      // new input for a chain the user isn't going to regenerate doesn't
+      // make sense anyway.
+      if (hiddenChainNodeIds.has(node.id)) continue;
       const start = effectiveRow(node);
-      const span = rowSpanByNode.get(node.id) ?? 1;
+      const span = spanAchieved(node.id);
       for (let r = start; r < start + span; r++) {
         if (!trackByRowIndex.has(r)) continue;
         for (const step of [node.step_index - 1, node.step_index + 1]) {
@@ -454,7 +431,7 @@ export function Grid({ projectId }: { projectId: string }) {
     }
     return [...map.values()];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodesById, rowSpanByNode, tracks, nodesByRowStep, trackByRowIndex]);
+  }, [nodesById, spans, tracks, nodesByRowStep, trackByRowIndex, hiddenChainNodeIds]);
 
   const edges = useMemo<Edge[]>(() => {
     const result: Edge[] = [];
@@ -468,7 +445,7 @@ export function Grid({ projectId }: { projectId: string }) {
     // The only other arrow left: a RefAsset node pointing back at the real
     // asset node it stands in for (see NodeCell's RefAssetNodeView). Ordinary
     // workflow<->input/output connections are conveyed by row alignment
-    // instead of a drawn arrow now (see rowSpanByNode/effectiveRow above).
+    // instead of a drawn arrow now (see spans/effectiveRow above).
     for (const node of Object.values(nodesById)) {
       if (node.node_type !== "asset.refasset") continue;
       const ref = node.inputs[0];
@@ -484,38 +461,41 @@ export function Grid({ projectId }: { projectId: string }) {
   };
 
   const addTrackRow = async () => {
-    const rowIndex = tracks.length === 0 ? 0 : Math.max(...tracks.map((t) => t.row_index)) + 1;
-    const track = await tracksApi.create({ project_id: projectId, row_index: rowIndex });
-    addTrack(track);
+    // Tail append (no anchor, not head) -- backend splices it after the
+    // current last track; reloadTracks re-derives row numbers.
+    await tracksApi.create({ project_id: projectId });
+    await reloadTracks(projectId);
   };
 
-  // row_index is both the visible "track N" label and, via track_below_prev
-  // inputs (see the edges memo above) plus the row-span paradigm's
-  // effectiveRow, an adjacency/position link -- so a delete has to reindex
-  // every affected track, not just remove the one row. A plain delete
-  // left every track after the removed one still holding its old row_index,
-  // opening a gap: track labels (rendered at their position in sortedTracks,
-  // an array index) desync from their own row's node cells (rendered at
-  // their raw, now-gapped row_index), corrupting the whole grid layout below
-  // the deleted row (2026-07-17 incident). Shift everything after it down by
-  // one to keep the 0..N-1 run contiguous, the same as insertTracksAt does
-  // in the opposite direction.
+  // Delete is now a backend pointer splice (unlink + delete, see tracks.py):
+  // the track leaves its chain, its two neighbours are stitched together, and
+  // nothing else is renumbered. The old reindex -- an optimistic local shift
+  // plus a fire-and-forget Promise.all of per-track row_index PATCHes that
+  // could partially fail and leave a gap -- is gone entirely (that gap was
+  // the 2026-07-21 data-loss surface). We just drop the deleted track's nodes
+  // locally and re-derive every row number from the shorter list.
   const deleteTrackRow = async (trackId: string) => {
     if (!confirm("Delete this whole track and every cell in it? This can't be undone.")) return;
-    const deletedRow = tracks.find((t) => t.id === trackId)?.row_index;
-    await tracksApi.remove(trackId);
-    removeTrack(trackId);
-    if (deletedRow === undefined) return;
-
-    const remaining = useProjectStore.getState().tracks;
-    const toShift = remaining.filter((t) => t.row_index > deletedRow);
-    setTracks(remaining.map((t) => (t.row_index > deletedRow ? { ...t, row_index: t.row_index - 1 } : t)));
-    await Promise.all(toShift.map((t) => tracksApi.update(t.id, { row_index: t.row_index - 1 })));
+    if (structuralOpRef.current) {
+      alert("Another move is still in progress -- try again in a moment.");
+      return;
+    }
+    structuralOpRef.current = true;
+    try {
+      await tracksApi.remove(trackId);
+      removeTrack(trackId);
+      await reloadTracks(projectId);
+    } catch (e) {
+      // e.g. the backend refuses deleting a multi-input workflow's span row.
+      alert(e instanceof Error ? e.message : "Couldn't delete this track.");
+    } finally {
+      structuralOpRef.current = false;
+    }
   };
 
   // Manual, one-shot recompute of a workflow node's own row-span -- a button
   // press (NodeCell's "⤢"), never an automatic effect. An earlier version
-  // tried to keep desiredRowSpanByNode itself reactive to real output row
+  // tried to keep spans itself reactive to real output row
   // offsets so the card would grow/shrink on its own, but that fed back on
   // itself through insertTracksAt (which shifts a node's own already-placed
   // outputs down while making room, growing their measured offset, which
@@ -534,7 +514,7 @@ export function Grid({ projectId }: { projectId: string }) {
       const template = templates.find((t) => t.node_type === node.node_type);
       const inputSlots = template ? slotFields(template.param_schema).length : 0;
       const start = effectiveRow(node);
-      const achieved = rowSpanByNode.get(node.id) ?? 1;
+      const achieved = spanAchieved(node.id);
 
       const computeNeeded = () => {
         const live = useProjectStore.getState();
@@ -554,7 +534,12 @@ export function Grid({ projectId }: { projectId: string }) {
       }
 
       // Bottom-up: removing the lowest excess row first never disturbs the
-      // row_index of anything still above it in this same pass.
+      // (derived) row_index of anything still above it in this same pass, so
+      // the loop keeps finding r-1, r-2, ... by their unchanged numbers. Each
+      // removal is a backend splice (unlink + delete), no renumber; one
+      // reloadTracks at the end re-derives clean row numbers from the shorter
+      // list.
+      let removedAny = false;
       for (let r = start + achieved - 1; r >= start + needed; r--) {
         const live = useProjectStore.getState();
         const track = live.tracks.find((t) => t.row_index === r);
@@ -566,35 +551,43 @@ export function Grid({ projectId }: { projectId: string }) {
         }
         await tracksApi.remove(track.id);
         removeTrack(track.id);
-        const remaining = useProjectStore.getState().tracks;
-        const toShift = remaining.filter((t) => t.row_index > r);
-        setTracks(remaining.map((t) => (t.row_index > r ? { ...t, row_index: t.row_index - 1 } : t)));
-        await Promise.all(toShift.map((t) => tracksApi.update(t.id, { row_index: t.row_index - 1 })));
+        removedAny = true;
       }
+      if (removedAny) await reloadTracks(projectId);
     } finally {
       structuralOpRef.current = false;
     }
   };
 
   // Makes room for a workflow node's full desired span (see the auto-expand
-  // effect below) by inserting `count` brand-new, empty tracks right at
-  // `position`: every existing track at or after that row_index shifts down
-  // by `count` first (as a block, preserving everything about them except
-  // their row label), then the freed rows get real, empty Track rows so the
-  // spanning card has genuine grid rows to grow into rather than just a
-  // bigger number with nothing backing it. Same row_index/track_below_prev
-  // caveat as deleteTrackRow above: this reindexes every affected track's
-  // row_index, which is also an adjacency link for "track below" inputs, not
-  // just a display label.
-  const insertTracksAt = async (position: number, count: number) => {
-    const toShift = tracks.filter((t) => t.row_index >= position);
-    const shiftedIds = new Set(toShift.map((t) => t.id));
-    setTracks(tracks.map((t) => (shiftedIds.has(t.id) ? { ...t, row_index: t.row_index + count } : t)));
-    await Promise.all(toShift.map((t) => tracksApi.update(t.id, { row_index: t.row_index + count })));
+  // effect below) by inserting `count` brand-new empty tracks so they occupy
+  // positions [position .. position+count). This is now a backend linked-list
+  // splice, not a renumber: each new track is spliced after the one before it
+  // (the first after the track currently at position-1, or at the head when
+  // position is 0), which shifts everyone below purely by *derived* position
+  // -- no row_index is written anywhere. reloadTracks then re-derives the
+  // numbers. Returns the created tracks with their fresh derived row_index.
+  const insertTracksAt = async (
+    position: number,
+    count: number,
+    extraFields?: { spawned_from_node_id?: string; spawned_from_output_id?: string },
+  ): Promise<Track[]> => {
+    const ordered = [...useProjectStore.getState().tracks].sort((a, b) => a.row_index - b.row_index);
+    let afterId: string | undefined = position > 0 ? ordered[position - 1]?.id : undefined;
+    const createdIds: string[] = [];
     for (let i = 0; i < count; i++) {
-      const track = await tracksApi.create({ project_id: projectId, row_index: position + i });
-      addTrack(track);
+      const track = await tracksApi.create({
+        project_id: projectId,
+        after_track_id: afterId ?? null,
+        place_at_head: position === 0 && i === 0,
+        ...extraFields,
+      });
+      createdIds.push(track.id);
+      afterId = track.id; // the next new track goes immediately after this one
     }
+    await reloadTracks(projectId);
+    const fresh = useProjectStore.getState().tracks;
+    return createdIds.map((id) => fresh.find((t) => t.id === id)).filter((t): t is Track => t !== undefined);
   };
 
   // Whether inserting `count` new tracks at `position` (see insertTracksAt)
@@ -618,9 +611,10 @@ export function Grid({ projectId }: { projectId: string }) {
       if (outputTrack?.spawned_from_node_id === creator.id) return false;
       const creatorRow = rowIndexOfTrack(creator.track_id);
       const outputRow = rowIndexOfTrack(node.track_id);
-      const template = templates.find((t) => t.node_type === creator.node_type);
-      const slotCount = template ? slotFields(template.param_schema).length : 0;
-      const span = Math.max(slotCount, 1);
+      // Same span as isPositionAllowedFor -- see its own comment for why this
+      // must match spans rather than re-deriving a narrower,
+      // input-slots-only number that can drift from what's actually drawn.
+      const span = spanDesired(creator.id);
       const newCreatorRow = creatorRow + (creatorRow >= position ? count : 0);
       const newOutputRow = outputRow + (outputRow >= position ? count : 0);
       return !(newCreatorRow <= newOutputRow && newOutputRow < newCreatorRow + span);
@@ -636,35 +630,9 @@ export function Grid({ projectId }: { projectId: string }) {
     await insertTracksAt(track.row_index, 1);
   };
 
-  // Column counterpart of insertTracksAt -- but unlike rows, a column has no
-  // backing entity to create (step_index is just a number every node
-  // carries, not a real Track-like row), so this is purely a bulk renumber:
-  // every node (in ANY track, project-wide -- columns are shared across the
-  // whole project, see kindForStep) at or after `position` gets
-  // step_index += count. Caller is responsible for `count` being even
-  // (preserves the project-wide asset/workflow parity) and for `position`
-  // not splitting any existing workflow node's own [step-1, step+1] unit
-  // (see wouldSplitAnyWorkflow below) -- this function itself doesn't
-  // validate either, it just shifts.
-  const insertColumnsAt = async (position: number, count: number) => {
-    const toShift = Object.values(nodesById).filter((n) => n.step_index >= position);
-    for (const n of toShift) {
-      const updated = await nodesApi.update(n.id, { step_index: n.step_index + count });
-      addNode(updated);
-    }
-  };
-
-  // Whether inserting/removing columns at `position` would split some OTHER
-  // workflow node's own 3-column unit [step-1, step, step+1] -- e.g. its own
-  // materialized-output column (step+1, see _get_or_create_output_asset_node)
-  // shifting away while the workflow itself (step) doesn't, or vice versa.
-  // cell_index input resolution (_asset_at_cell_index) hard-codes "one
-  // column back" for that workflow, so splitting it would silently detach
-  // its inputs from whatever's supposed to feed them.
-  const wouldSplitAnyWorkflow = (position: number, excludeId: string): boolean =>
-    Object.values(nodesById).some(
-      (n) => n.kind === "workflow" && n.id !== excludeId && position > n.step_index - 1 && position <= n.step_index + 1,
-    );
+  // (Column-shift helpers insertColumnsAt / wouldSplitAnyWorkflow lived here
+  // only for the frontend's own workflow column-move -- deleted along with it.
+  // Any column shifting a move needs now happens in the backend move endpoint.)
 
   const nextStepIndex = (trackId: string): number => nextStepIndexFor(nodesByTrack.get(trackId) ?? []);
 
@@ -765,6 +733,11 @@ export function Grid({ projectId }: { projectId: string }) {
       // picker into a new, distant track instead of the empty row already
       // inside it).
       let targetTrack: Track | undefined;
+      // Adjacent-insert position for the fallback below -- right after the
+      // causing workflow's own input-slot span (so it doesn't land on one of
+      // ITS input rows), or right below the picker's own row if there's no
+      // direct preceding workflow to measure a span from at all.
+      let adjacentInsertPosition: number | null = null;
       if (precedingWorkflow) {
         const template = templates.find((t) => t.node_type === precedingWorkflow.node_type);
         const slotCount = template ? slotFields(template.param_schema).length : 0;
@@ -777,6 +750,9 @@ export function Grid({ projectId }: { projectId: string }) {
           targetTrack = liveTracks.find((t) => t.row_index === r);
           if (targetTrack) break;
         }
+        adjacentInsertPosition = creatorRow + span;
+      } else {
+        adjacentInsertPosition = originalRow + 1;
       }
 
       let movedSource: NodeItem;
@@ -784,14 +760,34 @@ export function Grid({ projectId }: { projectId: string }) {
         movedSource = await nodesApi.update(sourceNode.id, { track_id: targetTrack.id });
         addNode(movedSource);
       } else {
-        const rowIndex = liveTracks.length === 0 ? 0 : Math.max(...liveTracks.map((t) => t.row_index)) + 1;
-        const newTrack = await tracksApi.create({
-          project_id: projectId,
-          row_index: rowIndex,
-          spawned_from_node_id: causeNodeId,
-          spawned_from_output_id: kept.id,
-        });
-        addTrack(newTrack);
+        // No existing row already sitting empty within the span -- insert a
+        // fresh one right after it (shifting everything below down by one)
+        // instead of always appending at the very bottom of the whole
+        // project. Matches how the causing workflow's own card visually
+        // grows to reach a spawned sibling track (spans's "+1
+        // per spawned sibling"); before this, ANY single-image-slot workflow
+        // (the common case -- span is always 1, and the one row in that span
+        // is always its own, excluded above) could never find a reusable row
+        // and unconditionally landed its leftover picker many rows away from
+        // anything related to it (2026-07-21 incident, reported live from a
+        // "Back View" node with 4 variants). Only falls back to appending at
+        // the end if the adjacent insert would itself push some OTHER
+        // workflow's output out of its own valid range.
+        const canInsertAdjacent = adjacentInsertPosition !== null && !wouldBreakOutputBinding(adjacentInsertPosition, 1);
+        let newTrack: Track;
+        if (canInsertAdjacent) {
+          [newTrack] = await insertTracksAt(adjacentInsertPosition as number, 1, {
+            spawned_from_node_id: causeNodeId,
+            spawned_from_output_id: kept.id,
+          });
+        } else {
+          newTrack = await tracksApi.create({
+            project_id: projectId,
+            spawned_from_node_id: causeNodeId,
+            spawned_from_output_id: kept.id,
+          });
+          addTrack(newTrack);
+        }
 
         // Relocate sourceNode (still holding `others`) into the new track
         // FIRST, to actually vacate its original slot -- the backend's
@@ -868,57 +864,12 @@ export function Grid({ projectId }: { projectId: string }) {
 
   const onStartCompare = (node: NodeItem, asset: Asset) => setCompareFor({ nodeId: node.id, asset });
 
-  // Resolves the track at `row` and reassigns `node`'s track_id AND
-  // step_index to land it exactly at (row, step) -- there's no
-  // display-only position, only track_id/step_index. Whether it's still
-  // "this workflow's output" or gets the manual-placement badge (📌, see
-  // isWorkflowOutput) falls out of this purely positionally, same as
-  // everything else in the row-span paradigm -- nothing extra to track
-  // here for that.
-  const moveAssetTo = async (node: NodeItem, row: number, step: number): Promise<NodeItem> => {
-    const targetTrack = trackByRowIndex.get(row);
-    if (!targetTrack) throw new Error(`No track at row ${row}`);
-    const updated = await nodesApi.update(node.id, { track_id: targetTrack.id, step_index: step });
-    addNode(updated);
-    return updated;
-  };
-
-  // Two nodes can't both sit at each other's (track, step) at once, so
-  // trading places needs a scratch track as a temporary parking spot: park
-  // b there, move a into b's old spot, move b (from the scratch track) into
-  // a's old spot, then remove the scratch track. Carries step_index along
-  // with track_id -- swapping two assets in different columns is just as
-  // valid a drag target as the same-column reorder this was originally
-  // written for.
-  const swapAssetPositions = async (a: NodeItem, b: NodeItem): Promise<void> => {
-    const aTrackId = a.track_id;
-    const aStep = a.step_index;
-    const bTrackId = b.track_id;
-    const bStep = b.step_index;
-    const scratchRowIndex = tracks.length === 0 ? 0 : Math.max(...tracks.map((t) => t.row_index)) + 1;
-    const scratch = await tracksApi.create({ project_id: projectId, row_index: scratchRowIndex });
-    addTrack(scratch);
-    await nodesApi.update(b.id, { track_id: scratch.id }).then(addNode);
-    await nodesApi.update(a.id, { track_id: bTrackId, step_index: bStep }).then(addNode);
-    await nodesApi.update(b.id, { track_id: aTrackId, step_index: aStep }).then(addNode);
-    await tracksApi.remove(scratch.id);
-    removeTrack(scratch.id);
-  };
-
-  // Manual drag of an asset node onto any other empty cell -- a real
-  // track_id/step_index reassignment (moveAssetTo), so the view never has
-  // anything to say about a node's position that the model doesn't already
-  // say too. Not limited to the source or destination being within some
-  // workflow's span: an asset dropped somewhere no workflow claims as its
-  // own input/output just renders with the manual-placement badge
-  // (isWorkflowOutput is purely positional, see the render below), same as
-  // one dropped inside a span but not aligned with the workflow's actual
-  // materialized output. If the target cell is already taken by another
-  // repositionable asset, this is just a reorder -- swap the two positions
-  // (swapAssetPositions) rather than treating it as a collision. RefAsset is
-  // a separate, deliberate action ("+ ref elsewhere") for pointing at an
-  // asset from a second place without moving the original, not something
-  // drag-and-drop falls back to.
+  // Manual drag of an asset node onto another cell. The frontend does NO
+  // placement logic anymore -- it just sends the intent (the target grid
+  // cell) and re-fetches the authoritative layout. All the checks
+  // (allowed-position/output-binding, swap-vs-move, collision) live in the
+  // backend's move endpoint (api/routes/nodes.py's move_node); a rejected
+  // move comes back as a 409 whose message is shown as-is.
   const dropAssetAt = async (targetRow: number, targetStep: number) => {
     const draggedId = draggingAssetId;
     setDraggingAssetId(null);
@@ -929,414 +880,38 @@ export function Grid({ projectId }: { projectId: string }) {
     const draggedRow = rowIndexOfTrack(dragged.track_id);
     if (targetRow === draggedRow && targetStep === dragged.step_index) return;
 
-    // Refuse to start a second structural op while one's still applying its
-    // (possibly multi-node) sequence of updates -- both would plan against
-    // the same pre-operation snapshot and could independently decide the
-    // same target cell is free, landing two different nodes on top of each
-    // other once both finish (2026-07-17 incident: two different RefAsset
-    // nodes both ended up at the same row because two drags overlapped).
     if (structuralOpRef.current) {
       alert("Another move is still in progress -- try again in a moment.");
       return;
     }
     structuralOpRef.current = true;
     try {
-      if (!isPositionAllowedFor(dragged, targetRow, targetStep)) {
-        alert("This asset is a workflow output -- it can only move among its own creator's positions.");
-        return;
-      }
-
-      const occupant = nodesByRowStep.get(`${targetRow}:${targetStep}`);
-      if (occupant && occupant.id !== dragged.id) {
-        // asset.select is just as swappable as any other asset node now --
-        // dragging moves the whole picker, so trading places with one is no
-        // different from trading places with a settled asset.single.
-        if (occupant.kind !== "asset") {
-          alert("Can't swap with that cell.");
-          return;
-        }
-        if (!isPositionAllowedFor(occupant, draggedRow, dragged.step_index)) {
-          alert("Can't swap -- the other cell's asset is a workflow output tied to a different position.");
-          return;
-        }
-        await swapAssetPositions(dragged, occupant);
-        return;
-      }
-
-      await moveAssetTo(dragged, targetRow, targetStep);
+      await nodesApi.move(dragged.id, { target_row: targetRow, target_step: targetStep });
+      await loadProject(projectId);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Couldn't move this cell.");
     } finally {
       structuralOpRef.current = false;
     }
   };
 
 
-  // Freshly computed from live store state rather than this render's
-  // memoized nodesByRowStep/rowSpanByNode/effectiveRow -- needed because
-  // dropWorkflowAt can run applyColumnMove immediately followed by
-  // applyRowMove within the same call, and the row phase must see what the
-  // column phase just wrote (the component's own memoized values won't
-  // reflect that until the next render). Using the stale closures there
-  // made the row phase compute dependents/collisions against pre-column-move
-  // positions -- silently missing the real dependents (or grabbing whatever
-  // unrelated node happened to sit at that stale key) and applying the move
-  // partially before a resulting backend 409 aborted the rest (2026-07-17
-  // incident: a diagonal drag left an input asset stranded one column off,
-  // on the wrong side of its workflow node).
-  const liveGridSnapshot = () => {
-    const { nodesById: liveNodesById, tracks: liveTracks } = useProjectStore.getState();
-    const rowIndexOf = (trackId: string): number => liveTracks.find((t) => t.id === trackId)?.row_index ?? 0;
-    const byRowStep = new Map<string, NodeItem>();
-    for (const node of Object.values(liveNodesById)) {
-      byRowStep.set(`${rowIndexOf(node.track_id)}:${node.step_index}`, node);
-    }
-    const spanOf = (node: NodeItem): number => {
-      if (node.kind !== "workflow") return 1;
-      const template = templates.find((t) => t.node_type === node.node_type);
-      const inputSlots = template ? slotFields(template.param_schema).length : 0;
-      // Mirrors desiredRowSpanByNode's own formula above (spawned-track
-      // count, not output row offset -- see that memo's comment for why the
-      // offset-based version fed back into an infinite growth loop via
-      // insertTracksAt).
-      const spawnedRows = liveTracks.filter((t) => t.spawned_from_node_id === node.id).length;
-      const desired = Math.max(inputSlots, 1 + spawnedRows, 1);
-      const start = rowIndexOf(node.track_id);
-      let span = 1;
-      while (span < desired && !byRowStep.has(`${start + span}:${node.step_index}`)) span++;
-      return span;
-    };
-    return { tracks: liveTracks, rowIndexOf, byRowStep, spanOf };
-  };
-
-  // Row-only relocation at the node's CURRENT column (used standalone for a
-  // vertical-only drag, and as phase 2 of the full 2D move below, run after
-  // any column phase has already landed the node on its target column).
-  const applyRowMove = async (workflowNode: NodeItem, targetRow: number) => {
-    const live = liveGridSnapshot();
-    const originalRow = live.rowIndexOf(workflowNode.track_id);
-    if (targetRow === originalRow) return;
-    const delta = targetRow - originalRow;
-    const span = live.spanOf(workflowNode);
-
-    const dependents: NodeItem[] = [];
-    for (let r = originalRow; r < originalRow + span; r++) {
-      for (const step of [workflowNode.step_index - 1, workflowNode.step_index + 1]) {
-        const n = live.byRowStep.get(`${r}:${step}`);
-        if (n) dependents.push(n);
-      }
-    }
-    const moves = [
-      { node: workflowNode, targetRow },
-      ...dependents.map((n) => ({ node: n, targetRow: live.rowIndexOf(n.track_id) + delta })),
-    ];
-    const movingIds = new Set(moves.map((m) => m.node.id));
-    const blocked = moves.some(({ node, targetRow: tr }) => {
-      const occupant = live.byRowStep.get(`${tr}:${node.step_index}`);
-      return occupant && !movingIds.has(occupant.id);
-    });
-
-    if (blocked) {
-      // Only a clean move -- destination range doesn't overlap the node's
-      // current one at all -- gets pushed through, in either direction:
-      // insert `span` new empty tracks right at targetRow (same mechanism
-      // as the auto-expand effect above), shifting whatever's there, and
-      // everything below it (including, for an upward move, this node's
-      // own current position), down to make room. A move that overlaps
-      // its own current span is refused instead: inserting rows there
-      // would shift some of the very nodes this plan is about to move by
-      // an amount this plan didn't account for, corrupting it.
-      const overlapsOwnSpan = targetRow < originalRow + span && targetRow + span > originalRow;
-      if (overlapsOwnSpan) {
-        alert("Can't move there -- there isn't empty room for the node and everything currently aligned to it.");
-        return;
-      }
-      await insertTracksAt(targetRow, span);
-    }
-
-    // Read live track state -- insertTracksAt may have just created the
-    // tracks these targets need, and shifted row_index on existing ones;
-    // this closure's `tracks` won't reflect that until the next render.
-    const liveTrackByRow = new Map(useProjectStore.getState().tracks.map((t) => [t.row_index, t]));
-
-    // Every node in `moves` shifts by the same `delta`, so applying them in
-    // the wrong order can send one PATCH straight at a cell another moving
-    // node hasn't vacated yet -- the backend's own slot-uniqueness guard
-    // (api/routes/nodes.py's _ensure_slot_free) then 409s, aborting the loop
-    // partway through with some nodes moved and others stranded (2026-07-17
-    // incident: moving a workflow node with a real generated output landed
-    // an input on the output's still-occupied old cell, aborting before the
-    // output itself got a turn to move out of the way). Processing
-    // furthest-along-the-shift-first (descending current row for a downward
-    // move, ascending for an upward one) guarantees each node's target is
-    // already empty by the time its own PATCH runs, since nothing further
-    // back in the direction of travel can be a live occupant of a cell
-    // something further ahead hasn't already left.
-    // The workflow node itself always goes first, ahead of the vacate-order
-    // rule below -- a dependent that's this workflow's own materialized
-    // output is checked server-side against its creator's CURRENT (DB) step
-    // (_ensure_output_binding in nodes.py), so if the output's PATCH lands
-    // before the workflow's own, the backend still sees the old creator
-    // position and 409s the output's move as "not its creator's own
-    // position" (2026-07-18 incident: moving a workflow node with a
-    // materialized output rejected the output's own move this way).
-    const orderedMoves = [...moves].sort((a, b) => {
-      if (a.node.id === workflowNode.id) return -1;
-      if (b.node.id === workflowNode.id) return 1;
-      const ra = live.rowIndexOf(a.node.track_id);
-      const rb = live.rowIndexOf(b.node.track_id);
-      return delta > 0 ? rb - ra : ra - rb;
-    });
-
-    for (const { node, targetRow: tr } of orderedMoves) {
-      const targetTrack = liveTrackByRow.get(tr);
-      if (!targetTrack) continue;
-      const updated = await nodesApi.update(node.id, { track_id: targetTrack.id });
-      addNode(updated);
-    }
-  };
-
-  // Column relocation: moves a workflow node (and everything currently
-  // sitting in its input/output columns within its row-span) sideways by an
-  // even delta -- odd deltas would land it on an asset-parity column,
-  // breaking the project-wide kind alternation every other column relies on.
-  // Returns the node's fresh state on success, or null if refused (either
-  // the destination overlaps the node's own current column range, or the
-  // only way to clear it would split some OTHER workflow's own
-  // input/self/output triple -- see wouldSplitAnyWorkflow).
-  const applyColumnMove = async (workflowNode: NodeItem, targetStep: number): Promise<NodeItem | null> => {
-    const originalStep = workflowNode.step_index;
-    if (targetStep === originalStep) return workflowNode;
-    const stepDelta = targetStep - originalStep;
-    if (stepDelta % 2 !== 0) {
-      alert("Can only move a workflow node left/right in steps of 2 -- keeps the asset/workflow column pattern intact.");
-      return null;
-    }
-
-    const live = liveGridSnapshot();
-    const row = live.rowIndexOf(workflowNode.track_id);
-    const span = live.spanOf(workflowNode);
-    const dependents: NodeItem[] = [];
-    for (let r = row; r < row + span; r++) {
-      for (const step of [originalStep - 1, originalStep + 1]) {
-        const n = live.byRowStep.get(`${r}:${step}`);
-        if (n) dependents.push(n);
-      }
-    }
-    const moves = [
-      { node: workflowNode, step: targetStep },
-      ...dependents.map((n) => ({ node: n, step: n.step_index + stepDelta })),
-    ];
-    const movingIds = new Set(moves.map((m) => m.node.id));
-    const blocked = moves.some(({ node, step }) => {
-      const r = live.rowIndexOf(node.track_id);
-      const occupant = live.byRowStep.get(`${r}:${step}`);
-      return occupant && !movingIds.has(occupant.id);
-    });
-
-    if (blocked) {
-      const originalLo = originalStep - 1;
-      const originalHi = originalStep + 1;
-      const targetLo = targetStep - 1;
-      const targetHi = targetStep + 1;
-      const overlapsOwnRange = targetLo <= originalHi && targetHi >= originalLo;
-      if (overlapsOwnRange) {
-        alert("Can't move there -- there isn't empty room for the node and everything currently aligned to it.");
-        return null;
-      }
-      const insertPos = stepDelta > 0 ? originalHi + 1 : targetLo;
-      const insertCount = Math.abs(stepDelta);
-      if (wouldSplitAnyWorkflow(insertPos, workflowNode.id)) {
-        alert("Can't move there -- it would split another workflow node from its own input/output column.");
-        return null;
-      }
-      await insertColumnsAt(insertPos, insertCount);
-    }
-
-    // Same ordering hazard applyRowMove's own comment describes: every node
-    // here shifts by the same stepDelta, and a workflow's input column
-    // (step-1) sits exactly 2 apart from its output column (step+1) -- the
-    // smallest stepDelta this function even allows -- so a plain left/right
-    // nudge of a node that already has a real generated output routinely
-    // sends its input straight at the cell its OWN output hasn't vacated
-    // yet. Furthest-along-the-shift-first ordering (descending current step
-    // for a rightward move, ascending for a leftward one) avoids it the
-    // same way. But the workflow node itself must still go first, ahead of
-    // that rule -- see applyRowMove's identical guard for why (its
-    // materialized output is checked server-side against the creator's
-    // CURRENT DB step, which is stale until the workflow's own PATCH lands).
-    const orderedMoves = [...moves].sort((a, b) => {
-      if (a.node.id === workflowNode.id) return -1;
-      if (b.node.id === workflowNode.id) return 1;
-      return stepDelta > 0 ? b.node.step_index - a.node.step_index : a.node.step_index - b.node.step_index;
-    });
-
-    let fresh: NodeItem = workflowNode;
-    for (const { node, step } of orderedMoves) {
-      const updated = await nodesApi.update(node.id, { step_index: step });
-      addNode(updated);
-      if (node.id === workflowNode.id) fresh = updated;
-    }
-    return fresh;
-  };
-
-  // Diagonal relocation: row AND column both change in the same drop.
-  // Checked and applied against the TRUE final destination directly, in one
-  // pass -- not decomposed into a row phase and a column phase the way a
-  // pure single-axis move is (applyRowMove/applyColumnMove below), because
-  // each phase of that decomposition only knows how to check room at an
-  // INTERMEDIATE resting spot (wherever the node is after phase one), not
-  // the actual target. That mismatch could reject a genuinely free
-  // destination, or -- worse -- "fix" a phantom collision at the
-  // intermediate spot by inserting new tracks there, shifting unrelated
-  // tracks' unrelated cells down even though the real target had room all
-  // along (2026-07-17 incident: dropping a workflow node diagonally onto
-  // two empty target rows still pushed OTHER tracks' column-0 cells down a
-  // row).
-  //
-  // DOES still grow room the same way applyRowMove does (insertTracksAt at
-  // targetRow), but only once -- against the real target, computed above,
-  // never an intermediate one -- so landing a workflow (plus its
-  // input/output cells) back onto a fresh, nothing-claims-it-yet pair of
-  // rows works the same as creating it there fresh would, even if some
-  // unrelated node happens to already sit in one of the cells it needs
-  // (2026-07-17: moving a workflow back onto its own original home rows,
-  // whose input column had since been claimed by unrelated leftover test
-  // nodes, was wrongly refused outright instead of growing room for it).
-  const applyDiagonalMove = async (workflowNode: NodeItem, targetRow: number, targetStep: number) => {
-    const stepDelta = targetStep - workflowNode.step_index;
-    if (stepDelta % 2 !== 0) {
-      alert("Can only move a workflow node left/right in steps of 2 -- keeps the asset/workflow column pattern intact.");
-      return;
-    }
-
-    let live = liveGridSnapshot();
-    const originalStep = workflowNode.step_index;
-    let originalRow = live.rowIndexOf(workflowNode.track_id);
-    const span = live.spanOf(workflowNode);
-
-    const dependents: NodeItem[] = [];
-    for (let r = originalRow; r < originalRow + span; r++) {
-      for (const step of [originalStep - 1, originalStep + 1]) {
-        const n = live.byRowStep.get(`${r}:${step}`);
-        if (n) dependents.push(n);
-      }
-    }
-
-    const computeMoves = () => {
-      const rowDelta = targetRow - originalRow;
-      return [
-        { node: workflowNode, row: targetRow, step: targetStep },
-        ...dependents.map((n) => ({
-          node: n,
-          row: live.rowIndexOf(n.track_id) + rowDelta,
-          step: n.step_index + stepDelta,
-        })),
-      ];
-    };
-    const isBlocked = (moves: ReturnType<typeof computeMoves>) => {
-      const movingIds = new Set(moves.map((m) => m.node.id));
-      return moves.some(({ row, step }) => {
-        const occupant = live.byRowStep.get(`${row}:${step}`);
-        return occupant && !movingIds.has(occupant.id);
-      });
-    };
-
-    let moves = computeMoves();
-
-    if (isBlocked(moves)) {
-      // Growing room by inserting tracks is only for the FIRST workflow
-      // column in the project's pattern (step 0 or 1, whichever
-      // kindForStep says is workflow for this project's start_kind) --
-      // that's the one lane a fresh multi-row workflow naturally lives in
-      // from the start, so treating a move back onto an unclaimed pair of
-      // rows there like a fresh placement is legitimate. Any later
-      // workflow column (step 3, 5, ...) is a branch/secondary point, not
-      // a primary lane -- growing the whole grid there as a side effect of
-      // one drag would be surprising, so it gets a strict fits-or-refused
-      // check instead, same as applyDiagonalMove's blocked case used to be
-      // for every column before this.
-      const firstWorkflowStep = project?.start_kind === "workflow" ? 0 : 1;
-      if (targetStep !== firstWorkflowStep) {
-        alert("Can't move there -- something's already in the way. Pick an empty spot the same size as this node's own span.");
-        return;
-      }
-      // Only safe to grow room for: the destination span doesn't overlap
-      // the node's own current one at all (same guard applyRowMove uses) --
-      // inserting there would otherwise shift some of the very nodes this
-      // plan is about to move by an amount it didn't account for.
-      const overlapsOwnSpan = targetRow < originalRow + span && targetRow + span > originalRow;
-      if (overlapsOwnSpan) {
-        alert("Can't move there -- there isn't empty room for the node and everything currently aligned to it.");
-        return;
-      }
-      await insertTracksAt(targetRow, span);
-      live = liveGridSnapshot();
-      originalRow = live.rowIndexOf(workflowNode.track_id);
-      moves = computeMoves();
-      if (isBlocked(moves)) {
-        alert("Can't move there -- still something in the way even after making room.");
-        return;
-      }
-    }
-
-    const liveTrackByRow = new Map(live.tracks.map((t) => [t.row_index, t]));
-    if (moves.some(({ row, step }) => step < 0 || !liveTrackByRow.has(row))) {
-      alert("Can't move there.");
-      return;
-    }
-
-    // Same ordering hazard as applyRowMove/applyColumnMove: every node here
-    // shifts by the same (rowDelta, stepDelta) pair, so a naive application
-    // order can PATCH a node straight at a cell another moving node hasn't
-    // vacated yet. Sort by how far each node's CURRENT position projects
-    // onto the shift direction, descending -- the node furthest along the
-    // direction of travel has nothing else in this batch still standing on
-    // its target, so it can always go first; working backwards from there,
-    // by the time any other node's turn comes, whatever used to be at its
-    // target (if anything in this batch) has already moved out.
-    // The workflow node itself must still go first, ahead of this projection
-    // order -- see applyRowMove's identical guard for why (a materialized
-    // output dependent is checked server-side against its creator's CURRENT
-    // DB step, stale until the workflow's own PATCH lands).
-    const rowDelta = targetRow - originalRow;
-    const orderedMoves = [...moves].sort((a, b) => {
-      if (a.node.id === workflowNode.id) return -1;
-      if (b.node.id === workflowNode.id) return 1;
-      const projA = live.rowIndexOf(a.node.track_id) * rowDelta + a.node.step_index * stepDelta;
-      const projB = live.rowIndexOf(b.node.track_id) * rowDelta + b.node.step_index * stepDelta;
-      return projB - projA;
-    });
-
-    for (const { node, row, step } of orderedMoves) {
-      const targetTrack = liveTrackByRow.get(row)!;
-      const updated = await nodesApi.update(node.id, { track_id: targetTrack.id, step_index: step });
-      addNode(updated);
-    }
-  };
-
+  // Like dropAssetAt: pure intent. The backend's move endpoint carries the
+  // workflow node's dependents along, validates, and rejects (409) if the
+  // target area isn't free -- the frontend plans nothing and just re-fetches
+  // the authoritative layout.
   const dropWorkflowAt = async (workflowNode: NodeItem, targetRow: number, targetStep: number) => {
-    // See dropAssetAt's comment -- never let a second structural op start
-    // while one's still applying its updates.
     if (structuralOpRef.current) {
       alert("Another move is still in progress -- try again in a moment.");
       return;
     }
-    const rowChanged = targetRow !== effectiveRow(workflowNode);
-    const stepChanged = targetStep !== workflowNode.step_index;
+    if (targetRow === effectiveRow(workflowNode) && targetStep === workflowNode.step_index) return;
     structuralOpRef.current = true;
     try {
-      if (rowChanged && stepChanged) {
-        await applyDiagonalMove(workflowNode, targetRow, targetStep);
-        return;
-      }
-      let node = workflowNode;
-      if (stepChanged) {
-        const moved = await applyColumnMove(node, targetStep);
-        if (!moved) return;
-        node = moved;
-      }
-      if (rowChanged) {
-        await applyRowMove(node, targetRow);
-      }
+      await nodesApi.move(workflowNode.id, { target_row: targetRow, target_step: targetStep });
+      await loadProject(projectId);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Couldn't move this node.");
     } finally {
       structuralOpRef.current = false;
     }
@@ -1421,30 +996,11 @@ export function Grid({ projectId }: { projectId: string }) {
     await createRefAssetAt(sourceNode, row, step);
   };
 
-  // Closes the gap between what a workflow node wants (desiredRowSpanByNode)
-  // and what currently fits without overlapping something else
-  // (rowSpanByNode) by inserting real track rows -- a node that doesn't fit
-  // grows its own room instead of just quietly rendering smaller than it
-  // needs. Fixes one node's gap per effect run (insertTracksAt's own writes
-  // change `tracks`, which re-fires this effect for whatever gap is left,
-  // one at a time, rather than computing every gap against a single
-  // about-to-be-stale snapshot of row_index values).
-  useEffect(() => {
-    if (!templatesLoaded || structuralOpRef.current) return;
-    for (const node of Object.values(nodesById)) {
-      if (node.kind !== "workflow") continue;
-      const desired = desiredRowSpanByNode.get(node.id) ?? 1;
-      const achieved = rowSpanByNode.get(node.id) ?? 1;
-      if (achieved >= desired) continue;
-      const start = effectiveRow(node);
-      structuralOpRef.current = true;
-      insertTracksAt(start + achieved, desired - achieved).finally(() => {
-        structuralOpRef.current = false;
-      });
-      break;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodesById, desiredRowSpanByNode, rowSpanByNode, tracks, templatesLoaded]);
+  // (The reactive auto-expand useEffect that used to grow a workflow's rows
+  // client-side is gone -- growth is imperative on the backend now
+  // (ensure_span_rows, called when a template is assigned). The frontend no
+  // longer mutates grid structure as a render side-effect, which is what
+  // once caused runaway track growth.)
 
   const onBackgroundPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return; // left button only -- middle/right keep their own browser behavior
@@ -1521,11 +1077,25 @@ export function Grid({ projectId }: { projectId: string }) {
             gridAutoRows: "minmax(120px, auto)",
           }}
         >
-          {sortedTracks.map((track, rowIdx) => (
+          {sortedTracks.map((track) => (
             <div
               key={`label-${track.id}`}
               className="track-label"
-              style={{ gridColumn: 1, gridRow: rowIdx + 1, display: "flex", alignItems: "center", justifyContent: "space-between" }}
+              // track.row_index, not this map's own array index -- every
+              // node's own gridRow (below) is positioned by effectiveRow(node)
+              // = row_index directly, so once row_index has a gap (a track
+              // deleted from the middle, e.g. row_index 0,1,2,5,6,7... with 3
+              // and 4 gone), a sequential array index desyncs from that by
+              // however large the gap is: this label would render N rows
+              // above where its own track's real content sits. That's not
+              // just cosmetic -- a track whose LABEL then lands on an empty-
+              // looking row (nothing else genuinely there) but whose real
+              // content rendered further down under a DIFFERENT track's
+              // label reads as "this one's empty, safe to delete" when it
+              // is not (2026-07-21 incident: deleting a track that looked
+              // empty this way cascaded and deleted real, unrelated nodes
+              // that only *appeared* to belong to some other row).
+              style={{ gridColumn: 1, gridRow: track.row_index + 1, display: "flex", alignItems: "center", justifyContent: "space-between" }}
             >
               track {track.row_index}
               <div style={{ display: "flex", gap: 4 }}>
@@ -1547,8 +1117,17 @@ export function Grid({ projectId }: { projectId: string }) {
             const trackNodes = nodesByTrack.get(track.id) ?? [];
             const lastNodeId = trackNodes[trackNodes.length - 1]?.id;
             return trackNodes.map((node) => {
+              if (hiddenChainNodeIds.has(node.id)) return null;
               const row = effectiveRow(node);
-              const gridRow = node.kind === "workflow" ? `${row + 1} / span ${rowSpanByNode.get(node.id) ?? 1}` : row + 1;
+              const gridRow = node.kind === "workflow" ? `${row + 1} / span ${spanAchieved(node.id)}` : row + 1;
+              // No span here (unlike an earlier version): collapse_node
+              // (nodes.py) now actually relocates the pass-through asset and
+              // consumer out of this row's S+1/S+2 columns rather than just
+              // hiding their rendering (2026-07-21) -- those columns are
+              // genuinely free, ordinary cells again (a moved-in asset gets
+              // its own normal "+ step", etc.), not space this card should
+              // keep visually claiming.
+              const gridColumn = node.step_index + 2;
               // A still-undecided candidates picker ("asset.select") has no
               // single well-defined picture to grab for compare/ref/pick
               // (isPickable above still excludes it for that reason), but
@@ -1573,7 +1152,7 @@ export function Grid({ projectId }: { projectId: string }) {
                   // at its own natural content height inside that space,
                   // leaving invisible dead space below it and making a span
                   // look identical to a single row.
-                  style={{ gridColumn: node.step_index + 2, gridRow, display: "flex" }}
+                  style={{ gridColumn, gridRow, display: "flex" }}
                   draggable={isDraggableAsset || isDraggableWorkflow}
                   onDragStart={() => {
                     if (isDraggableAsset) setDraggingAssetId(node.id);
@@ -1619,6 +1198,7 @@ export function Grid({ projectId }: { projectId: string }) {
                     onStartCompare={onStartCompare}
                     onStartRef={onStartRef}
                     onShrinkToFit={shrinkWorkflowToFit}
+                    collapseInfo={collapseInfoByNode.get(node.id)}
                   />
                 </div>
               );
@@ -1729,7 +1309,7 @@ export function Grid({ projectId }: { projectId: string }) {
             // column, for tracks that shouldn't start where the pattern says.
             const rawButtonStep = !showStartChoice ? emptyTrackSkip[track.id] ?? 0 : 0;
             // If this track's own next slot lands inside another track's
-            // spanning workflow card (blockingNodeByCell), auto-advance past it
+            // spanning workflow card (blockedCells), auto-advance past it
             // -- that cell is already visually and physically taken, so
             // offering a button there would let the user create a node right
             // on top of it.
@@ -1750,7 +1330,7 @@ export function Grid({ projectId }: { projectId: string }) {
             const secondStep = buttonStep + 1;
             const secondKind = emptyTrackKind === "asset" ? "workflow" : emptyTrackKind === "workflow" ? "asset" : null;
             const secondAvailable =
-              secondKind !== null && secondStep < ceiling && !blockingNodeByCell.has(`${track.row_index}:${secondStep}`);
+              secondKind !== null && secondStep < ceiling && !blockedCells.has(`${track.row_index}:${secondStep}`);
             return (
               <Fragment key={track.id}>
                 <div

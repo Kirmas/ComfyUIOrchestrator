@@ -4,6 +4,7 @@ import type {
   Backend,
   Capability,
   DetectedField,
+  GridLayout,
   InputRef,
   Job,
   NodeItem,
@@ -58,15 +59,24 @@ export const projectsApi = {
   create: (name: string) => api.post<Project>("/api/projects", { name }),
   get: (id: string) => api.get<Project>(`/api/projects/${id}`),
   tracks: (id: string) => api.get<Track[]>(`/api/projects/${id}/tracks`),
+  // Backend-computed derived layout: workflow row-spans + blocked cells. The
+  // client renders from this instead of recomputing the span formula.
+  layout: (id: string) => api.get<GridLayout>(`/api/projects/${id}/layout`),
   remove: (id: string) => api.delete(`/api/projects/${id}`),
 };
 
 export const tracksApi = {
-  create: (data: { project_id: string; row_index: number; spawned_from_node_id?: string | null; spawned_from_output_id?: string | null }) =>
-    api.post<Track>("/api/tracks", data),
+  // Placement is relative now (linked list): after_track_id, or place_at_head,
+  // else appended at the tail. No row_index -- see Track type / core/track_order.py.
+  create: (data: {
+    project_id: string;
+    after_track_id?: string | null;
+    place_at_head?: boolean;
+    spawned_from_node_id?: string | null;
+    spawned_from_output_id?: string | null;
+  }) => api.post<Track>("/api/tracks", data),
   get: (id: string) => api.get<Track>(`/api/tracks/${id}`),
   nodes: (id: string) => api.get<NodeItem[]>(`/api/tracks/${id}/nodes`),
-  update: (id: string, data: { row_index: number }) => api.patch<Track>(`/api/tracks/${id}`, data),
   remove: (id: string) => api.delete(`/api/tracks/${id}`),
 };
 
@@ -92,12 +102,20 @@ export const nodesApi = {
   }) => api.post<NodeItem>("/api/nodes", data),
   get: (id: string) => api.get<NodeItem>(`/api/nodes/${id}`),
   update: (id: string, data: Partial<NodeItem>) => api.patch<NodeItem>(`/api/nodes/${id}`, data),
+  // Intent-only move: the backend owns all placement logic; the client just
+  // names the target grid cell and re-fetches the authoritative layout after.
+  move: (id: string, data: { target_row: number; target_step: number }) =>
+    api.post<NodeItem[]>(`/api/nodes/${id}/move`, data),
   remove: (id: string) => api.delete(`/api/nodes/${id}`),
   outputs: (id: string) => api.get<Asset[]>(`/api/nodes/${id}/outputs`),
   jobs: (id: string) => api.get<Job[]>(`/api/nodes/${id}/jobs`),
   generate: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/generate`),
   discard: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/discard`),
   reroll: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/reroll`),
+  // id here is the pass-through asset node's own id, not either workflow
+  // node's -- see db/models.py's Node.collapse_target_id docstring.
+  collapse: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/collapse`),
+  expand: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/expand`),
   uploadAsset: (id: string, file: File) => {
     const form = new FormData();
     form.append("file", file);

@@ -1,16 +1,23 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.node_types import resolve_effective_template, sync_legacy_fields
 from app.core.queue import job_queue
+from app.core.track_order import ordered_tracks, splice_after
 from app.core.storage import build_asset_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Job, Node, NodeKind, NodeStatus, Project, Track
-from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeRead, NodeUpdate
-from app.worker.tasks import enqueue_node_job, has_room_for_output, own_output_nodes, selected_or_latest_output
+from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeMove, NodeRead, NodeUpdate
+from app.worker.tasks import (
+    _splice_after_would_split_a_span,
+    enqueue_node_job,
+    has_room_for_output,
+    own_output_nodes,
+    selected_or_latest_output,
+)
 
 router = APIRouter(prefix="/api/nodes", tags=["nodes"])
 
@@ -54,20 +61,37 @@ async def _ensure_output_binding(db: AsyncSession, node: Node, target_track_id, 
     only writer of that column, and it's never touched again after) stays
     rigidly bound to its creator: reachable only at the creator's own output
     step (creator.step_index + 1), in a row that's either within the
-    creator's own row-span (its home row through home row + however many
-    image/file input slots its template declares, the same span Grid.tsx
-    grows real tracks for -- see rowSpanByNode/spanOf) or a track spawned
-    from it (Track.spawned_from_node_id == creator.id, the set
-    onSelectCandidate moves a settled/leftover candidate into once there are
-    more results than the creator's own span has room for). A node with no
-    creator (manual upload, "+ asset", RefAsset) has nothing to check here.
-    Mirrors Grid.tsx's isPositionAllowedFor so a rejected drag and this
-    guard agree on what's allowed; this is the enforced copy, not just an
-    assist for the UI to grey cells out."""
+    creator's own row-span or a track spawned from it (Track.spawned_from_node_id
+    == creator.id, the set onSelectCandidate moves a settled/leftover
+    candidate into once there are more results than the creator's own span
+    has room for). A node with no creator (manual upload, "+ asset",
+    RefAsset) has nothing to check here.
+
+    The span itself is `max(image/file input slot count, 1 + spawned track
+    count)` -- NOT slot count alone. Mirrors Grid.tsx's isPositionAllowedFor,
+    which in turn just reads the same number Grid.tsx's own
+    desiredRowSpanByNode already computes for how tall the card is drawn --
+    this used to be a second, narrower "input slots only" formula here that
+    silently drifted from the rendered span, so a card that visibly grew to
+    reach a spawned sibling track still 409'd a drag into that very row
+    (2026-07-21 incident, "Back View" node: visibly 2 rows tall after a
+    candidate pick spawned a sibling, but moving its own output into the 2nd
+    row was rejected as out of its creator's range). This is the enforced
+    copy, not just an assist for the UI to grey cells out -- keep both in
+    sync if either one's formula ever changes again."""
     if node.created_by_node_id is None:
         return
     creator = await db.get(Node, node.created_by_node_id)
     if creator is None:
+        return
+    # A locked creator (see _is_locked) no longer renders its own card at all
+    # (Grid.tsx's hiddenChainNodeIds) -- there's nothing left for this output
+    # to visually stay "next to", so once collapsed it's free to move
+    # anywhere, same as a plain manual asset (2026-07-21: a real output was
+    # stuck several columns from its now-invisible creator with the drag
+    # rejected every time, since this check still measured against a card
+    # nobody could see anymore).
+    if await _is_locked(db, creator.id):
         return
     denied = HTTPException(409, "This asset is a workflow output and can only move among its own creator's positions")
     if target_step != creator.step_index + 1:
@@ -84,9 +108,247 @@ async def _ensure_output_binding(db: AsyncSession, node: Node, target_track_id, 
     effective = await resolve_effective_template(db, creator)
     fields = (effective.param_schema if effective else {}).get("fields", [])
     slot_count = len([f for f in fields if f.get("type") in ("image", "file")])
-    span = max(slot_count, 1)
-    if not (creator_track.row_index <= target_track.row_index < creator_track.row_index + span):
+    spawned_result = await db.execute(select(func.count()).select_from(Track).where(Track.spawned_from_node_id == creator.id))
+    spawned_count = spawned_result.scalar_one()
+    span = max(slot_count, 1 + spawned_count)
+    # Positions in the project's linked-list order (core/track_order.py) stand
+    # in for the old dense row_index: the allowed range is the creator's own
+    # position through the next `span` positions.
+    ordered = await ordered_tracks(db, creator_track.project_id)
+    pos = {t.id: i for i, t in enumerate(ordered)}
+    creator_pos = pos.get(creator_track.id)
+    target_pos = pos.get(target_track.id)
+    if creator_pos is None or target_pos is None or not (creator_pos <= target_pos < creator_pos + span):
         raise denied
+
+
+async def _is_locked(db: AsyncSession, node_id) -> bool:
+    """True once a node is part of a collapsed chain -- either it's the
+    creator of some collapsed asset or that asset's collapse target (see
+    db/models.py's Node.collapse_target_id docstring)."""
+    result = await db.execute(
+        select(Node.id).where(
+            Node.kind == NodeKind.asset,
+            Node.collapse_target_id.isnot(None),
+            or_(Node.created_by_node_id == node_id, Node.collapse_target_id == node_id),
+        )
+    )
+    return result.first() is not None
+
+
+async def _reject_if_locked(db: AsyncSession, node: Node) -> None:
+    """No generate/reroll/discard once a workflow node is locked (see
+    _is_locked) -- collapsing is meant for finished history the user doesn't
+    intend to touch again, so this is enforced here, not just by hiding the
+    buttons in NodeCell.tsx."""
+    if await _is_locked(db, node.id):
+        raise HTTPException(409, "This node is part of a collapsed chain -- expand it first before regenerating.")
+
+
+# A column index no real node ever uses -- a scratch parking spot so a
+# two-node position swap never makes the (track, step) unique index (migration
+# 0011) see a transient duplicate mid-swap.
+_PARK_STEP = 1_000_000
+
+
+async def _node_at(db: AsyncSession, track_id, step_index: int) -> Node | None:
+    result = await db.execute(
+        select(Node).where(Node.track_id == track_id, Node.step_index == step_index, Node.status != NodeStatus.discarded)
+    )
+    return result.scalars().first()
+
+
+async def _actual_span(db: AsyncSession, node: Node, ordered: list[Track], pos: dict) -> int:
+    """This workflow node's real row-span, computed authoritatively here (no
+    longer mirrored on the client): desired = max(image/file input slots,
+    1 + spawned tracks), capped at the first row below whose own column is
+    already taken. Same formula as worker/tasks.py's _actual_row_span."""
+    effective = await resolve_effective_template(db, node)
+    fields = (effective.param_schema if effective else {}).get("fields", [])
+    slot_count = len([f for f in fields if f.get("type") in ("image", "file")])
+    spawned_result = await db.execute(select(func.count()).select_from(Track).where(Track.spawned_from_node_id == node.id))
+    spawned_count = spawned_result.scalar_one()
+    desired = max(slot_count, 1 + spawned_count, 1)
+    start = pos.get(node.track_id)
+    if start is None or desired <= 1:
+        return 1
+    span = 1
+    while span < desired and start + span < len(ordered):
+        if await _node_at(db, ordered[start + span].id, node.step_index) is not None:
+            break
+        span += 1
+    return span
+
+
+async def ensure_span_rows(db: AsyncSession, workflow_node: Node) -> None:
+    """Imperative backend growth (replaces Grid.tsx's reactive auto-expand
+    useEffect): make sure the empty input-slot rows a workflow needs actually
+    exist as tracks right below it. Called when a workflow's template is
+    assigned/changed (create/update_node), so a multi-input node (e.g.
+    native.character_chart, 8 image slots) gets its 7 rows created up front
+    instead of rendering tall into non-existent rows the user can't fill.
+
+    desired = max(image/file input slots, 1 + spawned tracks). For each offset
+    1..desired-1 below the node's own row: if a track already sits there with
+    this workflow's own column free, it's fine; otherwise splice a fresh empty
+    track in at that position -- unless doing so would tear some OTHER
+    workflow's span apart (then stop, best-effort). Idempotent: re-running when
+    the rows already exist splices nothing. Does not commit -- the caller does."""
+    effective = await resolve_effective_template(db, workflow_node)
+    if effective is None:
+        return
+    fields = (effective.param_schema or {}).get("fields", [])
+    slot_count = len([f for f in fields if f.get("type") in ("image", "file")])
+    spawned = await db.execute(select(func.count()).select_from(Track).where(Track.spawned_from_node_id == workflow_node.id))
+    desired = max(slot_count, 1 + spawned.scalar_one(), 1)
+    if desired <= 1:
+        return
+
+    home = await db.get(Track, workflow_node.track_id)
+    if home is None:
+        return
+    project_id = home.project_id
+    step = workflow_node.step_index
+
+    offset = 1
+    while offset < desired:
+        ordered = await ordered_tracks(db, project_id)
+        pos = {t.id: i for i, t in enumerate(ordered)}
+        start = pos.get(workflow_node.track_id)
+        if start is None:
+            return
+        target = start + offset
+        if target < len(ordered):
+            occupant = await _node_at(db, ordered[target].id, step)
+            if occupant is None:
+                offset += 1
+                continue
+            # Blocked: a fresh row must go in at `target`. Refuse only if that
+            # shift would split an unrelated workflow's span (excluding this
+            # one, whose span we're deliberately growing).
+            if await _splice_after_would_split_a_span(db, project_id, target - 1, ordered, pos, exclude_node_id=workflow_node.id):
+                return
+        anchor = ordered[target - 1] if 0 <= target - 1 < len(ordered) else ordered[-1]
+        new_track = Track(project_id=project_id)
+        db.add(new_track)
+        await db.flush()
+        await splice_after(db, project_id, new_track, anchor)
+        await db.flush()
+        offset += 1
+
+
+async def _move_asset(db: AsyncSession, node: Node, ordered: list[Track], target_row: int, target_step: int) -> None:
+    target_track = ordered[target_row]
+    occupant = await _node_at(db, target_track.id, target_step)
+    if occupant is not None and occupant.id != node.id:
+        if occupant.kind != NodeKind.asset:
+            raise HTTPException(409, "Can't swap with that cell.")
+        old_track_id, old_step = node.track_id, node.step_index
+        # Both nodes must be allowed at their NEW homes before anything moves.
+        await _ensure_output_binding(db, node, target_track.id, target_step)
+        await _ensure_output_binding(db, occupant, old_track_id, old_step)
+        # Swap through a scratch column so the (track, step) unique index never
+        # sees a transient duplicate.
+        node.step_index = _PARK_STEP
+        await db.flush()
+        occupant.track_id, occupant.step_index = old_track_id, old_step
+        await db.flush()
+        node.track_id, node.step_index = target_track.id, target_step
+        await db.flush()
+    else:
+        await _ensure_slot_free(db, target_track.id, target_step, exclude_node_id=node.id)
+        await _ensure_output_binding(db, node, target_track.id, target_step)
+        node.track_id, node.step_index = target_track.id, target_step
+    await db.commit()
+
+
+async def _move_workflow(db: AsyncSession, node: Node, ordered: list[Track], pos: dict, target_row: int, target_step: int) -> None:
+    cur_row = pos[node.track_id]
+    cur_step = node.step_index
+    row_delta = target_row - cur_row
+    step_delta = target_step - cur_step
+    if step_delta % 2 != 0:
+        raise HTTPException(409, "A workflow node can only move left/right in even column steps (keeps the asset/workflow column pattern intact).")
+
+    span = await _actual_span(db, node, ordered, pos)
+    # Everything currently aligned to this workflow's span (its input column
+    # step-1 and output column step+1) rides along by the same delta.
+    dependents: list[Node] = []
+    for r in range(cur_row, cur_row + span):
+        for step in (cur_step - 1, cur_step + 1):
+            if step < 0:
+                continue
+            n = await _node_at(db, ordered[r].id, step)
+            if n is not None and n.id != node.id:
+                dependents.append(n)
+
+    moves = [(node, target_row, target_step)]
+    for d in dependents:
+        moves.append((d, pos[d.track_id] + row_delta, d.step_index + step_delta))
+    moving_ids = {m[0].id for m in moves}
+
+    # Every landing cell must be on the grid and free of any non-mover. No
+    # auto-insert-to-make-room here (yet) -- a clear 409 beats a surprise shove.
+    for _n, tr, ts in moves:
+        if not (0 <= tr < len(ordered)) or ts < 0:
+            raise HTTPException(409, "That move would land a cell off the grid.")
+        occ = await _node_at(db, ordered[tr].id, ts)
+        if occ is not None and occ.id not in moving_ids:
+            raise HTTPException(409, "Target area is occupied -- drop onto an empty area, or clear it first.")
+
+    # A dependent that's some OTHER workflow's bound output must still be
+    # allowed at its new home. This node's OWN outputs (created_by == node.id)
+    # ride along rigidly by the same delta, so their position relative to their
+    # creator is preserved and needs no re-check.
+    for n, tr, ts in moves:
+        if n.created_by_node_id is not None and n.created_by_node_id != node.id:
+            await _ensure_output_binding(db, n, ordered[tr].id, ts)
+
+    # Apply furthest-along-the-shift-first so each target is already vacated by
+    # the time its own write runs, flushing after each so the (track, step)
+    # unique index sees them one at a time in this safe order.
+    def sort_key(m):
+        n = m[0]
+        return -(pos[n.track_id] * row_delta + n.step_index * step_delta)
+
+    for n, tr, ts in sorted(moves, key=sort_key):
+        n.track_id = ordered[tr].id
+        n.step_index = ts
+        await db.flush()
+    await db.commit()
+
+
+@router.post("/{node_id}/move", response_model=list[NodeRead])
+async def move_node(node_id: uuid.UUID, payload: NodeMove, db: AsyncSession = Depends(get_db)):
+    """Backend-authoritative node move. The client sends only the intent (which
+    grid cell the user dropped onto); ALL placement logic lives here -- resolve
+    the target row from the project's track order, validate output-binding /
+    slot rules, carry a workflow node's dependents along, and reject (409) if
+    the target isn't free. The client re-fetches the authoritative layout
+    after; it does no placement math of its own anymore."""
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(404, "Node not found")
+    home = await db.get(Track, node.track_id)
+    if home is None:
+        raise HTTPException(409, "Node has no track.")
+    ordered = await ordered_tracks(db, home.project_id)
+    pos = {t.id: i for i, t in enumerate(ordered)}
+    cur_row = pos.get(node.track_id)
+    if cur_row is None:
+        raise HTTPException(409, "Node's track is not in the project order.")
+    if payload.target_row == cur_row and payload.target_step == node.step_index:
+        return [node]
+    if not (0 <= payload.target_row < len(ordered)) or payload.target_step < 0:
+        raise HTTPException(409, "Target cell is off the grid.")
+
+    if node.kind == NodeKind.asset:
+        await _move_asset(db, node, ordered, payload.target_row, payload.target_step)
+    else:
+        await _move_workflow(db, node, ordered, pos, payload.target_row, payload.target_step)
+
+    await db.refresh(node)
+    return [node]
 
 
 @router.post("", response_model=NodeRead, status_code=201)
@@ -116,6 +378,11 @@ async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)):
         effective = await resolve_effective_template(db, node)
         sync_legacy_fields(node, effective)
     db.add(node)
+    await db.flush()
+    # A workflow created already carrying a template needs its input-slot rows
+    # materialized too (see ensure_span_rows) -- same as the update path.
+    if node.kind == NodeKind.workflow and node.node_type:
+        await ensure_span_rows(db, node)
     await db.commit()
     await db.refresh(node)
     return node
@@ -147,6 +414,11 @@ async def update_node(node_id: uuid.UUID, payload: NodeUpdate, db: AsyncSession 
     if "node_type" in data:
         effective = await resolve_effective_template(db, node)
         sync_legacy_fields(node, effective)
+        # Template (re)assigned -- materialize the input-slot rows this
+        # workflow now needs, right below it (see ensure_span_rows). Replaces
+        # the frontend's reactive auto-expand effect.
+        if node.kind == NodeKind.workflow:
+            await ensure_span_rows(db, node)
     await db.commit()
     await db.refresh(node)
     return node
@@ -171,24 +443,20 @@ async def delete_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     actually live in) -- never to whatever else happens to sit after it
     positionally.
 
-    If this node is itself a verified output of some creator workflow, and
-    that creator has a sibling track spawned from the same generation
-    (Grid.tsx's onSelectCandidate -- picking a different candidate), that
-    sibling is promoted into the freed-up slot instead of leaving a gap:
-    its nodes already sit at matching step_index values (spawned tracks are
-    laid out to align), so it's a straight re-parent."""
+    Deliberately does NOT touch any sibling spawned track. A previous version
+    "promoted" a leftover-candidate sibling track into the freed-up slot by
+    re-parenting all its nodes into this node's track and deleting the sibling
+    track -- but that re-parent skipped the (track_id, step_index) uniqueness
+    guard _ensure_slot_free enforces everywhere else, so if the sibling had
+    any downstream content in a column this track already occupied, two live
+    nodes collided in one cell (one then silently unreachable in the grid),
+    and the sibling track deletion risked cascading its own nodes away. Both
+    are real data-loss paths, and the convenience never justified them: the
+    leftover branch simply stays where it is now, exactly as the user left it.
+    """
     node = await db.get(Node, node_id)
     if not node:
         raise HTTPException(404, "Node not found")
-
-    track_id = node.track_id
-
-    sibling_track = None
-    if node.created_by_node_id is not None:
-        result = await db.execute(
-            select(Track).where(Track.spawned_from_node_id == node.created_by_node_id, Track.id != track_id)
-        )
-        sibling_track = result.scalars().first()
 
     nodes_to_delete = [node]
     if node.kind == NodeKind.workflow:
@@ -204,12 +472,6 @@ async def delete_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
     for n in nodes_to_delete:
         await db.delete(n)
-
-    if sibling_track is not None:
-        result = await db.execute(select(Node).where(Node.track_id == sibling_track.id))
-        for n in result.scalars().all():
-            n.track_id = track_id
-        await db.delete(sibling_track)
 
     await db.commit()
 
@@ -266,6 +528,140 @@ async def upload_asset_to_node(node_id: uuid.UUID, file: UploadFile, db: AsyncSe
     return item
 
 
+@router.post("/{node_id}/collapse", response_model=NodeRead)
+async def collapse_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Folds a workflow -> asset -> workflow chain (e.g. crop then upscale)
+    into one card at the first workflow's cell -- for a passthrough asset the
+    user cares about the lineage of but not individually. node_id here is
+    that passthrough asset's own id (the one that ends up holding
+    collapse_target_id), not either workflow node's id -- see db/models.py's
+    Node.collapse_target_id docstring and NodeCell.tsx's "Collapse chain"
+    button on BaseAssetNodeView."""
+    asset = await db.get(Node, node_id)
+    if asset is None:
+        raise HTTPException(404, "Node not found")
+    if asset.kind != NodeKind.asset or asset.created_by_node_id is None:
+        raise HTTPException(409, "Only a workflow's own materialized output asset can be collapsed")
+    if asset.collapse_target_id is not None:
+        raise HTTPException(409, "This asset is already collapsed")
+
+    creator_outputs = await own_output_nodes(db, asset.created_by_node_id)
+    if len(creator_outputs) != 1 or creator_outputs[0].id != asset.id:
+        raise HTTPException(409, "This asset isn't the sole current output of its creator workflow")
+
+    result = await db.execute(
+        select(Node).where(
+            Node.track_id == asset.track_id,
+            Node.step_index == asset.step_index + 1,
+            Node.kind == NodeKind.workflow,
+            Node.status != NodeStatus.discarded,
+        )
+    )
+    target = result.scalars().first()
+    # InputRef serializes with every union field present (node_id/asset_id/
+    # output_id/value all null for a cell_index ref) -- match by the two keys
+    # that matter, not exact dict equality, or every stored ref (a superset
+    # of {"type","index"}) fails this check even for the simple default case.
+    slot0 = target.inputs[0] if target and target.inputs else None
+    if target is None or slot0 is None or slot0.get("type") != "cell_index" or slot0.get("index") != 0:
+        raise HTTPException(
+            409,
+            "This asset isn't consumed at slot 0 by exactly one workflow node right after it in this track -- "
+            "collapse only supports that simple chain shape today.",
+        )
+
+    # Sole-input safety: nothing else in the project (e.g. a "+ ref
+    # elsewhere" cell) explicitly points at this asset -- collapsing it would
+    # hide something still genuinely in use elsewhere.
+    track = await db.get(Track, asset.track_id)
+    result = await db.execute(
+        select(Node.inputs).join(Track, Track.id == Node.track_id).where(Track.project_id == track.project_id, Node.id != target.id)
+    )
+    for (other_inputs,) in result.all():
+        for ref in other_inputs or []:
+            if ref.get("type") == "explicit" and ref.get("node_id") == str(asset.id):
+                raise HTTPException(
+                    409,
+                    "This asset is referenced elsewhere (e.g. a reference cell) -- collapsing would hide something still in use.",
+                )
+
+    # Actually vacate this asset's and target's own two columns (S+1, S+2 --
+    # not just hide their rendering) by parking both past whatever this track
+    # currently uses, so S+1/S+2 become genuinely free for new content --
+    # e.g. dragging the consumer's own real output closer, now that
+    # _ensure_output_binding no longer pins it near a creator that doesn't
+    # render (see that function's _is_locked check). Only step_index moves,
+    # never track_id -- same row, just further out where nothing renders
+    # (hiddenChainNodeIds) so it's invisible regardless of exact column.
+    # Neither move touches _ensure_output_binding (a direct column write, not
+    # a PATCH) -- that's fine, both nodes already count as locked the moment
+    # collapse_target_id below is set, which is exactly the condition that
+    # function itself now waives the position constraint for.
+    project = await db.get(Project, track.project_id)
+    result = await db.execute(
+        select(Node.step_index).where(Node.track_id == asset.track_id, Node.status != NodeStatus.discarded)
+    )
+    max_step = max((s for (s,) in result.all()), default=-1)
+    park_asset_step = max_step + 1
+    if _kind_for_step(project.start_kind, park_asset_step) != NodeKind.asset:
+        park_asset_step += 1
+    park_target_step = park_asset_step + 1
+
+    asset.step_index = park_asset_step
+    target.step_index = park_target_step
+    asset.collapse_target_id = target.id
+    await db.commit()
+    await db.refresh(asset)
+    return asset
+
+
+@router.post("/{node_id}/expand", response_model=NodeRead)
+async def expand_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Reverses collapse_node's parking move -- best-effort: if the user put
+    something new in this chain's old S+1/S+2 columns since collapsing (the
+    whole point of freeing them), there's nowhere left to restore this asset
+    and its consumer to, and this 409s explaining that rather than silently
+    colliding with it or picking some other spot the user never asked for."""
+    asset = await db.get(Node, node_id)
+    if asset is None:
+        raise HTTPException(404, "Node not found")
+    if asset.collapse_target_id is None:
+        raise HTTPException(409, "This asset isn't collapsed")
+    creator = await db.get(Node, asset.created_by_node_id)
+    target = await db.get(Node, asset.collapse_target_id)
+    if creator is None or target is None:
+        # Creator or consumer got deleted out from under this collapse --
+        # nothing coherent to restore a position relative to; just unlock.
+        asset.collapse_target_id = None
+        await db.commit()
+        await db.refresh(asset)
+        return asset
+
+    restore_asset_step = creator.step_index + 1
+    restore_target_step = restore_asset_step + 1
+    result = await db.execute(
+        select(Node).where(
+            Node.track_id == asset.track_id,
+            Node.step_index.in_([restore_asset_step, restore_target_step]),
+            Node.status != NodeStatus.discarded,
+            Node.id.notin_([asset.id, target.id]),
+        )
+    )
+    blocker = result.scalars().first()
+    if blocker is not None:
+        raise HTTPException(
+            409,
+            "Something else now occupies this chain's original cells -- move or remove it first, then expand again.",
+        )
+
+    asset.step_index = restore_asset_step
+    target.step_index = restore_target_step
+    asset.collapse_target_id = None
+    await db.commit()
+    await db.refresh(asset)
+    return asset
+
+
 @router.post("/{node_id}/generate", response_model=NodeRead)
 async def generate_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     node = await db.get(Node, node_id)
@@ -273,6 +669,7 @@ async def generate_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Node not found")
     if node.kind != NodeKind.workflow:
         raise HTTPException(400, "Only workflow-kind nodes can be generated -- asset nodes are filled by upload or by their source workflow")
+    await _reject_if_locked(db, node)
     if node.status in (NodeStatus.queued, NodeStatus.running):
         raise HTTPException(409, "Node is already generating")
 
@@ -304,6 +701,10 @@ async def discard_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     node = await db.get(Node, node_id)
     if not node:
         raise HTTPException(404, "Node not found")
+    if node.kind == NodeKind.asset and node.collapse_target_id is not None:
+        raise HTTPException(409, "This asset is collapsed -- expand it first before discarding.")
+    if node.kind == NodeKind.workflow:
+        await _reject_if_locked(db, node)
     node.status = NodeStatus.discarded
     await db.commit()
     await db.refresh(node)
@@ -320,6 +721,7 @@ async def reroll_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Node not found")
     if old.kind != NodeKind.workflow:
         raise HTTPException(400, "Only workflow-kind nodes can be re-rolled -- re-upload to an asset node instead")
+    await _reject_if_locked(db, old)
 
     # Discard every output the old node ever produced too (own_output_nodes,
     # not just whatever's positionally at its old cell -- see
@@ -345,6 +747,14 @@ async def reroll_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         )
 
     old.status = NodeStatus.discarded
+    # Flush the discard BEFORE inserting new_node at the same (track_id,
+    # step_index): the partial unique index uq_nodes_live_cell (migration
+    # 0011) only excludes discarded rows, and SQLAlchemy's unit of work can
+    # otherwise order this INSERT ahead of the UPDATE within one flush,
+    # tripping the constraint on a transient duplicate that resolves a
+    # statement later. Flushing here makes old already-discarded in the DB
+    # when new_node inserts.
+    await db.flush()
 
     new_node = Node(
         track_id=old.track_id,

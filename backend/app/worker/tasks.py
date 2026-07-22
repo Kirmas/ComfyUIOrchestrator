@@ -15,6 +15,7 @@ from app.core.node_types import resolve_effective_template, sync_legacy_fields
 from app.core.queue import job_queue
 from app.core.storage import get_storage
 from app.core.template_engine import validate_params
+from app.core.track_order import ordered_tracks, splice_after
 from app.core.ws_manager import ws_manager
 from app.db.base import async_session_maker
 from app.db.models import ApiUsageLog, Asset, Backend, ExecutionType, Job, JobStatusEnum, Node, NodeKind, NodeStatus, Track
@@ -76,28 +77,31 @@ async def _prev_asset_node_output(db, track_id, step_index) -> Asset | None:
 async def _asset_at_cell_index(db, node: Node, index: int) -> Asset | None:
     """Position-based input resolution for the row-span paradigm (mirrors
     the frontend's Grid.tsx effectiveRow/nodesByRowStep): slot `index` reads
-    whatever asset node's row (its track's row_index) equals this workflow
-    node's own home row (its track's row_index) + index, in the column
-    right before it. A node's row is always exactly its track's row_index --
-    "moving" a node to a different row means reassigning its track_id (see
-    Grid.tsx's dropAssetAt/applyRowMove), never a display-only override.
-    Deliberately independent of the frontend's span-sizing/collision
+    whatever asset node sits `index` tracks below this workflow node's own
+    home track in the project's list order (core/track_order.py), in the
+    column right before it. A node's row is always exactly its track's
+    position -- "moving" a node to a different row means reassigning its
+    track_id (see Grid.tsx's dropAssetAt/applyRowMove), never a display-only
+    override. Deliberately independent of the frontend's span-sizing/collision
     calculation -- this only cares what's actually sitting in that one grid
     cell right now, not how big the workflow node's card is currently
     rendered as."""
     home_track = await db.get(Track, node.track_id)
     if home_track is None:
         return None
-    target_row = home_track.row_index + index
+    ordered = await ordered_tracks(db, home_track.project_id)
+    pos = {t.id: i for i, t in enumerate(ordered)}
+    home_pos = pos.get(home_track.id)
+    if home_pos is None or home_pos + index >= len(ordered):
+        return None
+    target_track = ordered[home_pos + index]
     target_step = node.step_index - 1
     result = await db.execute(
-        select(Node)
-        .join(Track, Track.id == Node.track_id)
-        .where(
-            Track.project_id == home_track.project_id,
+        select(Node).where(
+            Node.track_id == target_track.id,
             Node.kind == NodeKind.asset,
             Node.step_index == target_step,
-            Track.row_index == target_row,
+            Node.status != NodeStatus.discarded,
         )
     )
     asset_node = result.scalars().first()
@@ -122,64 +126,70 @@ async def own_output_nodes(db, workflow_node_id) -> list[Node]:
     return list(result.scalars().all())
 
 
-async def _actual_row_span(db, node: Node, desired: int) -> int:
+async def _actual_row_span(db, node: Node, desired: int, ordered: list[Track], pos: dict) -> int:
     """Mirrors Grid.tsx's rowSpanByNode exactly: a workflow node's real
     row-span stops growing the moment its OWN column hits another node
     below it -- it can never claim more of the adjacent asset column's rows
     as its own slots than that, regardless of how many its template asks
-    for (desired). Needed by _row_index_would_split_a_span to know how far
-    down each OTHER workflow node's dependents actually reach."""
+    for (desired). Needed by _splice_after_would_split_a_span to know how far
+    down each OTHER workflow node's dependents actually reach. `ordered`/`pos`
+    are the project's list order (core/track_order.py) passed in so the whole
+    split check reuses one snapshot."""
     if desired <= 1:
         return 1
-    track = await db.get(Track, node.track_id)
+    start = pos.get(node.track_id)
+    if start is None:
+        return 1
     span = 1
-    while span < desired:
-        result = await db.execute(
-            select(Track).where(Track.project_id == track.project_id, Track.row_index == track.row_index + span)
-        )
-        candidate = result.scalars().first()
-        if candidate is not None:
-            blocked = await db.execute(
-                select(Node).where(
-                    Node.track_id == candidate.id, Node.step_index == node.step_index, Node.status != NodeStatus.discarded
-                )
+    while span < desired and start + span < len(ordered):
+        candidate = ordered[start + span]
+        blocked = await db.execute(
+            select(Node).where(
+                Node.track_id == candidate.id, Node.step_index == node.step_index, Node.status != NodeStatus.discarded
             )
-            if blocked.scalars().first() is not None:
-                break
+        )
+        if blocked.scalars().first() is not None:
+            break
         span += 1
     return span
 
 
-async def _row_index_would_split_a_span(db, project_id, vacated_row_index: int) -> bool:
-    """True if inserting a blank Track at vacated_row_index (shifting every
-    Track with row_index >= vacated_row_index down by one, as
-    _locate_output_row's insert branch does) would split some OTHER
-    workflow node's row-span apart from its own row -- a node whose own row
-    sits ABOVE vacated_row_index but whose actual span (_actual_row_span)
-    reaches at or past it. That node's own row wouldn't shift (it's below
-    the threshold) while some of its cell_index-addressed dependent rows
-    would, breaking "creator row_index + offset" resolution for whatever
-    was in between (2026-07-20 incident: the first version of this
-    "insert instead of failing" fix didn't check this, and could have
-    silently corrupted an unrelated node's inputs instead of just refusing
-    the doomed generation)."""
+async def _splice_after_would_split_a_span(db, project_id, after_pos: int, ordered: list[Track], pos: dict, exclude_node_id=None) -> bool:
+    """True if splicing a fresh track right after list position `after_pos`
+    (shifting every track after it down by one, as _locate_output_row's
+    insert branch does) would split some OTHER workflow node's row-span apart
+    from its own row -- a node whose own position is <= after_pos but whose
+    actual span (_actual_row_span) reaches strictly past after_pos. Its own
+    row wouldn't shift while some of its cell_index-addressed dependent rows
+    would, breaking positional input resolution for whatever was in between
+    (2026-07-20 incident: the first "insert instead of failing" fix didn't
+    check this and could silently corrupt an unrelated node's inputs instead
+    of just refusing the doomed generation).
+
+    exclude_node_id skips one workflow -- used when the splice is deliberately
+    growing THAT node's own span (ensure_span_rows), where "splitting" it is
+    the whole point, not a hazard."""
     result = await db.execute(
-        select(Node, Track)
+        select(Node)
         .join(Track, Node.track_id == Track.id)
         .where(
             Track.project_id == project_id,
             Node.kind == NodeKind.workflow,
-            Track.row_index < vacated_row_index,
             Node.status != NodeStatus.discarded,
         )
     )
-    for node, track in result.all():
+    for node in result.scalars().all():
+        if exclude_node_id is not None and node.id == exclude_node_id:
+            continue
+        node_pos = pos.get(node.track_id)
+        if node_pos is None or node_pos > after_pos:
+            continue
         effective = await resolve_effective_template(db, node)
         if effective is None:
             continue
         desired = len([f for f in (effective.param_schema or {}).get("fields", []) if f.get("type") in ("image", "file")])
-        span = await _actual_row_span(db, node, max(desired, 1))
-        if track.row_index + span > vacated_row_index:
+        span = await _actual_row_span(db, node, max(desired, 1), ordered, pos)
+        if node_pos + span > after_pos + 1:
             return True
     return False
 
@@ -195,90 +205,90 @@ async def _locate_output_row(db, workflow_node: Node, *, materialize: bool) -> T
     a new one in the gap), just triggered here instead of by a user click.
 
     Only when that's actually safe, though: if some OTHER workflow node's
-    own row-span would be split apart by the shift (_row_index_would_split_a_span),
+    own row-span would be split apart by the shift (_splice_after_would_split_a_span),
     this still raises RuntimeError instead of silently corrupting it --
     growing into open space is fine, but not at the cost of breaking
     something unrelated.
 
     materialize controls side effects: True (the real claim,
-    _claim_new_output_cell) actually creates/shifts Tracks and returns one
+    _claim_new_output_cell) actually creates/splices Tracks and returns one
     to use. False (a pure read-only probe, has_room_for_output) returns
     None instead wherever the True path would have to materialize
     something -- the caller only needs to know whether a claim would
     succeed (or raise) right now, not actually make one.
 
+    "Insert a row" is now a linked-list splice (core/track_order.py) rather
+    than a dense-row_index shift, so there's no bulk renumber to get wrong --
+    but the positional split hazard is unchanged (splicing after position P
+    still shifts every later track's derived row number by one), so the
+    _splice_after_would_split_a_span guard stays.
+
     2026-07-20 incident/fix history: this used to always raise on a blocked
     row, discovered only after a ComfyUI render had already finished and
     there was nowhere to put it -- a real generation thrown away. Making
     growth insert a row removed that failure mode for the common case, but
-    the very next iteration of that same fix (this version) had to bring
-    the raise back for the specific case where insertion itself would be
-    unsafe -- "never fails" and "never corrupts something else" turned out
-    to be in tension, and the second one wins."""
-    row = await db.get(Track, workflow_node.track_id)
+    the very next iteration of that same fix had to bring the raise back for
+    the specific case where insertion itself would be unsafe -- "never fails"
+    and "never corrupts something else" turned out to be in tension, and the
+    second one wins."""
+    home = await db.get(Track, workflow_node.track_id)
     output_step = workflow_node.step_index + 1
+    project_id = home.project_id
+
+    ordered = await ordered_tracks(db, project_id)
+    pos = {t.id: i for i, t in enumerate(ordered)}
+    i = pos.get(home.id)
+    if i is None:
+        return None
 
     while True:
-        result = await db.execute(
+        row = ordered[i]
+        existing = await db.execute(
             select(Node).where(Node.track_id == row.id, Node.step_index == output_step, Node.status != NodeStatus.discarded)
         )
-        if result.scalars().first() is None:
+        if existing.scalars().first() is None:
             return row
 
-        result = await db.execute(select(Track).where(Track.project_id == row.project_id, Track.row_index == row.row_index + 1))
-        next_row = result.scalars().first()
-        if next_row is None:
+        # Need to grow one track further down in the workflow's OWN column.
+        if i + 1 >= len(ordered):
+            # True bottom of the list -- appending a fresh track at the tail
+            # shifts nothing else, so it's always safe. Its output cell is
+            # empty by construction, so it's the row to use.
             if not materialize:
                 return None
-            # The true bottom of the grid -- appending a brand-new track here
-            # never shifts anything else, so it's always safe.
-            next_row = Track(project_id=row.project_id, row_index=row.row_index + 1)
-            db.add(next_row)
+            new_row = Track(project_id=project_id)
+            db.add(new_row)
             await db.flush()
-            row = next_row
-            continue
+            await splice_after(db, project_id, new_row, ordered[-1])
+            await db.flush()
+            return new_row
 
-        result = await db.execute(
+        next_row = ordered[i + 1]
+        occupied = await db.execute(
             select(Node).where(
                 Node.track_id == next_row.id, Node.step_index == workflow_node.step_index, Node.status != NodeStatus.discarded
             )
         )
-        if result.scalars().first() is None:
-            row = next_row
+        if occupied.scalars().first() is None:
+            i += 1
             continue
 
         # Blocked: next_row's own column already belongs to something else.
-        # Safe to insert a fresh Track right there and push it (and
-        # everything from that row down) along -- but only if nothing
-        # ELSE's row-span would be torn apart by that shift: some other
-        # workflow node entirely, sitting ABOVE this row with dependents
-        # (cell_index-addressed asset slots) reaching down into or past it,
-        # would have its own row stay put while part of its span moved --
-        # breaking its input resolution silently.
-        vacated_row_index = next_row.row_index
-        if await _row_index_would_split_a_span(db, next_row.project_id, vacated_row_index):
+        # Splice a fresh track right after `row` (position i) -- but only if
+        # nothing ELSE's row-span would be torn apart by the resulting
+        # positional shift (see _splice_after_would_split_a_span).
+        if await _splice_after_would_split_a_span(db, project_id, i, ordered, pos):
             raise RuntimeError(
                 "No room to grow this workflow's output -- inserting a row here would split another node's own row-span apart."
             )
-
         if not materialize:
             return None
-
-        # Captured before the shift: next_row is in shift_result's own
-        # result set (its row_index >= itself, trivially), so the loop
-        # below mutates this same in-session object too (SQLAlchemy's
-        # identity map) -- reading next_row.row_index afterward would
-        # already reflect +1.
-        shift_result = await db.execute(
-            select(Track).where(Track.project_id == next_row.project_id, Track.row_index >= vacated_row_index)
-        )
-        for t in shift_result.scalars().all():
-            t.row_index += 1
-        inserted_row = Track(project_id=next_row.project_id, row_index=vacated_row_index)
-        db.add(inserted_row)
+        new_row = Track(project_id=project_id)
+        db.add(new_row)
         await db.flush()
-        row = inserted_row
-        continue
+        await splice_after(db, project_id, new_row, row)
+        await db.flush()
+        return new_row
 
 
 async def _claim_new_output_cell(db, workflow_node: Node, is_native: bool) -> Node:
@@ -310,7 +320,7 @@ async def has_room_for_output(db, workflow_node: Node, is_native: bool) -> bool:
     one (inserting a row if needed) for this workflow's next result, run
     right now before ever dispatching to a backend. False only for the
     still-real failure mode: claiming would have to split another node's
-    own row-span apart (_row_index_would_split_a_span) to do it. Mirrors
+    own row-span apart (_splice_after_would_split_a_span) to do it. Mirrors
     _get_or_create_output_asset_node's own branching (keep the two in
     sync): a native target or a live ComfyUI picker means an existing node
     gets reused, not claimed, so no search is even needed in those cases."""
@@ -417,10 +427,10 @@ async def resolve_node_inputs(db, node: Node, param_schema: dict[str, Any] | Non
         if ref_type == "self_prev":
             asset = await _prev_asset_node_output(db, node.track_id, node.step_index)
         elif ref_type == "track_below_prev":
-            result = await db.execute(
-                select(Track).where(Track.project_id == track.project_id, Track.row_index == track.row_index + 1)
-            )
-            below = result.scalars().first()
+            ordered = await ordered_tracks(db, track.project_id)
+            tpos = {t.id: i for i, t in enumerate(ordered)}
+            ti = tpos.get(track.id)
+            below = ordered[ti + 1] if ti is not None and ti + 1 < len(ordered) else None
             # Same step_index bound as self_prev (not +1): kind-per-step
             # (_kind_for_step in api/routes/nodes.py) is keyed off
             # Project.start_kind, the same for every track, so this workflow

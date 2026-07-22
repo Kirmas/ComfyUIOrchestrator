@@ -129,7 +129,23 @@ class Track(Base):
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    row_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Per-project ordering is a doubly-linked list, NOT a dense row_index
+    # anymore (migration 0010). The visible "track N" number is derived from
+    # position in this list at render time (frontend) and never stored, so it
+    # can no longer gap or desync the way a reindexed integer column did --
+    # deleting/inserting a track is now a pointer splice (2 writes), never a
+    # bulk renumber of every track below it (the non-atomic renumber was the
+    # 2026-07-21 data-loss surface). prev/next are NULL at the two ends.
+    # core/track_order.py's ordered_tracks()/unlink_track()/splice_after() are
+    # the only code that should read or mutate these.
+    prev_track_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tracks.id", ondelete="SET NULL", use_alter=True, name="fk_tracks_prev_track"),
+        nullable=True,
+    )
+    next_track_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tracks.id", ondelete="SET NULL", use_alter=True, name="fk_tracks_next_track"),
+        nullable=True,
+    )
     spawned_from_node_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("nodes.id", ondelete="SET NULL", use_alter=True, name="fk_tracks_spawned_from_node"),
         nullable=True,
@@ -207,6 +223,17 @@ class Node(Base):
     # (see schemas.py) -- there is no API path that sets or moves this value
     # except that one backend call site.
     created_by_node_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True
+    )
+    # Set only via POST /api/nodes/{id}/collapse|expand (api/routes/nodes.py),
+    # never through generic PATCH -- lives on the pass-through asset node of a
+    # workflow -> asset -> workflow chain (this asset's own created_by_node_id
+    # is that chain's first workflow; this column, once set, points at the
+    # second). A non-NULL value means: fold the 3-cell chain into one card in
+    # the UI (NodeCell.tsx), and both of those two workflow nodes are locked
+    # (no generate/reroll/discard -- see _reject_if_locked) since collapsing
+    # is meant for finished history the user doesn't intend to regenerate.
+    collapse_target_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

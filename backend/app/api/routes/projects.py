@@ -4,8 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.grid_layout import compute_layout
+from app.core.track_order import ordered_tracks
 from app.db.base import get_db
-from app.db.models import Project, Track
+from app.db.models import Project
 from app.schemas.schemas import ProjectCreate, ProjectRead, TrackRead
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -36,8 +38,18 @@ async def get_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 
 @router.get("/{project_id}/tracks", response_model=list[TrackRead])
 async def list_project_tracks(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Track).where(Track.project_id == project_id).order_by(Track.row_index))
-    return result.scalars().all()
+    # Returned already in list order (head -> next -> ...) -- the frontend
+    # derives each track's ephemeral row number from this position, so the
+    # order the client renders is exactly the order established here.
+    return await ordered_tracks(db, project_id)
+
+
+@router.get("/{project_id}/layout")
+async def project_layout(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Backend-computed derived layout (workflow row-spans + blocked cells) --
+    see core/grid_layout.py. The client renders from this instead of
+    recomputing the span formula itself."""
+    return await compute_layout(db, project_id)
 
 
 @router.delete("/{project_id}", status_code=204)

@@ -51,7 +51,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new ApiError(res.status, text || res.statusText);
+    // FastAPI's HTTPException body is {"detail": "..."} -- extract it so
+    // callers that just do `alert(err.message)` (Settings.tsx's tryDelete,
+    // etc.) show the actual reason instead of the raw JSON envelope. Falls
+    // back to the raw text for any non-JSON-detail error body.
+    let message = text || res.statusText;
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed?.detail === "string") message = parsed.detail;
+    } catch {
+      // not JSON -- keep the raw text
+    }
+    throw new ApiError(res.status, message);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;

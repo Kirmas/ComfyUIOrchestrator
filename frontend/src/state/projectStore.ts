@@ -2,13 +2,44 @@ import { create } from "zustand";
 import { nodesApi, projectsApi, tracksApi } from "../api/endpoints";
 import type { Asset, NodeItem, ProgressEvent, Track } from "../types";
 
+// The API returns tracks already in list order (backend walks the linked
+// list). row_index is a purely client-side, derived positional index (array
+// position) used for rendering/positional math -- never sent back to the
+// server. Centralised here so it can never drift from list order.
+function withRowIndex(tracks: Track[]): Track[] {
+  return tracks.map((t, i) => (t.row_index === i ? t : { ...t, row_index: i }));
+}
+
+// The backend-computed layout (workflow spans + blocked cells) is derived from
+// nodes+tracks, so it must be re-fetched whenever either changes. Rather than
+// hunt every mutation site, every store mutator that touches nodes/tracks
+// pings this; it debounces so a burst of local updates (e.g. onSelectCandidate
+// adding several nodes) coalesces into one refetch. The frontend no longer
+// computes span itself -- it just asks the backend after each change.
+let layoutTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleLayoutRefresh() {
+  if (layoutTimer) clearTimeout(layoutTimer);
+  layoutTimer = setTimeout(() => {
+    const { projectId, reloadLayout } = useProjectStore.getState();
+    if (projectId) reloadLayout(projectId).catch(() => undefined);
+  }, 60);
+}
+
 interface ProjectState {
   projectId: string | null;
   tracks: Track[];
   nodesById: Record<string, NodeItem>;
   outputsByNode: Record<string, Asset[]>;
+  // Backend-computed derived layout -- see core/grid_layout.py. spans keyed by
+  // workflow node id; blockedCells is a Set of "row:col" strings a spanning
+  // card covers in its own column. The frontend reads these instead of
+  // recomputing the span formula.
+  spans: Record<string, { desired: number; achieved: number }>;
+  blockedCells: Set<string>;
 
   loadProject: (projectId: string) => Promise<void>;
+  reloadTracks: (projectId: string) => Promise<void>;
+  reloadLayout: (projectId: string) => Promise<void>;
   refreshTrack: (trackId: string) => Promise<void>;
   refreshNodeOutputs: (nodeId: string) => Promise<void>;
   applyProgressEvent: (event: ProgressEvent) => void;
@@ -26,15 +57,25 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   tracks: [],
   nodesById: {},
   outputsByNode: {},
+  spans: {},
+  blockedCells: new Set(),
 
   loadProject: async (projectId: string) => {
-    const tracks = await projectsApi.tracks(projectId);
+    const tracks = withRowIndex(await projectsApi.tracks(projectId));
     const nodesById: Record<string, NodeItem> = {};
     for (const track of tracks) {
       const nodes = await tracksApi.nodes(track.id);
       for (const node of nodes) nodesById[node.id] = node;
     }
-    set({ projectId, tracks, nodesById, outputsByNode: {} });
+    const layout = await projectsApi.layout(projectId).catch(() => ({ spans: {}, blocked_cells: [] as [number, number][] }));
+    set({
+      projectId,
+      tracks,
+      nodesById,
+      outputsByNode: {},
+      spans: layout.spans,
+      blockedCells: new Set(layout.blocked_cells.map(([r, c]) => `${r}:${c}`)),
+    });
 
     for (const node of Object.values(nodesById)) {
       if (node.status === "done") {
@@ -45,6 +86,23 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
+  // Re-fetch just the ordered track list (nodes don't move -- their track_id
+  // is stable) and re-derive row_index from the new order. This is what every
+  // structural track op (create/delete/splice) calls instead of the old
+  // optimistic-shift + per-track PATCH reindex: one GET, no renumber writes,
+  // nothing to leave half-applied. Span depends on track positions, so refresh
+  // the layout too.
+  reloadTracks: async (projectId: string) => {
+    const tracks = withRowIndex(await projectsApi.tracks(projectId));
+    set({ tracks });
+    await get().reloadLayout(projectId);
+  },
+
+  reloadLayout: async (projectId: string) => {
+    const layout = await projectsApi.layout(projectId);
+    set({ spans: layout.spans, blockedCells: new Set(layout.blocked_cells.map(([r, c]) => `${r}:${c}`)) });
+  },
+
   refreshTrack: async (trackId: string) => {
     const nodes = await tracksApi.nodes(trackId);
     set((state) => {
@@ -52,6 +110,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       for (const node of nodes) nodesById[node.id] = node;
       return { nodesById };
     });
+    scheduleLayoutRefresh();
   },
 
   refreshNodeOutputs: async (nodeId: string) => {
@@ -79,8 +138,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           .get(event.node_id)
           .then(async (fetched) => {
             if (!get().tracks.some((t) => t.id === fetched.track_id)) {
-              const track = await tracksApi.get(fetched.track_id);
-              get().addTrack(track);
+              // The worker may have spliced this output's track into the
+              // MIDDLE of the list (_locate_output_row), not at the tail, so
+              // re-fetch the whole ordered list to place it correctly rather
+              // than appending it (addTrack would put it at the wrong row).
+              const pid = get().projectId;
+              if (pid) await get().reloadTracks(pid);
             }
             get().addNode(fetched);
             return get().refreshNodeOutputs(event.node_id);
@@ -102,31 +165,52 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
-  addTrack: (track: Track) => set((state) => ({ tracks: [...state.tracks, track] })),
-  setTracks: (tracks: Track[]) => set({ tracks }),
-  addNode: (node: NodeItem) => set((state) => ({ nodesById: { ...state.nodesById, [node.id]: node } })),
-  replaceNode: (oldId: string, node: NodeItem) =>
+  // Appends at the tail with a derived row_index (= new length-1). Used only
+  // for genuine tail appends (a scratch track for a swap, "+ New track");
+  // positional inserts go through the backend splice + reloadTracks instead.
+  addTrack: (track: Track) => {
+    set((state) => ({ tracks: [...state.tracks, { ...track, row_index: state.tracks.length }] }));
+    scheduleLayoutRefresh();
+  },
+  setTracks: (tracks: Track[]) => {
+    set({ tracks: withRowIndex(tracks) });
+    scheduleLayoutRefresh();
+  },
+  addNode: (node: NodeItem) => {
+    set((state) => ({ nodesById: { ...state.nodesById, [node.id]: node } }));
+    scheduleLayoutRefresh();
+  },
+  replaceNode: (oldId: string, node: NodeItem) => {
     set((state) => {
       const nodesById = { ...state.nodesById };
       delete nodesById[oldId];
       nodesById[node.id] = node;
       return { nodesById };
-    }),
-  setNode: (node: NodeItem) => set((state) => ({ nodesById: { ...state.nodesById, [node.id]: node } })),
-  removeNode: (nodeId: string) =>
+    });
+    scheduleLayoutRefresh();
+  },
+  setNode: (node: NodeItem) => {
+    set((state) => ({ nodesById: { ...state.nodesById, [node.id]: node } }));
+    scheduleLayoutRefresh();
+  },
+  removeNode: (nodeId: string) => {
     set((state) => {
       const nodesById = { ...state.nodesById };
       delete nodesById[nodeId];
       const outputsByNode = { ...state.outputsByNode };
       delete outputsByNode[nodeId];
       return { nodesById, outputsByNode };
-    }),
-  removeTrack: (trackId: string) =>
+    });
+    scheduleLayoutRefresh();
+  },
+  removeTrack: (trackId: string) => {
     set((state) => {
       const nodesById = { ...state.nodesById };
       for (const [id, node] of Object.entries(nodesById)) {
         if (node.track_id === trackId) delete nodesById[id];
       }
       return { tracks: state.tracks.filter((t) => t.id !== trackId), nodesById };
-    }),
+    });
+    scheduleLayoutRefresh();
+  },
 }));
