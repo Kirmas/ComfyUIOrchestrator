@@ -472,6 +472,13 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
         picker.track_id = new_track.id
         await db.flush()
 
+    # The settled node takes over the picker's EXACT cell -- the picker was
+    # placed there by the worker (_locate_output_row, which can legitimately
+    # place an output beyond the creator's input-slot span, unlike the stricter
+    # _ensure_output_binding used for MOVES). So it's not re-validated here: a
+    # node replacing another at the same cell is valid wherever that cell
+    # already was (this is what made pick silently 409 when the worker had put
+    # the picker one row past the creator's span -- 2026-07-22).
     settled = Node(
         track_id=original_track_id,
         step_index=original_step,
@@ -480,8 +487,6 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
         created_by_node_id=picker.created_by_node_id,
         status=NodeStatus.done,
     )
-    if settled.created_by_node_id is not None:
-        await _ensure_output_binding(db, settled, original_track_id, original_step)
     db.add(settled)
     await db.flush()
     kept.node_id = settled.id

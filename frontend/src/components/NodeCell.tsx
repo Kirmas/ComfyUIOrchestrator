@@ -340,9 +340,13 @@ function BaseAssetNodeView({
   // leftover picker, spawn the next step). The frontend just names the kept
   // asset and re-fetches the authoritative layout.
   const selectCandidate = async (asset: Asset) => {
-    await nodesApi.pickCandidate(node.id, asset.id);
-    const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
-    if (projectId) await loadProject(projectId);
+    try {
+      await nodesApi.pickCandidate(node.id, asset.id);
+      const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
+      if (projectId) await loadProject(projectId);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Couldn't keep this candidate.");
+    }
   };
 
   // Discarding down to zero (never selecting anything) empties the picker
@@ -376,9 +380,13 @@ function BaseAssetNodeView({
   // Cascade every candidate into its own line -- one backend call now
   // (pick-all-candidates loops the same fork server-side).
   const selectAll = async () => {
-    await nodesApi.pickAllCandidates(node.id);
-    const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
-    if (projectId) await loadProject(projectId);
+    try {
+      await nodesApi.pickAllCandidates(node.id);
+      const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
+      if (projectId) await loadProject(projectId);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Couldn't settle the candidates.");
+    }
   };
 
   // A collapsed asset (node.collapse_target_id set) never reaches this
