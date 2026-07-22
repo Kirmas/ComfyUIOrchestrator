@@ -361,38 +361,6 @@ async def _desired_span(db: AsyncSession, workflow_node: Node) -> int:
     return max(slot_count, 1 + spawned.scalar_one(), 1)
 
 
-async def _would_splice_break_binding(db: AsyncSession, project_id, after_pos: int, ordered: list[Track], pos: dict) -> bool:
-    """Whether splicing a fresh track right after list position `after_pos`
-    (shifting every later track's derived position by one) would push some
-    bound output (created_by_node_id) out of its creator's allowed span range.
-    Ports Grid.tsx's wouldBreakOutputBinding: a creator and one of its own
-    outputs on opposite sides of the insert point stretch apart by one, which
-    can exceed the span. A spawned-track output isn't position-bound, so it's
-    skipped."""
-    result = await db.execute(
-        select(Node)
-        .join(Track, Track.id == Node.track_id)
-        .where(Track.project_id == project_id, Node.created_by_node_id.isnot(None), Node.status != NodeStatus.discarded)
-    )
-    for node in result.scalars().all():
-        creator = await db.get(Node, node.created_by_node_id)
-        if creator is None:
-            continue
-        output_track = await db.get(Track, node.track_id)
-        if output_track is not None and output_track.spawned_from_node_id == creator.id:
-            continue
-        creator_pos = pos.get(creator.track_id)
-        output_pos = pos.get(node.track_id)
-        if creator_pos is None or output_pos is None:
-            continue
-        span = await _desired_span(db, creator)
-        new_creator = creator_pos + (1 if creator_pos > after_pos else 0)
-        new_output = output_pos + (1 if output_pos > after_pos else 0)
-        if not (new_creator <= new_output < new_creator + span):
-            return True
-    return False
-
-
 async def _ensure_next_workflow_step(db: AsyncSession, track_id, step: int) -> None:
     """After a candidate settles, make sure the workflow cell that continues the
     pipeline (this asset cell's step+1, always a workflow-parity column) exists."""
@@ -436,41 +404,37 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
     # cause its own track was already spawned from, else itself.
     cause_node_id = preceding.id if preceding is not None else (home.spawned_from_node_id or picker.id)
 
-    target_track = None
-    adjacent_insert_pos = None
-    if preceding is not None:
-        span = max(await _desired_span(db, preceding), 1)
-        creator_row = pos.get(preceding.track_id, 0)
-        for r in range(creator_row, creator_row + span):
-            if r == original_row or r >= len(ordered):
-                continue
-            if await _node_at(db, ordered[r].id, original_step) is not None:
-                continue
-            target_track = ordered[r]
-            break
-        adjacent_insert_pos = creator_row + span
-    else:
-        adjacent_insert_pos = original_row + 1
+    # Place the leftover picker on a fresh spawned track right AFTER the
+    # producing workflow's current lowest output, so every candidate line stays
+    # contiguous just below the producer -- never flung to the bottom of the
+    # project (the old fallback tail-appended whenever an adjacent insert
+    # "would break an output binding", which in a dense project fired
+    # constantly and sent the line far away; a far output then also bloated the
+    # producer's rendered span over unrelated rows -- 2026-07-22). Inserting
+    # just past the producer's lowest output only shifts whole workflow blocks
+    # below it down as units, so it can't split anyone's input span.
+    producer = await db.get(Node, picker.created_by_node_id) if picker.created_by_node_id else preceding
+    insert_after = original_row
+    if producer is not None:
+        ppos = pos.get(producer.track_id)
+        if ppos is not None:
+            insert_after = ppos
+            result = await db.execute(
+                select(Node).where(Node.created_by_node_id == producer.id, Node.status != NodeStatus.discarded)
+            )
+            for out in result.scalars().all():
+                opos = pos.get(out.track_id)
+                if opos is not None and opos > insert_after:
+                    insert_after = opos
 
-    if target_track is not None:
-        picker.track_id = target_track.id
-        await db.flush()
-    else:
-        new_track = Track(project_id=project_id, spawned_from_node_id=cause_node_id, spawned_from_output_id=kept.id)
-        db.add(new_track)
-        await db.flush()
-        can_adjacent = adjacent_insert_pos is not None and not await _would_splice_break_binding(
-            db, project_id, adjacent_insert_pos - 1, ordered, pos
-        )
-        if can_adjacent and adjacent_insert_pos == 0:
-            await splice_after(db, project_id, new_track, None, at_head=True)
-        elif can_adjacent and 0 < adjacent_insert_pos <= len(ordered):
-            await splice_after(db, project_id, new_track, ordered[adjacent_insert_pos - 1])
-        else:
-            await splice_after(db, project_id, new_track, ordered[-1] if ordered else None)
-        await db.flush()
-        picker.track_id = new_track.id
-        await db.flush()
+    new_track = Track(project_id=project_id, spawned_from_node_id=cause_node_id, spawned_from_output_id=kept.id)
+    db.add(new_track)
+    await db.flush()
+    anchor = ordered[insert_after] if 0 <= insert_after < len(ordered) else (ordered[-1] if ordered else None)
+    await splice_after(db, project_id, new_track, anchor)
+    await db.flush()
+    picker.track_id = new_track.id
+    await db.flush()
 
     # The settled node takes over the picker's EXACT cell -- the picker was
     # placed there by the worker (_locate_output_row, which can legitimately
