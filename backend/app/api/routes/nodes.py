@@ -55,25 +55,27 @@ async def _ensure_slot_free(db: AsyncSession, track_id, step_index: int, exclude
         raise HTTPException(409, "A node already exists at this track/step")
 
 
-async def _ensure_output_binding(db: AsyncSession, node: Node, target_track_id, target_step: int) -> None:
+async def _ensure_output_binding(db: AsyncSession, node: Node, target_track_id, target_step: int, is_move: bool = False) -> None:
     """A materialized output (Node.created_by_node_id set) stays in its
     creator's OWN output column (creator.step_index + 1), at the creator's row
     or BELOW it -- i.e. anywhere in the creator's output area, wherever the
     user drags it.
 
-    It is NOT capped to a narrow max(image slots, 1 + spawned) span anymore.
-    That cap was the bug: the rendered card span follows its outputs
-    (core/grid_layout.py's offset-based sizing), so an output can legitimately
-    sit several rows below the creator, but the cap rejected a drag INTO that
-    very area -- including pulling a bug-flung output back toward its creator
-    ("can only move among its own creator's positions" -- 2026-07-22). The
-    column + at-or-below rule keeps outputs sensibly grouped under their
-    creator (not in a random column, not above it, where the card couldn't
-    reach them) without the arbitrary distance limit.
+    It is NOT capped to a narrow max(image slots, 1 + spawned) span: the
+    rendered card span follows its outputs (core/grid_layout.py), so any row in
+    the output column below the creator is a legitimate spot; the old cap
+    rejected pulling a bug-flung output back toward its creator (2026-07-22).
+
+    And the rule ONLY applies to an output that's CURRENTLY in a valid spot
+    (is_move only): if it's already OUT of its creator's area (something
+    upstream misplaced it -- a worker quirk, an old bug), the user dragging it
+    is trying to FIX that, so any target is allowed -- don't trap a broken node
+    with the tidiness rule meant for a good one (2026-07-23).
 
     A node with no creator (manual upload, "+ asset", RefAsset) is unconstrained;
     a locked creator (collapsed chain, _is_locked) waives the rule entirely
-    since it no longer renders a card to stay under."""
+    since it no longer renders a card to stay under. is_move=False (create) has
+    no prior position, so it's validated as-is."""
     if node.created_by_node_id is None:
         return
     creator = await db.get(Node, node.created_by_node_id)
@@ -81,18 +83,30 @@ async def _ensure_output_binding(db: AsyncSession, node: Node, target_track_id, 
         return
     if await _is_locked(db, creator.id):
         return
-    denied = HTTPException(409, "A workflow output can only move within its creator's output column, at or below it.")
-    if target_step != creator.step_index + 1:
-        raise denied
     creator_track = await db.get(Track, creator.track_id)
-    target_track = await db.get(Track, target_track_id)
-    if creator_track is None or target_track is None:
-        raise denied
+    if creator_track is None:
+        return
     ordered = await ordered_tracks(db, creator_track.project_id)
     pos = {t.id: i for i, t in enumerate(ordered)}
     creator_pos = pos.get(creator_track.id)
+    if creator_pos is None:
+        return
+
+    # Already misplaced? Then this move is the user fixing it -- allow anywhere.
+    if is_move:
+        cur_pos = pos.get(node.track_id)
+        currently_ok = node.step_index == creator.step_index + 1 and cur_pos is not None and cur_pos >= creator_pos
+        if not currently_ok:
+            return
+
+    denied = HTTPException(409, "A workflow output can only move within its creator's output column, at or below it.")
+    if target_step != creator.step_index + 1:
+        raise denied
+    target_track = await db.get(Track, target_track_id)
+    if target_track is None:
+        raise denied
     target_pos = pos.get(target_track.id)
-    if creator_pos is None or target_pos is None or target_pos < creator_pos:
+    if target_pos is None or target_pos < creator_pos:
         raise denied
 
 
@@ -220,8 +234,8 @@ async def _move_asset(db: AsyncSession, node: Node, ordered: list[Track], target
         old_track_id, old_step = node.track_id, node.step_index
         # Both nodes must land in a spot allowed for them (an output stays in
         # its creator's output column, at or below it -- see _ensure_output_binding).
-        await _ensure_output_binding(db, node, target_track.id, target_step)
-        await _ensure_output_binding(db, occupant, old_track_id, old_step)
+        await _ensure_output_binding(db, node, target_track.id, target_step, is_move=True)
+        await _ensure_output_binding(db, occupant, old_track_id, old_step, is_move=True)
         # Swap through a scratch column so the (track, step) unique index never
         # sees a transient duplicate.
         node.step_index = _PARK_STEP
@@ -232,7 +246,7 @@ async def _move_asset(db: AsyncSession, node: Node, ordered: list[Track], target
         await db.flush()
     else:
         await _ensure_slot_free(db, target_track.id, target_step, exclude_node_id=node.id)
-        await _ensure_output_binding(db, node, target_track.id, target_step)
+        await _ensure_output_binding(db, node, target_track.id, target_step, is_move=True)
         node.track_id, node.step_index = target_track.id, target_step
     await db.commit()
 
@@ -531,7 +545,7 @@ async def update_node(node_id: uuid.UUID, payload: NodeUpdate, db: AsyncSession 
         target_track_id = payload.track_id if payload.track_id is not None else node.track_id
         target_step = payload.step_index if payload.step_index is not None else node.step_index
         await _ensure_slot_free(db, target_track_id, target_step, exclude_node_id=node.id)
-        await _ensure_output_binding(db, node, target_track_id, target_step)
+        await _ensure_output_binding(db, node, target_track_id, target_step, is_move=True)
 
     data = payload.model_dump(mode="json", exclude_unset=True)
     for field, value in data.items():
