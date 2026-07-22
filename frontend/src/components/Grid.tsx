@@ -940,7 +940,6 @@ export function Grid({ projectId }: { projectId: string }) {
 
           {sortedTracks.map((track) => {
             const trackNodes = nodesByTrack.get(track.id) ?? [];
-            const lastNodeId = trackNodes[trackNodes.length - 1]?.id;
             return trackNodes.map((node) => {
               if (hiddenChainNodeIds.has(node.id)) return null;
               const row = effectiveRow(node);
@@ -1014,7 +1013,6 @@ export function Grid({ projectId }: { projectId: string }) {
                       compareFor !== null && compareFor.nodeId !== node.id && isPickable(node, outputsByNode[node.id] ?? [])
                     }
                     isComparingSource={compareFor?.nodeId === node.id}
-                    isLastInTrack={node.id === lastNodeId}
                     isManualPlacement={isDraggableAsset && node.step_index > 0 && !isWorkflowOutput(node)}
                     isRefSource={refFor?.nodeId === node.id}
                     registerRef={registerRef}

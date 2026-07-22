@@ -36,7 +36,6 @@ export interface Props {
   outputs: Asset[];
   compareActive: boolean;
   isComparingSource: boolean;
-  isLastInTrack: boolean;
   // True for an asset node sitting inside a spanning workflow node's row
   // range that ISN'T that workflow's actual materialized output (Grid.tsx's
   // isWorkflowOutput) -- e.g. one manually loaded via Change 3's "+ asset" in
@@ -226,7 +225,6 @@ function BaseAssetNodeView({
   outputs,
   compareActive,
   isComparingSource,
-  isLastInTrack,
   isManualPlacement,
   isRefSource,
   registerRef,
@@ -359,7 +357,11 @@ function BaseAssetNodeView({
     await assetsApi.remove(asset.id);
     await refreshOutputs(node.id);
     const remaining = await nodesApi.outputs(node.id).catch(() => outputs);
-    if (remaining.length === 0 && isLastInTrack) {
+    // An emptied-out picker is meaningless -- remove it, wherever it sits. The
+    // old `&& isLastInTrack` guard existed only because deleting a non-last
+    // node used to cascade forward through the track; delete_node no longer
+    // does that for an asset (nodes.py), so it's safe at any position now.
+    if (remaining.length === 0) {
       await nodesApi.remove(node.id);
       removeNode(node.id);
     }
@@ -371,10 +373,9 @@ function BaseAssetNodeView({
       await assetsApi.remove(asset.id);
     }
     await refreshOutputs(node.id);
-    if (isLastInTrack) {
-      await nodesApi.remove(node.id);
-      removeNode(node.id);
-    }
+    // Emptied out -> remove the picker regardless of position (see discardCandidate).
+    await nodesApi.remove(node.id);
+    removeNode(node.id);
   };
 
   // Cascade every candidate into its own line -- one backend call now
