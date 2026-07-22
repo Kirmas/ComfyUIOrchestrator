@@ -488,6 +488,14 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
     await db.flush()
 
     await _ensure_next_workflow_step(db, original_track_id, original_step)
+    # Spawning this leftover picker grew the producing workflow's span (its
+    # desired = 1 + spawned tracks) -- materialize the rows so its card
+    # actually stretches to reach the new spawned track. This is the imperative
+    # replacement for the old reactive auto-expand effect, at the mutation that
+    # changes the span (a candidate fork), same as template assignment.
+    cause_workflow = await db.get(Node, cause_node_id)
+    if cause_workflow is not None and cause_workflow.kind == NodeKind.workflow:
+        await ensure_span_rows(db, cause_workflow)
     return picker
 
 
