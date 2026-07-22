@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { assetsApi, backendsApi, capabilitiesApi, nodesApi, nodeTemplatesApi, projectsApi, tracksApi } from "../api/endpoints";
+import { backendsApi, capabilitiesApi, nodesApi, nodeTemplatesApi, projectsApi, tracksApi } from "../api/endpoints";
 import { useProjectWs } from "../api/useProjectWs";
 import { useProjectStore } from "../state/projectStore";
 import { resolveSlotAsset } from "../slotResolution";
@@ -44,7 +44,7 @@ function isPickable(node: NodeItem, outputs: Asset[]): boolean {
 }
 
 export function Grid({ projectId }: { projectId: string }) {
-  const { tracks, nodesById, outputsByNode, spans, blockedCells, loadProject, reloadTracks, applyProgressEvent, addTrack, addNode, removeTrack, refreshNodeOutputs } =
+  const { tracks, nodesById, outputsByNode, spans, blockedCells, loadProject, reloadTracks, applyProgressEvent, addNode, removeTrack, refreshNodeOutputs } =
     useProjectStore();
   const [templates, setTemplates] = useState<NodeTemplate[]>([]);
   const [backends, setBackends] = useState<Backend[]>([]);
@@ -657,184 +657,9 @@ export function Grid({ projectId }: { projectId: string }) {
     });
   };
 
-  // No leftovers: there's only one possible outcome for this cell, so it's
-  // not really "a complex node becoming a simple one" in any sense worth
-  // avoiding -- just flip its node_type in place. (See below for the case
-  // that actually matters.)
-  const settleSoleCandidate = async (sourceNode: NodeItem): Promise<void> => {
-    const settledNode = await nodesApi.update(sourceNode.id, { node_type: "asset.single" });
-    addNode(settledNode);
-    await refreshNodeOutputs(sourceNode.id);
-  };
-
-  // When there ARE leftovers, this is a genuine fork: the cell that
-  // generated N candidates now has to become two different things (one
-  // settled result, one still-undecided picker for the rest) -- and rather
-  // than mutating sourceNode's role in place to be whichever one is more
-  // convenient (see the 2026-07-17 review: "чому мутуємо складнішу ноду в
-  // простішу, а не навпаки"), neither identity gets repurposed:
-  //   1. sourceNode itself relocates (same id, same job/asset history) into
-  //      the new spawned track, keeping its "still needs choosing" role and
-  //      its remaining (non-kept) candidates.
-  //   2. A brand new "asset.single" node is created in the vacated original
-  //      cell, holding only the kept asset.
-  // Moving (PATCH track_id) rather than delete+recreate matters here: DELETE
-  // /api/nodes/{id} cascades forward through the rest of the track (right
-  // for the user's trash-icon action, wrong for this internal reshuffle).
-  //
-  // Returns the relocated picker node (or undefined if there were no
-  // leftovers) -- NodeCell.tsx's "Select all" calls this repeatedly in a
-  // tight loop to cascade every candidate into its own line (pick one, get
-  // the leftover picker back, pick one from *that*, and so on), so it reads
-  // live store state via getState() instead of this render's closed-over
-  // tracks/nodesByTrack -- those go stale after the first iteration of a
-  // cascade that never waits for Grid to re-render in between.
-  const onSelectCandidate = async (sourceNode: NodeItem, kept: Asset, others: Asset[]): Promise<NodeItem | undefined> => {
-    const originalTrackId = sourceNode.track_id;
-    const originalStepIndex = sourceNode.step_index;
-    let relocatedPicker: NodeItem | undefined;
-
-    if (others.length === 0) {
-      await settleSoleCandidate(sourceNode);
-    } else {
-      // Attribute the branch to whatever actually produced these candidates,
-      // not to sourceNode itself: usually the preceding workflow cell in the
-      // same track ("Create image"). But sourceNode may itself be a leftover
-      // picker from an earlier split in a "Select all" cascade -- it has
-      // nothing before it in its own (freshly created) track, so in that
-      // case carry forward whatever cause its *own* track was already
-      // spawned from, rather than re-deriving one from this intermediate
-      // cell. That keeps every arrow in a cascade pointing back at the one
-      // true source instead of chaining picker -> picker -> picker.
-      const liveState = useProjectStore.getState();
-      const liveTracks = liveState.tracks;
-      const liveNodes = Object.values(liveState.nodesById);
-      const rowIndexOfLive = (trackId: string) => liveTracks.find((t) => t.id === trackId)?.row_index ?? 0;
-      const originalRow = rowIndexOfLive(originalTrackId);
-
-      const precedingWorkflow = liveNodes.find(
-        (n) => n.track_id === originalTrackId && n.step_index === originalStepIndex - 1 && n.kind === "workflow",
-      );
-      const ownTrack = liveTracks.find((t) => t.id === originalTrackId);
-      const causeNodeId = precedingWorkflow?.id ?? ownTrack?.spawned_from_node_id ?? sourceNode.id;
-
-      // If the causing workflow's own row-span already has an unused row at
-      // this same output column -- its span is sized for its image/file
-      // input slots, and an output can land on any row within it per
-      // _ensure_output_binding, not just its own home row -- park the
-      // leftover picker there directly instead of spawning a brand-new
-      // track. A new spawned track should only be the fallback once the
-      // existing span genuinely has no room left; before this, every
-      // leftover picker got a fresh spawned track unconditionally, growing
-      // the workflow's visible row-span by one more than it needs even when
-      // an empty row was already sitting right there, unused, inside its
-      // own span (2026-07-20 incident: picking a candidate out of a 4-row
-      // workflow node visibly grew it to 5 rows and dropped the leftover
-      // picker into a new, distant track instead of the empty row already
-      // inside it).
-      let targetTrack: Track | undefined;
-      // Adjacent-insert position for the fallback below -- right after the
-      // causing workflow's own input-slot span (so it doesn't land on one of
-      // ITS input rows), or right below the picker's own row if there's no
-      // direct preceding workflow to measure a span from at all.
-      let adjacentInsertPosition: number | null = null;
-      if (precedingWorkflow) {
-        const template = templates.find((t) => t.node_type === precedingWorkflow.node_type);
-        const slotCount = template ? slotFields(template.param_schema).length : 0;
-        const span = Math.max(slotCount, 1);
-        const creatorRow = rowIndexOfLive(precedingWorkflow.track_id);
-        const nodesByRowStepLive = new Map<string, NodeItem>();
-        for (const n of liveNodes) nodesByRowStepLive.set(`${rowIndexOfLive(n.track_id)}:${n.step_index}`, n);
-        for (let r = creatorRow; r < creatorRow + span; r++) {
-          if (r === originalRow || nodesByRowStepLive.has(`${r}:${originalStepIndex}`)) continue;
-          targetTrack = liveTracks.find((t) => t.row_index === r);
-          if (targetTrack) break;
-        }
-        adjacentInsertPosition = creatorRow + span;
-      } else {
-        adjacentInsertPosition = originalRow + 1;
-      }
-
-      let movedSource: NodeItem;
-      if (targetTrack) {
-        movedSource = await nodesApi.update(sourceNode.id, { track_id: targetTrack.id });
-        addNode(movedSource);
-      } else {
-        // No existing row already sitting empty within the span -- insert a
-        // fresh one right after it (shifting everything below down by one)
-        // instead of always appending at the very bottom of the whole
-        // project. Matches how the causing workflow's own card visually
-        // grows to reach a spawned sibling track (spans's "+1
-        // per spawned sibling"); before this, ANY single-image-slot workflow
-        // (the common case -- span is always 1, and the one row in that span
-        // is always its own, excluded above) could never find a reusable row
-        // and unconditionally landed its leftover picker many rows away from
-        // anything related to it (2026-07-21 incident, reported live from a
-        // "Back View" node with 4 variants). Only falls back to appending at
-        // the end if the adjacent insert would itself push some OTHER
-        // workflow's output out of its own valid range.
-        const canInsertAdjacent = adjacentInsertPosition !== null && !wouldBreakOutputBinding(adjacentInsertPosition, 1);
-        let newTrack: Track;
-        if (canInsertAdjacent) {
-          [newTrack] = await insertTracksAt(adjacentInsertPosition as number, 1, {
-            spawned_from_node_id: causeNodeId,
-            spawned_from_output_id: kept.id,
-          });
-        } else {
-          newTrack = await tracksApi.create({
-            project_id: projectId,
-            spawned_from_node_id: causeNodeId,
-            spawned_from_output_id: kept.id,
-          });
-          addTrack(newTrack);
-        }
-
-        // Relocate sourceNode (still holding `others`) into the new track
-        // FIRST, to actually vacate its original slot -- the backend's
-        // _ensure_slot_free (nodes.py) rejects creating a node at a
-        // (track_id, step_index) some other live node still occupies, and
-        // sourceNode hadn't moved yet if the settled node was created before
-        // this: that 409'd every time there were leftovers, leaving the new
-        // (empty) track added to the grid with neither the settled node nor
-        // the move having happened (2026-07-20 incident).
-        movedSource = await nodesApi.update(sourceNode.id, { track_id: newTrack.id });
-        addNode(movedSource);
-      }
-
-      // ...then create the settled single-asset node in the now-vacated
-      // original cell, carrying sourceNode's OWN created_by_node_id forward
-      // (not sourceNode itself -- an asset.select picker isn't a workflow,
-      // it has no step_index+1 of its own to be a creator of). This settled
-      // node is just as much the original workflow's output as the picker
-      // it's replacing, so it stays bound to the same creator (see
-      // _ensure_output_binding) rather than becoming a free-floating,
-      // unbound asset just because it happened to be created here instead
-      // of by _get_or_create_output_asset_node.
-      const settledNode = await nodesApi.create({
-        track_id: originalTrackId,
-        step_index: originalStepIndex,
-        kind: "asset",
-        node_type: "asset.single",
-        created_by_node_id: sourceNode.created_by_node_id,
-      });
-      addNode(settledNode);
-      await assetsApi.move(kept.id, settledNode.id);
-      await refreshNodeOutputs(settledNode.id);
-      await refreshNodeOutputs(movedSource.id);
-
-      relocatedPicker = movedSource;
-    }
-
-    const workflowStepIndex = originalStepIndex + 1;
-    const liveNodes = Object.values(useProjectStore.getState().nodesById);
-    const hasNextStep = liveNodes.some((n) => n.track_id === originalTrackId && n.step_index === workflowStepIndex);
-    if (!hasNextStep) {
-      const workflowCell = await nodesApi.create({ track_id: originalTrackId, step_index: workflowStepIndex, kind: "workflow" });
-      addNode(workflowCell);
-    }
-
-    return relocatedPicker;
-  };
+  // (settleSoleCandidate + onSelectCandidate deleted -- the whole candidate
+  // fork is one backend intent now: POST /api/nodes/{id}/pick-candidate and
+  // /pick-all-candidates. NodeCell calls those directly + reloads.)
 
   // Shared by every gesture below that needs "whatever this node's currently
   // resolved output is" (compareFor and the ref gestures) -- picks the
@@ -1194,7 +1019,6 @@ export function Grid({ projectId }: { projectId: string }) {
                     isRefSource={refFor?.nodeId === node.id}
                     registerRef={registerRef}
                     onCellClicked={onCellClicked}
-                    onSelectCandidate={onSelectCandidate}
                     onStartCompare={onStartCompare}
                     onStartRef={onStartRef}
                     onShrinkToFit={shrinkWorkflowToFit}

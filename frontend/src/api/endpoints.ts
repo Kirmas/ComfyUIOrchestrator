@@ -106,6 +106,11 @@ export const nodesApi = {
   // names the target grid cell and re-fetches the authoritative layout after.
   move: (id: string, data: { target_row: number; target_step: number }) =>
     api.post<NodeItem[]>(`/api/nodes/${id}/move`, data),
+  // Candidate fork -- backend owns the whole reshuffle (settle one, relocate
+  // the leftover picker, spawn the next step). Client just names the kept asset.
+  pickCandidate: (id: string, keptAssetId: string) =>
+    api.post<NodeItem>(`/api/nodes/${id}/pick-candidate`, { kept_asset_id: keptAssetId }),
+  pickAllCandidates: (id: string) => api.post<void>(`/api/nodes/${id}/pick-all-candidates`, {}),
   remove: (id: string) => api.delete(`/api/nodes/${id}`),
   outputs: (id: string) => api.get<Asset[]>(`/api/nodes/${id}/outputs`),
   jobs: (id: string) => api.get<Job[]>(`/api/nodes/${id}/jobs`),

@@ -225,6 +225,14 @@ class NodeCreate(BaseModel):
     created_by_node_id: uuid.UUID | None = None
 
 
+class PickCandidate(BaseModel):
+    # "Keep this candidate asset out of the picker; move the rest to their own
+    # line." The backend owns the whole fork (settle the kept one in place,
+    # relocate the leftover picker to a spawned/reused row, spawn the next
+    # workflow step) -- see api/routes/nodes.py's _pick_candidate.
+    kept_asset_id: uuid.UUID
+
+
 class NodeMove(BaseModel):
     # Intent only -- "put this node at grid (row, column)". The backend owns
     # ALL of the placement logic (allowed-position/output-binding checks,

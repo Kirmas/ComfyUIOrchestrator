@@ -10,7 +10,7 @@ from app.core.track_order import ordered_tracks, splice_after
 from app.core.storage import build_asset_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Job, Node, NodeKind, NodeStatus, Project, Track
-from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeMove, NodeRead, NodeUpdate
+from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeMove, NodeRead, NodeUpdate, PickCandidate
 from app.worker.tasks import (
     _splice_after_would_split_a_span,
     enqueue_node_job,
@@ -349,6 +349,187 @@ async def move_node(node_id: uuid.UUID, payload: NodeMove, db: AsyncSession = De
 
     await db.refresh(node)
     return [node]
+
+
+async def _desired_span(db: AsyncSession, workflow_node: Node) -> int:
+    """max(image/file input slots, 1 + spawned tracks) -- what the workflow's
+    card wants to be tall. Shared by the growth / span-shift / pick helpers."""
+    effective = await resolve_effective_template(db, workflow_node)
+    fields = (effective.param_schema if effective else {}).get("fields", [])
+    slot_count = len([f for f in fields if f.get("type") in ("image", "file")])
+    spawned = await db.execute(select(func.count()).select_from(Track).where(Track.spawned_from_node_id == workflow_node.id))
+    return max(slot_count, 1 + spawned.scalar_one(), 1)
+
+
+async def _would_splice_break_binding(db: AsyncSession, project_id, after_pos: int, ordered: list[Track], pos: dict) -> bool:
+    """Whether splicing a fresh track right after list position `after_pos`
+    (shifting every later track's derived position by one) would push some
+    bound output (created_by_node_id) out of its creator's allowed span range.
+    Ports Grid.tsx's wouldBreakOutputBinding: a creator and one of its own
+    outputs on opposite sides of the insert point stretch apart by one, which
+    can exceed the span. A spawned-track output isn't position-bound, so it's
+    skipped."""
+    result = await db.execute(
+        select(Node)
+        .join(Track, Track.id == Node.track_id)
+        .where(Track.project_id == project_id, Node.created_by_node_id.isnot(None), Node.status != NodeStatus.discarded)
+    )
+    for node in result.scalars().all():
+        creator = await db.get(Node, node.created_by_node_id)
+        if creator is None:
+            continue
+        output_track = await db.get(Track, node.track_id)
+        if output_track is not None and output_track.spawned_from_node_id == creator.id:
+            continue
+        creator_pos = pos.get(creator.track_id)
+        output_pos = pos.get(node.track_id)
+        if creator_pos is None or output_pos is None:
+            continue
+        span = await _desired_span(db, creator)
+        new_creator = creator_pos + (1 if creator_pos > after_pos else 0)
+        new_output = output_pos + (1 if output_pos > after_pos else 0)
+        if not (new_creator <= new_output < new_creator + span):
+            return True
+    return False
+
+
+async def _ensure_next_workflow_step(db: AsyncSession, track_id, step: int) -> None:
+    """After a candidate settles, make sure the workflow cell that continues the
+    pipeline (this asset cell's step+1, always a workflow-parity column) exists."""
+    if await _node_at(db, track_id, step + 1) is None:
+        db.add(Node(track_id=track_id, step_index=step + 1, kind=NodeKind.workflow))
+        await db.flush()
+
+
+async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node | None:
+    """The whole candidate fork, server-side (ports Grid.tsx's onSelectCandidate):
+    settle `kept` in the picker's own cell as a fresh asset.single node, and
+    relocate the picker (still holding the remaining candidates) to a reused
+    empty row inside the producing workflow's span, or a freshly spliced spawned
+    track. Returns the relocated picker, or None if `kept` was the sole
+    remaining candidate (then the picker is just settled in place). Does not
+    commit."""
+    result = await db.execute(select(Asset).where(Asset.node_id == picker.id))
+    others = [a for a in result.scalars().all() if a.id != kept.id]
+
+    original_track_id = picker.track_id
+    original_step = picker.step_index
+
+    if not others:
+        picker.node_type = "asset.single"
+        picker.is_picker = False
+        await db.flush()
+        await _ensure_next_workflow_step(db, original_track_id, original_step)
+        return None
+
+    home = await db.get(Track, original_track_id)
+    project_id = home.project_id
+    ordered = await ordered_tracks(db, project_id)
+    pos = {t.id: i for i, t in enumerate(ordered)}
+    original_row = pos.get(original_track_id, 0)
+
+    preceding = await _node_at(db, original_track_id, original_step - 1) if original_step >= 1 else None
+    if preceding is not None and preceding.kind != NodeKind.workflow:
+        preceding = None
+    # Attribute the branch to whatever produced these candidates, not the picker
+    # itself: the preceding workflow, else (a cascade's intermediate picker) the
+    # cause its own track was already spawned from, else itself.
+    cause_node_id = preceding.id if preceding is not None else (home.spawned_from_node_id or picker.id)
+
+    target_track = None
+    adjacent_insert_pos = None
+    if preceding is not None:
+        span = max(await _desired_span(db, preceding), 1)
+        creator_row = pos.get(preceding.track_id, 0)
+        for r in range(creator_row, creator_row + span):
+            if r == original_row or r >= len(ordered):
+                continue
+            if await _node_at(db, ordered[r].id, original_step) is not None:
+                continue
+            target_track = ordered[r]
+            break
+        adjacent_insert_pos = creator_row + span
+    else:
+        adjacent_insert_pos = original_row + 1
+
+    if target_track is not None:
+        picker.track_id = target_track.id
+        await db.flush()
+    else:
+        new_track = Track(project_id=project_id, spawned_from_node_id=cause_node_id, spawned_from_output_id=kept.id)
+        db.add(new_track)
+        await db.flush()
+        can_adjacent = adjacent_insert_pos is not None and not await _would_splice_break_binding(
+            db, project_id, adjacent_insert_pos - 1, ordered, pos
+        )
+        if can_adjacent and adjacent_insert_pos == 0:
+            await splice_after(db, project_id, new_track, None, at_head=True)
+        elif can_adjacent and 0 < adjacent_insert_pos <= len(ordered):
+            await splice_after(db, project_id, new_track, ordered[adjacent_insert_pos - 1])
+        else:
+            await splice_after(db, project_id, new_track, ordered[-1] if ordered else None)
+        await db.flush()
+        picker.track_id = new_track.id
+        await db.flush()
+
+    settled = Node(
+        track_id=original_track_id,
+        step_index=original_step,
+        kind=NodeKind.asset,
+        node_type="asset.single",
+        created_by_node_id=picker.created_by_node_id,
+        status=NodeStatus.done,
+    )
+    if settled.created_by_node_id is not None:
+        await _ensure_output_binding(db, settled, original_track_id, original_step)
+    db.add(settled)
+    await db.flush()
+    kept.node_id = settled.id
+    await db.flush()
+
+    await _ensure_next_workflow_step(db, original_track_id, original_step)
+    return picker
+
+
+@router.post("/{node_id}/pick-candidate", response_model=NodeRead)
+async def pick_candidate(node_id: uuid.UUID, payload: PickCandidate, db: AsyncSession = Depends(get_db)):
+    """Keep one candidate, fork the rest onto their own line -- backend owns the
+    whole reshuffle atomically (see _pick_candidate). The client just names the
+    kept asset and re-fetches the layout."""
+    picker = await db.get(Node, node_id)
+    if not picker:
+        raise HTTPException(404, "Node not found")
+    if picker.kind != NodeKind.asset:
+        raise HTTPException(400, "Only an asset picker node can settle a candidate")
+    kept = await db.get(Asset, payload.kept_asset_id)
+    if kept is None or kept.node_id != picker.id:
+        raise HTTPException(400, "That asset isn't one of this picker's candidates")
+    await _pick_candidate(db, picker, kept)
+    await db.commit()
+    await db.refresh(picker)
+    return picker
+
+
+@router.post("/{node_id}/pick-all-candidates", status_code=204)
+async def pick_all_candidates(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Cascade every remaining candidate into its own line (the "Select all"
+    action) -- repeatedly settle the oldest asset and follow the leftover
+    picker, all in one transaction."""
+    picker = await db.get(Node, node_id)
+    if not picker:
+        raise HTTPException(404, "Node not found")
+    if picker.kind != NodeKind.asset:
+        raise HTTPException(400, "Only an asset picker node can settle candidates")
+    while True:
+        result = await db.execute(select(Asset).where(Asset.node_id == picker.id).order_by(Asset.created_at))
+        assets = list(result.scalars().all())
+        if not assets:
+            break
+        leftover = await _pick_candidate(db, picker, assets[0])
+        if leftover is None:
+            break
+        picker = leftover
+    await db.commit()
 
 
 @router.post("", response_model=NodeRead, status_code=201)

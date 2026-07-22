@@ -48,7 +48,6 @@ export interface Props {
   isRefSource: boolean;
   registerRef: (nodeId: string, el: HTMLDivElement | null) => void;
   onCellClicked: (node: NodeItem) => void;
-  onSelectCandidate: (node: NodeItem, kept: Asset, others: Asset[]) => Promise<NodeItem | undefined>;
   onStartCompare: (node: NodeItem, asset: Asset) => void;
   onStartRef: (node: NodeItem) => void;
   // Manual, one-shot recompute of a workflow node's own row-span, removing
@@ -232,7 +231,6 @@ function BaseAssetNodeView({
   isRefSource,
   registerRef,
   onCellClicked,
-  onSelectCandidate,
   onStartCompare,
   onStartRef,
 }: Props) {
@@ -337,14 +335,14 @@ function BaseAssetNodeView({
     uploadFiles(files);
   };
 
-  // Selecting settles this same cell in place (is_picker -> false, showing
-  // the kept image) and, if there are leftover candidates, spawns a *new*
-  // track/row below for them -- see Grid.tsx's onSelectCandidate. This node
-  // itself is never removed by selecting.
+  // Keep this candidate; the backend forks the rest onto their own line
+  // (pick-candidate does all the placement -- settle in place, relocate the
+  // leftover picker, spawn the next step). The frontend just names the kept
+  // asset and re-fetches the authoritative layout.
   const selectCandidate = async (asset: Asset) => {
-    const others = outputs.filter((a) => a.id !== asset.id);
-    await onSelectCandidate(node, asset, others);
-    await refreshOutputs(node.id);
+    await nodesApi.pickCandidate(node.id, asset.id);
+    const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
+    if (projectId) await loadProject(projectId);
   };
 
   // Discarding down to zero (never selecting anything) empties the picker
@@ -375,21 +373,12 @@ function BaseAssetNodeView({
     }
   };
 
-  // "Select" only ever settles *one* candidate at a time (the rest move to a
-  // single leftover picker) -- keeping every candidate as its own line means
-  // repeating that: settle the first, then settle the first of whatever
-  // picker it just pushed the rest into, and so on until nothing's left.
+  // Cascade every candidate into its own line -- one backend call now
+  // (pick-all-candidates loops the same fork server-side).
   const selectAll = async () => {
-    let currentNode = node;
-    let remaining = outputs;
-    while (remaining.length > 0) {
-      const [first, ...rest] = remaining;
-      const nextPicker = await onSelectCandidate(currentNode, first, rest);
-      if (!nextPicker) break;
-      currentNode = nextPicker;
-      remaining = await nodesApi.outputs(nextPicker.id).catch(() => []);
-    }
-    await refreshOutputs(node.id);
+    await nodesApi.pickAllCandidates(node.id);
+    const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
+    if (projectId) await loadProject(projectId);
   };
 
   // A collapsed asset (node.collapse_target_id set) never reaches this
