@@ -3,7 +3,6 @@ import { backendsApi, capabilitiesApi, nodesApi, nodeTemplatesApi, projectsApi, 
 import { useProjectWs } from "../api/useProjectWs";
 import { useProjectStore } from "../state/projectStore";
 import { resolveSlotAsset } from "../slotResolution";
-import { slotFields } from "../templateUtils";
 import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project, Track } from "../types";
 import { cx } from "../utils";
 import { ArrowsOverlay, type Edge } from "./ArrowsOverlay";
@@ -493,17 +492,13 @@ export function Grid({ projectId }: { projectId: string }) {
     }
   };
 
-  // Manual, one-shot recompute of a workflow node's own row-span -- a button
-  // press (NodeCell's "⤢"), never an automatic effect. An earlier version
-  // tried to keep spans itself reactive to real output row
-  // offsets so the card would grow/shrink on its own, but that fed back on
-  // itself through insertTracksAt (which shifts a node's own already-placed
-  // outputs down while making room, growing their measured offset, which
-  // grows the desired span again, forever -- 2026-07-20 incident, a
-  // project's track count went from ~18 to 55 before it was caught). Doing
-  // this as a deliberate, single pass instead can't loop: it computes the
-  // true minimum once, removes trailing rows down to it, and stops -- it
-  // never re-triggers itself just because a track moved.
+  // NodeCell's "⤢" recompute button: clean up a workflow's now-empty spawned
+  // tracks -- candidate lines whose output was moved away or discarded, which
+  // leave blank rows the card used to span. The card's span itself is tight
+  // again once these are gone (the backend span no longer counts empty spawned
+  // tracks -- see core/grid_layout.py). Each removal is a plain track delete;
+  // the backend refuses any that are still part of a real span (delete_track's
+  // 409), which we just skip -- no uncaught errors, no half-done loop.
   const shrinkWorkflowToFit = async (node: NodeItem) => {
     if (structuralOpRef.current) {
       alert("Another move is still in progress -- try again in a moment.");
@@ -511,49 +506,27 @@ export function Grid({ projectId }: { projectId: string }) {
     }
     structuralOpRef.current = true;
     try {
-      const template = templates.find((t) => t.node_type === node.node_type);
-      const inputSlots = template ? slotFields(template.param_schema).length : 0;
-      const start = effectiveRow(node);
-      const achieved = spanAchieved(node.id);
-
-      const computeNeeded = () => {
-        const live = useProjectStore.getState();
-        const rowOf = (trackId: string) => live.tracks.find((t) => t.id === trackId)?.row_index ?? 0;
-        let maxOutputOffset = 0;
-        for (const out of Object.values(live.nodesById)) {
-          if (out.created_by_node_id !== node.id) continue;
-          maxOutputOffset = Math.max(maxOutputOffset, rowOf(out.track_id) - start);
-        }
-        return Math.max(inputSlots, maxOutputOffset + 1, 1);
-      };
-
-      const needed = computeNeeded();
-      if (needed >= achieved) {
-        alert("Nothing to shrink -- this card is already at its minimum needed size.");
+      const live = useProjectStore.getState();
+      const emptySpawned = live.tracks.filter(
+        (t) =>
+          t.spawned_from_node_id === node.id &&
+          !Object.values(live.nodesById).some((n) => n.track_id === t.id),
+      );
+      if (emptySpawned.length === 0) {
+        alert("Nothing to clean up -- this card has no empty candidate rows.");
         return;
       }
-
-      // Bottom-up: removing the lowest excess row first never disturbs the
-      // (derived) row_index of anything still above it in this same pass, so
-      // the loop keeps finding r-1, r-2, ... by their unchanged numbers. Each
-      // removal is a backend splice (unlink + delete), no renumber; one
-      // reloadTracks at the end re-derives clean row numbers from the shorter
-      // list.
-      let removedAny = false;
-      for (let r = start + achieved - 1; r >= start + needed; r--) {
-        const live = useProjectStore.getState();
-        const track = live.tracks.find((t) => t.row_index === r);
-        if (!track) continue;
-        const hasAnyNode = Object.values(live.nodesById).some((n) => n.track_id === track.id);
-        if (hasAnyNode) {
-          alert(`Row ${r} still has content in another track -- stopped shrinking there.`);
-          break;
+      let removed = 0;
+      for (const t of emptySpawned) {
+        try {
+          await tracksApi.remove(t.id);
+          removeTrack(t.id);
+          removed++;
+        } catch {
+          // still part of some workflow's span -- skip it
         }
-        await tracksApi.remove(track.id);
-        removeTrack(track.id);
-        removedAny = true;
       }
-      if (removedAny) await reloadTracks(projectId);
+      if (removed) await reloadTracks(projectId);
     } finally {
       structuralOpRef.current = false;
     }

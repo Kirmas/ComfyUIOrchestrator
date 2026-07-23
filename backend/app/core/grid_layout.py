@@ -8,7 +8,7 @@ Grid.tsx, the source of several span-drift incidents) and just renders what
 this returns. The formula lives once, next to the enforcement that already
 uses it (_ensure_output_binding, worker/_actual_row_span).
 """
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.core.node_types import resolve_effective_template
 from app.core.track_order import ordered_tracks
@@ -79,9 +79,14 @@ async def compute_layout(db, project_id) -> dict:
         effective = await resolve_effective_template(db, n)
         fields = (effective.param_schema if effective else {}).get("fields", [])
         slot_count = len([f for f in fields if f.get("type") in ("image", "file")])
-        spawned = await db.execute(select(func.count()).select_from(Track).where(Track.spawned_from_node_id == n.id))
-        spawned_count = spawned.scalar_one()
-        desired = max(slot_count, 1 + spawned_count, max_output_offset.get(n.id, 0) + 1, 1)
+        # desired = enough rows to reach every input slot AND the furthest
+        # materialized output. NOT `1 + spawned tracks`: that counted candidate
+        # tracks even after their output moved or was discarded, so an emptied
+        # spawned track kept bloating the card over blank rows the shrink button
+        # then couldn't remove (they read as "in the span" -- 2026-07-23). The
+        # actual outputs are already covered by max_output_offset, so an empty
+        # spawned track no longer stretches the card.
+        desired = max(slot_count, max_output_offset.get(n.id, 0) + 1, 1)
 
         # Mirrors the OLD frontend rowSpanByNode exactly: grow toward desired,
         # stopping only at the first row below whose own column is already
