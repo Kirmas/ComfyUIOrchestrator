@@ -9,6 +9,23 @@ import { ArrowsOverlay, type Edge } from "./ArrowsOverlay";
 import { CompareModal } from "./CompareModal";
 import { NodeCell } from "./NodeCell";
 
+// Discrete zoom levels for the grid canvas (index 2 == 100%). Module-scope so
+// the wheel/pinch handlers can read it without it being a fresh array each
+// render. Pinch snaps to the nearest of these.
+const ZOOM_SCALES = [0.6, 0.8, 1, 1.2, 1.4];
+const nearestZoomIdx = (scale: number): number => {
+  let best = 0;
+  let bestD = Infinity;
+  ZOOM_SCALES.forEach((s, i) => {
+    const d = Math.abs(s - scale);
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  });
+  return best;
+};
+
 // A workflow node's result always materializes as a *following* asset node
 // (see worker/tasks.py), so the next free step after a workflow node is
 // step+2 -- step+1 is reserved for that asset node even before it exists.
@@ -94,11 +111,20 @@ export function Grid({ projectId }: { projectId: string }) {
   // gridWrapperRef's un-scaled size (ResizeObserver -- transform doesn't
   // affect what that reports on the element carrying it), kept in sync
   // whenever real content (tracks/nodes) changes its footprint.
-  const ZOOM_SCALES = [0.6, 0.8, 1, 1.2, 1.4];
   const [zoomIndex, setZoomIndex] = useState(2);
   const zoomScale = ZOOM_SCALES[zoomIndex];
+  const zoomIndexRef = useRef(zoomIndex);
+  zoomIndexRef.current = zoomIndex;
   const gridWrapperRef = useRef<HTMLDivElement>(null);
   const [naturalSize, setNaturalSize] = useState({ w: 0, h: 0 });
+  // Active touch pointers on the canvas background, for two-finger pinch-zoom
+  // (the mobile equivalent of the mouse wheel below). Single-finger touch
+  // still just pans, via the same drag path as the mouse (onBackgroundPointerDown).
+  const touchPtsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchRef = useRef<{ startDist: number; startIdx: number } | null>(null);
+  // Cleanup for an in-progress background pan, so a pinch (second finger
+  // landing) can cancel the pan the first finger started.
+  const panCleanupRef = useRef<null | (() => void)>(null);
 
   useEffect(() => {
     const el = gridWrapperRef.current;
@@ -108,36 +134,44 @@ export function Grid({ projectId }: { projectId: string }) {
     return () => observer.disconnect();
   }, []);
 
+  // Zoom the canvas to an absolute level, keeping the point under
+  // (focalClientX, focalClientY) fixed on screen: converts it to "natural"
+  // (unscaled) coordinates before changing scale, then restores that same
+  // point under the focal at the new scale, on the next frame once the sizer
+  // div has picked up the resize. Shared by the mouse wheel and touch pinch.
+  const applyZoomStep = (nextIdx: number, focalClientX: number, focalClientY: number) => {
+    setZoomIndex((idx) => {
+      const clamped = Math.min(ZOOM_SCALES.length - 1, Math.max(0, nextIdx));
+      if (clamped === idx) return idx;
+      const el = containerRef.current;
+      if (!el) return clamped;
+      const rect = el.getBoundingClientRect();
+      const offsetX = focalClientX - rect.left;
+      const offsetY = focalClientY - rect.top;
+      const oldScale = ZOOM_SCALES[idx];
+      const newScale = ZOOM_SCALES[clamped];
+      const naturalX = (el.scrollLeft + offsetX) / oldScale;
+      const naturalY = (el.scrollTop + offsetY) / oldScale;
+      requestAnimationFrame(() => {
+        el.scrollLeft = naturalX * newScale - offsetX;
+        el.scrollTop = naturalY * newScale - offsetY;
+      });
+      return clamped;
+    });
+  };
+
   // Plain wheel, no modifier needed -- panning already took over scrolling
   // (see onBackgroundPointerDown above), so the wheel is free to mean zoom
   // instead. Attached as a native (non-React) listener because React's own
   // onWheel is passive by default; calling preventDefault() there just
   // warns and does nothing, and without it the browser would ALSO scroll
-  // the container on every zoom step. Re-centers on the cursor: converts
-  // the point under it to "natural" (unscaled) coordinates before changing
-  // scale, then restores that same point under the cursor at the new
-  // scale, on the next frame once the sizer div has picked up the resize.
+  // the container on every zoom step.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const handler = (e: WheelEvent) => {
       e.preventDefault();
-      setZoomIndex((idx) => {
-        const nextIdx = e.deltaY < 0 ? Math.min(ZOOM_SCALES.length - 1, idx + 1) : Math.max(0, idx - 1);
-        if (nextIdx === idx) return idx;
-        const rect = el.getBoundingClientRect();
-        const offsetX = e.clientX - rect.left;
-        const offsetY = e.clientY - rect.top;
-        const oldScale = ZOOM_SCALES[idx];
-        const newScale = ZOOM_SCALES[nextIdx];
-        const naturalX = (el.scrollLeft + offsetX) / oldScale;
-        const naturalY = (el.scrollTop + offsetY) / oldScale;
-        requestAnimationFrame(() => {
-          el.scrollLeft = naturalX * newScale - offsetX;
-          el.scrollTop = naturalY * newScale - offsetY;
-        });
-        return nextIdx;
-      });
+      applyZoomStep(zoomIndexRef.current + (e.deltaY < 0 ? 1 : -1), e.clientX, e.clientY);
     };
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
@@ -814,6 +848,17 @@ export function Grid({ projectId }: { projectId: string }) {
     if (target.closest("button, input, select, textarea, a, .node-cell, [draggable='true'], .image-modal-backdrop")) return;
     const container = containerRef.current;
     if (!container) return;
+    // Track touch pointers for pinch-zoom. A second finger landing turns the
+    // gesture into a pinch and cancels the pan the first finger started.
+    if (e.pointerType === "touch") {
+      touchPtsRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touchPtsRef.current.size >= 2) {
+        panCleanupRef.current?.();
+        const pts = [...touchPtsRef.current.values()];
+        pinchRef.current = { startDist: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y), startIdx: zoomIndexRef.current };
+        return;
+      }
+    }
     e.preventDefault();
     const startX = e.clientX;
     const startY = e.clientY;
@@ -829,10 +874,33 @@ export function Grid({ projectId }: { projectId: string }) {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
+      panCleanupRef.current = null;
     };
+    panCleanupRef.current = onUp;
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
+  };
+
+  // Two-finger pinch on the canvas background -> discrete zoom, snapping to the
+  // nearest level as the fingers spread/close, centered on the pinch midpoint.
+  const onBackgroundPointerMove = (e: React.PointerEvent) => {
+    if (e.pointerType !== "touch" || !touchPtsRef.current.has(e.pointerId)) return;
+    touchPtsRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const pinch = pinchRef.current;
+    if (!pinch || touchPtsRef.current.size < 2) return;
+    e.preventDefault();
+    const pts = [...touchPtsRef.current.values()];
+    const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    const m = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+    const targetScale = ZOOM_SCALES[pinch.startIdx] * (d / pinch.startDist);
+    applyZoomStep(nearestZoomIdx(targetScale), m.x, m.y);
+  };
+
+  const onBackgroundPointerUp = (e: React.PointerEvent) => {
+    if (e.pointerType !== "touch") return;
+    touchPtsRef.current.delete(e.pointerId);
+    if (touchPtsRef.current.size < 2) pinchRef.current = null;
   };
 
   return (
@@ -840,6 +908,9 @@ export function Grid({ projectId }: { projectId: string }) {
       className={cx("main-area", isPanning && "panning")}
       ref={containerRef}
       onPointerDown={onBackgroundPointerDown}
+      onPointerMove={onBackgroundPointerMove}
+      onPointerUp={onBackgroundPointerUp}
+      onPointerCancel={onBackgroundPointerUp}
     >
       {/* A sibling of the scaled sizer/grid-wrapper below, not a descendant --
           transform: scale() on an ancestor would otherwise hijack this as

@@ -103,6 +103,22 @@ input, select, textarea {
   font-weight: 600;
 }
 
+/* On desktop the menu is just the inline row it always was; the burger toggle
+   is hidden and the mobile media query below re-enables it. */
+.topbar-menu {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+}
+
+.topbar-burger {
+  display: none;
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px 10px;
+}
+
 .topbar-spacer {
   flex: 1;
 }
@@ -112,6 +128,10 @@ input, select, textarea {
   overflow: auto;
   position: relative;
   cursor: grab;
+  /* Keep one-finger scroll, but hand two-finger pinch (and double-tap) to our
+     own zoom handling instead of the browser zooming the whole page over the
+     canvas (see Grid.tsx's pinch handlers). */
+  touch-action: pan-x pan-y;
 }
 
 .main-area.panning {
@@ -383,6 +403,19 @@ input, select, textarea {
   overflow: hidden;
 }
 
+/* Sized to the fit image, centered in the (possibly full-screen) slider. The
+   imgs' zoom transform overflows it and is clipped only at the slider edge. */
+.compare-stage {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  /* Purely visual -- all pointer gestures are handled by the .compare-slider
+     container beneath it. Without this the zoomed image (which fills the
+     screen) sat in front of the mode-toggle / close buttons and swallowed
+     their taps. */
+  pointer-events: none;
+}
+
 .compare-slider-base {
   display: block;
   max-width: calc(95vw - 24px);
@@ -445,6 +478,72 @@ input, select, textarea {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 
+/* Zoom mode: the divider freezes and gets a thin dashed line (no grip) instead
+   of the solid draggable bar, signalling it's a reference marker now, not a
+   handle. */
+.compare-slider-handle.dashed::before {
+  width: 0;
+  background: none;
+  border-left: 2px dashed rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+}
+
+/* Toggle between compare (move the line) and zoom (inspect detail) -- sits
+   opposite the close button. z-index for the same reason as .image-modal-close:
+   on the fullscreen phone viewer the slider fills the screen. */
+.compare-mode-toggle {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.75);
+  color: white;
+  border: none;
+  border-radius: 16px;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.compare-mode-toggle:hover {
+  background: rgba(0, 0, 0, 0.9);
+}
+
+.compare-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 48px 28px;
+  text-align: center;
+}
+
+/* Which side shows which image -- fixed to the slider's own corners (not the
+   transformed images), so they stay put while you drag the divider / zoom. */
+.compare-label {
+  position: absolute;
+  bottom: 8px;
+  z-index: 5;
+  pointer-events: none;
+  min-width: 20px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+.compare-label.left {
+  left: 8px;
+}
+
+.compare-label.right {
+  right: 8px;
+}
+
 .zoomable-image {
   position: relative;
   display: flex;
@@ -459,10 +558,13 @@ input, select, textarea {
 .zoomable-image img {
   /* Natural size, only shrunk to fit the viewport -- not stretched/capped to
      an arbitrary box, or "full size" stops being full size on a big image.
-     transform (scale/translate) then zooms/pans from that base size. */
+     transform (scale/translate) then zooms/pans from that base size. The
+     max-w/h come from CSS vars (set on .zoomable-image from the component's
+     props) rather than the img's inline style, so a media query can override
+     them for the fullscreen phone viewer -- an inline style couldn't be. */
   display: block;
-  max-width: calc(95vw - 24px);
-  max-height: calc(95vh - 24px);
+  max-width: var(--zoom-max-w, calc(95vw - 24px));
+  max-height: var(--zoom-max-h, calc(95vh - 24px));
   width: auto;
   height: auto;
   border-radius: 10px;
@@ -511,6 +613,10 @@ input, select, textarea {
   line-height: 1;
   display: grid;
   place-items: center;
+  /* Above the image surface -- in the fullscreen phone viewer .zoomable-image
+     fills the whole screen and comes later in the DOM, so without this it
+     would paint over the close button and swallow its taps. */
+  z-index: 10;
 }
 
 .image-modal-close:hover {
@@ -719,4 +825,172 @@ th, td {
 .angle-actions {
   display: flex;
   gap: 8px;
+}
+
+/* ---- Touch / phone adaptations ----------------------------------------- */
+
+/* Bigger tap targets for the image-overlay controls on touch devices -- the
+   22px zoom/compare circles and the thin zoom-control bar are fine for a mouse
+   but nearly unhittable with a fingertip. Keyed on pointer:coarse so desktop
+   stays compact. */
+@media (pointer: coarse) {
+  .zoom-button {
+    width: 34px;
+    height: 34px;
+    font-size: 15px;
+  }
+
+  .zoom-controls {
+    bottom: 12px;
+    padding: 6px 8px;
+    gap: 6px;
+  }
+
+  .zoom-controls button {
+    min-width: 40px;
+    font-size: 17px;
+    padding: 8px 12px;
+  }
+
+  .image-modal-close {
+    width: 40px;
+    height: 40px;
+    font-size: 22px;
+  }
+
+  .compare-slider-grip {
+    width: 40px;
+    height: 40px;
+  }
+}
+
+/* Narrow screens (phones in portrait). The grid canvas itself stays a
+   pan/zoom surface -- these only reflow the chrome around it (topbar, modals)
+   so nothing overflows off-screen or gets clipped. */
+@media (max-width: 640px) {
+  .topbar {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .topbar h1 {
+    font-size: 14px;
+    flex: 1; /* title takes the row, burger sits at its right edge */
+  }
+
+  /* The burger appears; the menu collapses to a full-width dropdown revealed
+     only when open. */
+  .topbar-burger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .topbar-menu {
+    display: none;
+    flex-basis: 100%;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding-top: 4px;
+  }
+
+  .topbar-menu.open {
+    display: flex;
+  }
+
+  /* Inside the dropdown, the picker/connection sub-forms stack full width
+     instead of trying to sit on one crowded row. */
+  .topbar-menu .inline-form {
+    margin: 0;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .topbar-menu .inline-form input,
+  .topbar-menu .inline-form select {
+    width: 100% !important;
+  }
+
+  .topbar-spacer {
+    display: none;
+  }
+
+  /* Roomier default controls so the toolbar buttons and form fields are
+     comfortably tappable, not mouse-sized. */
+  button {
+    padding: 7px 12px;
+    font-size: 14px;
+  }
+
+  input, select, textarea {
+    font-size: 16px; /* >=16px stops iOS Safari auto-zooming the page on focus */
+    padding: 7px 8px;
+  }
+
+  .params-modal-content {
+    width: 96vw;
+    max-width: 96vw;
+    height: 94vh;
+    max-height: 94vh;
+    padding: 12px;
+  }
+
+  /* Full-screen viewer (single image AND compare): the card chrome (white bg,
+     padding, rounded corners) drops away and the content gets the whole
+     screen. Fit-to-screen shows plain black letterbox bars where the aspect
+     ratio doesn't match; zooming in fills the whole area (the container clips
+     the overflow). */
+  .image-modal-backdrop:has(.image-modal-fullscreen) {
+    padding: 0;
+    background: #000;
+  }
+
+  .image-modal-content.image-modal-fullscreen,
+  .compare-modal-content.image-modal-fullscreen {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    max-width: 100vw;
+    max-height: 100vh;
+    padding: 0;
+    border-radius: 0;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .image-modal-fullscreen .zoomable-image {
+    width: 100vw;
+    height: 100vh;
+  }
+
+  /* Set on the img directly (not via the --zoom-max-* var): the component sets
+     that var inline on .zoomable-image, which -- being a closer ancestor of
+     the img -- would shadow anything we set higher up. This descendant
+     selector still cleanly beats the base .zoomable-image img rule. */
+  .image-modal-fullscreen .zoomable-image img {
+    max-width: 100vw;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+
+  /* Full-screen clip container (not just the image box) so a zoomed image
+     spills past the letterbox and fills the screen, clipped at the edges. */
+  .image-modal-fullscreen .compare-slider {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0;
+  }
+
+  .image-modal-fullscreen .compare-slider-base {
+    max-width: 100vw;
+    max-height: 100vh;
+  }
 }

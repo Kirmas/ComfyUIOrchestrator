@@ -515,7 +515,7 @@ function BaseAssetNodeView({
           // ZoomableImage's own pointer handling. asset.select cells aren't
           // draggable, which is why that modal never had this problem.
           <div className="image-modal-backdrop" onClick={closeImage}>
-            <div className="image-modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="image-modal-content image-modal-fullscreen" onClick={(e) => e.stopPropagation()}>
               <button type="button" className="image-modal-close" onClick={closeImage} title="Close full-size image">
                 ×
               </button>
@@ -1318,7 +1318,7 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: P
           // draggable={true}, which hijacks pan gestures started anywhere
           // inside it, portal or not, into a native drag).
           <div className="image-modal-backdrop" onClick={() => setFullSizeUrl(null)}>
-            <div className="image-modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="image-modal-content image-modal-fullscreen" onClick={(e) => e.stopPropagation()}>
               <button type="button" className="image-modal-close" onClick={() => setFullSizeUrl(null)} title="Close full-size image">
                 ×
               </button>
