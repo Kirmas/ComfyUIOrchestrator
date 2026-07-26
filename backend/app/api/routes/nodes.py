@@ -642,7 +642,7 @@ async def list_node_jobs(node_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 
 @router.post("/{node_id}/upload-asset", response_model=AssetRead, status_code=201)
 async def upload_asset_to_node(node_id: uuid.UUID, file: UploadFile, db: AsyncSession = Depends(get_db)):
-    """Manual fill for an asset-kind node (SPEC section 5's start cell) -- no
+    """Manual fill for an asset-kind node (the grid's start cell) -- no
     workflow/backend involved. Can be called repeatedly to add more lines to
     the same asset cell."""
     node = await db.get(Node, node_id)
@@ -852,7 +852,7 @@ async def discard_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{node_id}/reroll", response_model=NodeRead, status_code=201)
 async def reroll_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    """SPEC section 4: none of the N variants were good -> the old step is marked
+    """Re-roll: none of the N variants were good -> the old step is marked
     discarded (kept for history) and a new step with the same inputs is created
     and immediately queued for a fresh generation."""
     old = await db.get(Node, node_id)

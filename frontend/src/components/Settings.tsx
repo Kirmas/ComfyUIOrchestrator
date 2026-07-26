@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { backendsApi, capabilitiesApi, nodeTemplatesApi } from "../api/endpoints";
 import type { Backend, Capability, DetectedField, NodeTemplate } from "../types";
 import { NodeTypeWizard } from "./NodeTypeWizard";
+import { MultiAngleBuilder } from "./MultiAngleBuilder";
+import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
 
 // Only one provider is actually wired up backend-side right now
 // (GeminiImageBackend, api_backend.py's PROVIDERS registry) -- a friendly
@@ -186,6 +188,10 @@ function CapabilityTextFieldsModal({ capability, onClose }: { capability: Capabi
   // backdrop itself (not just where the pointer happened to end up) tells
   // the two apart.
   const mouseDownOnBackdrop = useRef(false);
+  // When this capability's workflow loads the Multiple-Angles LoRA, offer a
+  // prompt-grammar builder under each field (the angle prompt is a baked-in
+  // text node these fields edit -- see multiAngleLora.ts).
+  const isMultiAngle = capabilityUsesMultiAngleLora(capability);
 
   useEffect(() => {
     capabilitiesApi
@@ -250,6 +256,15 @@ function CapabilityTextFieldsModal({ capability, onClose }: { capability: Capabi
                 setSavedKey(null);
               }}
             />
+            {isMultiAngle && (
+              <MultiAngleBuilder
+                value={values[f.key] ?? ""}
+                onChange={(next) => {
+                  setValues((v) => ({ ...v, [f.key]: next }));
+                  setSavedKey(null);
+                }}
+              />
+            )}
             <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
               <button disabled={savingKey === f.key} onClick={() => save(f)}>
                 {savingKey === f.key ? "Saving…" : "Save"}

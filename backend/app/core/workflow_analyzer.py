@@ -38,7 +38,7 @@ param_schema/param_mapping JSON:
 
 Field/node "keys" used in the result are ComfyUI node ids from the uploaded
 workflow; the caller resolves those to node titles when building param_mapping
-(app/core/template_engine.py maps by title, per SPEC's resolution of the
+(app/core/template_engine.py maps by title, the settled resolution of the
 id-vs-title question), so this module also flags duplicate titles among the
 detected nodes since that would make title-based mapping ambiguous.
 """

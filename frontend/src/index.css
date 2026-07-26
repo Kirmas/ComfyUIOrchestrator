@@ -642,3 +642,81 @@ th, td {
   font-size: 10px;
   color: var(--text-dim);
 }
+
+/* Multiple-Angles LoRA prompt builder (MultiAngleBuilder.tsx), shown under a
+   prompt textarea when the capability's workflow loads that LoRA. */
+.angle-builder {
+  margin-top: 6px;
+}
+
+.angle-builder-toggle {
+  font-size: 11px;
+  padding: 2px 8px;
+  color: var(--accent);
+  border-color: var(--border);
+  background: var(--panel);
+}
+
+.angle-builder-body {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.angle-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.angle-azimuths {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 12px;
+}
+
+.angle-azimuths label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.angle-azimuths label.sel {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.angle-selects {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.angle-selects select {
+  flex: 1 1 160px;
+}
+
+.angle-preview {
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  word-break: break-word;
+}
+
+.angle-actions {
+  display: flex;
+  gap: 8px;
+}

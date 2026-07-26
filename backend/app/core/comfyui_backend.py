@@ -1,5 +1,5 @@
 """ComfyUIBackend: JobBackend implementation wrapping one ComfyUI instance's
-HTTP/WS API (SPEC section 2.2).
+HTTP/WS API.
 
 Reference endpoints on a stock ComfyUI instance:
   POST /prompt              submit a workflow, returns {"prompt_id": ...}

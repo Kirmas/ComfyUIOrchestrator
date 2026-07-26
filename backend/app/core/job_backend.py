@@ -29,7 +29,7 @@ class AssetRef:
 class JobBackend(Protocol):
     """Uniform interface every execution backend (ComfyUI instance or paid API) implements.
 
-    The dispatcher and UI only ever talk to this interface — see SPEC.md section 2.2.
+    The dispatcher and UI only ever talk to this interface.
     """
 
     async def submit(self, execution_config: dict, inputs: dict) -> str: ...

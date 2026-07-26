@@ -1,7 +1,7 @@
 """Generic template engine: validates Node.params against a NodeTemplate.param_schema
 and maps resolved field values into a ComfyUI API-format workflow_json.
 
-param_schema shape (JSON-Schema-ish, SPEC section 3):
+param_schema shape (JSON-Schema-ish):
 {
   "fields": [
     {"name": "prompt", "type": "text", "required": true},
@@ -12,7 +12,7 @@ param_schema shape (JSON-Schema-ish, SPEC section 3):
   ]
 }
 
-param_mapping shape (SPEC section 2.3 -- "поля ноди-шаблона -> input-и workflow"),
+param_mapping shape ("поля ноди-шаблона -> input-и workflow"),
 keyed by template field name, value is {"node_id", "title", "input_key"}:
 {
   "prompt": {"node_id": "12", "title": "Positive Prompt", "input_key": "text"},

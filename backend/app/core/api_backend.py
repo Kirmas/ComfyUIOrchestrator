@@ -1,5 +1,5 @@
-"""ApiBackend: JobBackend implementation for paid image-generation APIs
-(SPEC section 2.2/6). Treated by the dispatcher as a backend with effectively
+"""ApiBackend: JobBackend implementation for paid image-generation APIs.
+Treated by the dispatcher as a backend with effectively
 unlimited capacity. Concrete providers subclass `ApiBackend` and implement
 `_submit_request` / `_parse_result`; jobs are synchronous from the caller's
 point of view (the provider call itself does the generation), so `submit`
@@ -62,7 +62,7 @@ class ApiBackend:
 
 
 class GeminiImageBackend(ApiBackend):
-    """Google Gemini ('nano banana') image generation, per SPEC's own example provider."""
+    """Google Gemini ('nano banana') image generation -- the example paid provider."""
 
     provider = "nano_banana"
     _ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"

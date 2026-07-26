@@ -1,6 +1,6 @@
 # ComfyUI Orchestrator — context for Claude Code
 
-Full product spec: [SPEC.md](SPEC.md) — read it for architecture, data model, and what's explicitly out of MVP scope.
+Product overview & architecture: [README.md](README.md) — the source of truth now that the original `SPEC.md` design doc has been retired. That doc described the initial plan; the shipped code diverged from it in several places (in-process queue instead of Redis/Arq, local disk instead of MinIO, single systemd service instead of docker-compose), so this file plus the code — not the old spec — are authoritative.
 
 ## Grid/node domain model (read this before asking what a "chart"/"grid"/etc. is)
 
@@ -79,4 +79,4 @@ sudo systemctl status comfy-orchestrator-api
 - `backend/.env` (not in git, lives only at `/opt/comfy-orchestrator/backend/.env`): Postgres DB `orchestrator`/user `orchestrator`, password `2505` (home LAN only, intentionally simple). `API_TOKEN` is a random bearer token, not a login — this is single-user, no auth flow.
 - `deploy/comfy-orchestrator-api.service` binds `--host 0.0.0.0` on the live unit so it's reachable from other LAN devices at `http://192.168.0.3:8000/`. The checked-in repo copy of that file still says `127.0.0.1` (the doc's conservative default) — if you ever regenerate `/etc/systemd/system/comfy-orchestrator-api.service` from the repo file, reapply the `0.0.0.0` change or LAN access breaks silently.
 - `backend/requirements.txt` includes `greenlet` — required internally by SQLAlchemy's async engine even with the `asyncpg` driver. It was missing originally and broke `alembic upgrade head` with `ValueError: the greenlet library is required`. Don't remove it.
-- Mid-run job recovery: there's no durable queue (see `SPEC.md` and `recover_orphaned_jobs()` in `backend/app/worker/tasks.py`) — a restart mid-generation leaves jobs needing a manual re-roll. Expected, not a bug to fix reflexively.
+- Mid-run job recovery: there's no durable queue (see `recover_orphaned_jobs()` in `backend/app/worker/tasks.py`) — a restart mid-generation leaves jobs needing a manual re-roll. Expected, not a bug to fix reflexively.

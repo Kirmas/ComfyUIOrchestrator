@@ -1,4 +1,4 @@
-"""Capability-filtered, least-loaded backend selection (SPEC section 2.4)."""
+"""Capability-filtered, least-loaded backend selection."""
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta

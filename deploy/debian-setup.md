@@ -72,7 +72,7 @@ If a job is mid-generation when the process restarts (deploy, crash), it's left 
 
 ## 7. Point it at your ComfyUI instance(s)
 
-Once the API is up, register each ComfyUI instance and its capabilities through the admin UI (or `POST /api/backends`, `POST /api/capabilities` directly) — no redeploy needed, per SPEC section 2.3.
+Once the API is up, register each ComfyUI instance and its capabilities through the admin UI (or `POST /api/backends`, `POST /api/capabilities` directly) — no redeploy needed.
 
 ## 8. Firewall / TLS
 

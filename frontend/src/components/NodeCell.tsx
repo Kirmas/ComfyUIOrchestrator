@@ -9,8 +9,10 @@ import { useProjectStore } from "../state/projectStore";
 import { defaultInputsForSchema, slotFields } from "../templateUtils";
 import type { Asset, Backend, Capability, InputRef, Job, NodeItem, NodeTemplate } from "../types";
 import { cx } from "../utils";
+import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
 import { CropPreview, type CropBox } from "./CropPreview";
 import { MaskPreview } from "./MaskPreview";
+import { MultiAngleBuilder } from "./MultiAngleBuilder";
 import { Model3DThumb } from "./Model3DThumb";
 import { ZoomableImage } from "./ZoomableImage";
 
@@ -555,6 +557,15 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   const cropGroups = useMemo(() => (template ? detectCropGroups(template.param_schema.fields ?? []) : []), [template]);
   const [cropImages, setCropImages] = useState<Record<string, string | null>>({});
 
+  // A node type whose ComfyUI workflow loads the Multiple-Angles LoRA gets the
+  // angle prompt builder under each of its editable text fields (same detection
+  // as the Settings prompt editor). Any capability for this slug can carry the
+  // workflow, so check them all.
+  const isMultiAngle = useMemo(
+    () => Boolean(template && capabilities.some((c) => c.node_type_slug === template.node_type_slug && capabilityUsesMultiAngleLora(c))),
+    [template, capabilities],
+  );
+
   useEffect(() => {
     if (!paramsOpen || !template || cropGroups.length === 0) {
       setCropImages({});
@@ -800,11 +811,19 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
               ))}
             </select>
           ) : field.type === "text" ? (
-            <textarea
-              rows={2}
-              value={(node.params[field.name] as string) ?? ""}
-              onChange={(e) => updateParam(field.name, e.target.value)}
-            />
+            <>
+              <textarea
+                rows={2}
+                value={(node.params[field.name] as string) ?? ""}
+                onChange={(e) => updateParam(field.name, e.target.value)}
+              />
+              {isMultiAngle && (
+                <MultiAngleBuilder
+                  value={(node.params[field.name] as string) ?? ""}
+                  onChange={(v) => updateParam(field.name, v)}
+                />
+              )}
+            </>
           ) : field.type === "bool" ? (
             <input
               type="checkbox"
@@ -823,21 +842,25 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
         </div>
       ));
 
-  // Locked/history (see collapseInfo) means there's no regeneration left to
-  // tune params for, so the params modal/gear/hint are all just noise here --
-  // suppressed outright rather than shown-but-pointless.
-  const hasExtraParams =
-    !collapseInfo && Boolean((paramFieldInputs && paramFieldInputs.length > 0) || cropGroups.length > 0 || maskGroups.length > 0);
+  // Optional per-node display label (params.__label) -- a cosmetic reserved
+  // key the backend ignores (not in param_schema/param_mapping), used purely to
+  // tell two same-type nodes apart on the grid. Replaces the shown name when set.
+  const customLabel = ((node.params.__label as string | undefined) ?? "").trim();
+  const displayName = customLabel || collapseInfo?.combinedLabel || template?.name || "(choose template)";
+  // Locked/history (see collapseInfo) means there's no regeneration left to tune
+  // params for, so the modal/gear/hint are suppressed there. Otherwise any
+  // workflow node with a template can open the modal -- if only to set a label.
+  const canEditParams = !collapseInfo && Boolean(template);
 
   return (
     <div
       ref={(el) => registerRef(node.id, el)}
       className={cls}
-      onDoubleClick={() => hasExtraParams && setParamsOpen(true)}
-      title={hasExtraParams ? "⚙ or double-click to edit parameters" : undefined}
+      onDoubleClick={() => canEditParams && setParamsOpen(true)}
+      title={canEditParams ? "⚙ or double-click to edit parameters" : undefined}
     >
       <div className="node-cell-header">
-        <span>{collapseInfo?.combinedLabel ?? template?.name ?? "(choose template)"}</span>
+        <span title={customLabel ? template?.name : undefined}>{displayName}</span>
         {isNative && !collapseInfo && (
           <span className="native-pill" title="Native node type: built into the backend code, not a DB-stored workflow.json template">
             native
@@ -856,7 +879,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
           </span>
         )}
         <span className="status-pill">{node.status}</span>
-        {hasExtraParams && (
+        {canEditParams && (
           // Double-click still works (desktop), but it's an unreliable gesture
           // on a phone once the face is full of tappable fields -- a plain
           // button is a sure thing on both.
@@ -1008,7 +1031,9 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
         </div>
       )}
 
-      {hasExtraParams && <div className="node-cell-hint">⚙ for more parameters</div>}
+      {!collapseInfo && ((paramFieldInputs && paramFieldInputs.length > 0) || cropGroups.length > 0 || maskGroups.length > 0) && (
+        <div className="node-cell-hint">⚙ for more parameters</div>
+      )}
 
       {jobs.length > 0 && node.status !== "done" && node.status !== "discarded" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 3 }} onClick={(e) => e.stopPropagation()}>
@@ -1094,6 +1119,18 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
               <div className="node-cell-header">
                 <span>{template.name}</span>
                 <span className="status-pill">{node.status}</span>
+              </div>
+
+              <div className="field-row">
+                <label>
+                  Label <span style={{ color: "var(--text-dim)" }}>(optional — shown on the cell)</span>
+                </label>
+                <input
+                  type="text"
+                  value={(node.params.__label as string | undefined) ?? ""}
+                  placeholder={template.name}
+                  onChange={(e) => updateParam("__label", e.target.value)}
+                />
               </div>
 
               {cropGroups.map((group) => {
