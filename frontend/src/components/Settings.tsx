@@ -174,7 +174,17 @@ function BackendsSection({ items, reload }: { items: Backend[]; reload: () => vo
  * exposed as a param_schema field -- see workflow_analyzer.py's
  * find_editable_text_fields. Until now the only way to change one of these
  * was re-uploading the whole workflow.json for this capability. */
-function CapabilityTextFieldsModal({ capability, onClose }: { capability: Capability; onClose: () => void }) {
+function CapabilityTextFieldsModal({
+  capability,
+  onClose,
+  readOnly = false,
+  leaderName,
+}: {
+  capability: Capability;
+  onClose: () => void;
+  readOnly?: boolean;
+  leaderName?: string;
+}) {
   const [fields, setFields] = useState<DetectedField[] | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [savingKey, setSavingKey] = useState<string | null>(null);
@@ -232,11 +242,16 @@ function CapabilityTextFieldsModal({ capability, onClose }: { capability: Capabi
         style={{ width: 860, maxWidth: "92vw", maxHeight: "85vh", overflowY: "auto", display: "flex", flexDirection: "column" }}
       >
         <div className="node-cell-header">
-          <span>Prompt fields</span>
+          <span>Prompt fields{readOnly ? " (linked, read-only)" : ""}</span>
           <button className="image-modal-close" onClick={onClose} title="Close">
             ×
           </button>
         </div>
+        {readOnly && (
+          <div className="node-cell-hint">
+            These prompts follow “{leaderName ?? "the leader instance"}”. Edit them there; unlink to make this instance independent.
+          </div>
+        )}
         {loadError && <div className="error-text">{loadError}</div>}
         {fields === null && !loadError && <div style={{ fontSize: 12, color: "var(--text-dim)" }}>Loading…</div>}
         {fields?.length === 0 && (
@@ -249,14 +264,15 @@ function CapabilityTextFieldsModal({ capability, onClose }: { capability: Capabi
             <label style={{ display: "block", fontSize: 12, marginBottom: 4, color: "var(--text-dim)" }}>{f.label}</label>
             <textarea
               rows={14}
-              style={{ width: "100%", minHeight: 240, resize: "vertical" }}
+              readOnly={readOnly}
+              style={{ width: "100%", minHeight: 240, resize: "vertical", ...(readOnly ? { opacity: 0.7 } : {}) }}
               value={values[f.key] ?? ""}
               onChange={(e) => {
                 setValues((v) => ({ ...v, [f.key]: e.target.value }));
                 setSavedKey(null);
               }}
             />
-            {isMultiAngle && (
+            {isMultiAngle && !readOnly && (
               <MultiAngleBuilder
                 value={values[f.key] ?? ""}
                 onChange={(next) => {
@@ -265,16 +281,70 @@ function CapabilityTextFieldsModal({ capability, onClose }: { capability: Capabi
                 }}
               />
             )}
-            <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
-              <button disabled={savingKey === f.key} onClick={() => save(f)}>
-                {savingKey === f.key ? "Saving…" : "Save"}
-              </button>
-              {savedKey === f.key && <span style={{ fontSize: 11, color: "var(--text-dim)" }}>saved</span>}
-            </div>
+            {!readOnly && (
+              <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
+                <button disabled={savingKey === f.key} onClick={() => save(f)}>
+                  {savingKey === f.key ? "Saving…" : "Save"}
+                </button>
+                {savedKey === f.key && <span style={{ fontSize: 11, color: "var(--text-dim)" }}>saved</span>}
+              </div>
+            )}
           </div>
         ))}
       </div>
     </div>
+  );
+}
+
+/** Per-ComfyUI-instance prompt-link picker: make this instance follow another
+ * instance's baked prompts (leader -> follower), or stay independent. Leaders
+ * and followers are both scoped to one node type. A capability that already
+ * leads others can't also follow someone (no chains). */
+function PromptLinkControl({
+  capability,
+  siblings,
+  backendName,
+  reload,
+}: {
+  capability: Capability;
+  siblings: Capability[];
+  backendName: (id: string) => string;
+  reload: () => void;
+}) {
+  const leaderId = (capability.config.prompt_leader_id as string | undefined) ?? "";
+  const comfy = siblings.filter((s) => s.execution_type === "comfyui_workflow");
+  const followers = comfy.filter((s) => s.config.prompt_leader_id === capability.id);
+
+  if (followers.length > 0) {
+    return (
+      <span className="node-cell-hint" style={{ marginLeft: 6 }} title="Other instances follow this one's prompts">
+        leads {followers.length}
+      </span>
+    );
+  }
+
+  const leaders = comfy.filter((s) => s.id !== capability.id && !s.config.prompt_leader_id);
+  if (leaders.length === 0 && !leaderId) return null;
+  const hasLeaderOption = leaders.some((l) => l.id === leaderId);
+
+  return (
+    <select
+      value={leaderId}
+      title="Follow another instance's prompts (leader → this one)"
+      style={{ marginLeft: 6, maxWidth: 160 }}
+      onChange={async (e) => {
+        await capabilitiesApi.setPromptLink(capability.id, e.target.value || null);
+        reload();
+      }}
+    >
+      <option value="">independent prompts</option>
+      {leaders.map((l) => (
+        <option key={l.id} value={l.id}>
+          follow: {backendName(l.backend_id)}
+        </option>
+      ))}
+      {leaderId && !hasLeaderOption && <option value={leaderId}>follow: (linked)</option>}
+    </select>
   );
 }
 
@@ -494,13 +564,20 @@ function NodeTypeCard({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [apiBackendId, setApiBackendId] = useState<string | null>(null);
   const [comfyBackendId, setComfyBackendId] = useState<string | null>(null);
+  const [copySourceId, setCopySourceId] = useState("");
   const attachedBackendIds = capabilities.map((c) => c.backend_id);
   const pickableBackends = backends.filter((b) => !attachedBackendIds.includes(b.id));
+  // Existing ComfyUI instances whose workflow this new one can be copied from,
+  // instead of re-uploading a (usually identical) workflow.json.
+  const copyableSources = capabilities.filter(
+    (c) => c.execution_type === "comfyui_workflow" && Boolean((c.config as Record<string, unknown>).workflow_json),
+  );
 
   const closeAll = () => {
     setPickerOpen(false);
     setApiBackendId(null);
     setComfyBackendId(null);
+    setCopySourceId("");
   };
   const pickBackend = (backendId: string) => {
     const backend = backends.find((b) => b.id === backendId);
@@ -510,10 +587,30 @@ function NodeTypeCard({
       setApiBackendId(backendId);
     } else {
       setComfyBackendId(backendId);
-      onOpenWizard();
+      // No existing workflow to copy -> straight to the upload wizard, as
+      // before. Otherwise let the choice panel below offer upload-vs-copy.
+      if (copyableSources.length === 0) onOpenWizard();
     }
   };
-  const anyFormOpen = pickerOpen || apiBackendId !== null || wizardOpen;
+  // Create a new ComfyUI instance for the picked backend by cloning an existing
+  // instance's workflow_json + param_mapping (dropping any prompt link, so the
+  // clone starts independent). One click, no wizard.
+  const doCopy = async (sourceId: string) => {
+    const source = capabilities.find((c) => c.id === sourceId);
+    if (!source || !comfyBackendId) return;
+    const { prompt_leader_id: _drop, ...cfg } = source.config as Record<string, unknown>;
+    await capabilitiesApi.create({
+      backend_id: comfyBackendId,
+      node_type_slug: template.node_type_slug,
+      execution_type: "comfyui_workflow",
+      enabled: true,
+      config: cfg,
+    });
+    closeAll();
+    reloadCapabilities();
+    reloadTemplates();
+  };
+  const anyFormOpen = pickerOpen || apiBackendId !== null || comfyBackendId !== null || wizardOpen;
 
   return (
     <div className="settings-section node-type-card">
@@ -554,9 +651,15 @@ function NodeTypeCard({
                     concept -- api_call/native capabilities have no workflow graph
                     for find_editable_text_fields to walk. */}
                 {c.execution_type === "comfyui_workflow" && (
-                  <button onClick={() => setPromptsFor(c)} title="Edit prompt text baked directly into this workflow">
-                    prompts
-                  </button>
+                  <>
+                    <button
+                      onClick={() => setPromptsFor(c)}
+                      title={c.config.prompt_leader_id ? "View linked prompts (read-only)" : "Edit prompt text baked directly into this workflow"}
+                    >
+                      {c.config.prompt_leader_id ? "prompts 🔗" : "prompts"}
+                    </button>
+                    <PromptLinkControl capability={c} siblings={capabilities} backendName={backendName} reload={reloadCapabilities} />
+                  </>
                 )}
                 <button onClick={() => tryDelete(() => capabilitiesApi.remove(c.id), reloadCapabilities)}>delete</button>
               </td>
@@ -565,7 +668,19 @@ function NodeTypeCard({
         </tbody>
       </table>
 
-      {promptsFor && <CapabilityTextFieldsModal capability={promptsFor} onClose={() => setPromptsFor(null)} />}
+      {promptsFor &&
+        (() => {
+          const leaderId = promptsFor.config.prompt_leader_id as string | undefined;
+          const leader = leaderId ? capabilities.find((c) => c.id === leaderId) : undefined;
+          return (
+            <CapabilityTextFieldsModal
+              capability={promptsFor}
+              onClose={() => setPromptsFor(null)}
+              readOnly={Boolean(leaderId)}
+              leaderName={leader ? backendName(leader.backend_id) : undefined}
+            />
+          );
+        })()}
 
       {pickerOpen && (
         <div className="inline-form">
@@ -585,6 +700,31 @@ function NodeTypeCard({
               No unattached backends — add one in Backends above first.
             </span>
           )}
+        </div>
+      )}
+
+      {/* ComfyUI backend picked and there's an existing workflow to clone:
+          offer copy-vs-upload instead of forcing a re-upload of the (usually
+          identical) workflow.json. */}
+      {comfyBackendId && !wizardOpen && copyableSources.length > 0 && (
+        <div className="inline-form">
+          <span style={{ fontSize: 12 }}>Configure “{backendName(comfyBackendId)}”:</span>
+          <button className="primary" onClick={() => onOpenWizard()}>
+            Upload workflow…
+          </button>
+          <span style={{ fontSize: 12, color: "var(--text-dim)" }}>or copy workflow from</span>
+          <select value={copySourceId} onChange={(e) => setCopySourceId(e.target.value)}>
+            <option value="">choose instance…</option>
+            {copyableSources.map((c) => (
+              <option key={c.id} value={c.id}>
+                {backendName(c.backend_id)}
+              </option>
+            ))}
+          </select>
+          <button disabled={!copySourceId} onClick={() => doCopy(copySourceId)}>
+            Copy
+          </button>
+          <button onClick={closeAll}>Cancel</button>
         </div>
       )}
 

@@ -89,6 +89,12 @@ class CapabilityTextFieldUpdate(BaseModel):
     value: str
 
 
+class CapabilityPromptLink(BaseModel):
+    # Make this capability a "follower" that mirrors `leader_id`'s baked prompt
+    # text (leader -> follower). None unlinks it back to independent prompts.
+    leader_id: uuid.UUID | None = None
+
+
 # ---------- NodeTemplate ----------
 class NodeTemplateCreate(BaseModel):
     node_type_slug: str

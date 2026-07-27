@@ -40,6 +40,8 @@ export const capabilitiesApi = {
   textFields: (id: string) => api.get<DetectedField[]>(`/api/capabilities/${id}/text-fields`),
   updateTextField: (id: string, data: { node_id: string; input_key: string; value: string }) =>
     api.patch<Capability>(`/api/capabilities/${id}/text-fields`, data),
+  setPromptLink: (id: string, leaderId: string | null) =>
+    api.patch<Capability>(`/api/capabilities/${id}/prompt-link`, { leader_id: leaderId }),
 };
 
 export const nodeTemplatesApi = {
