@@ -49,6 +49,21 @@ from typing import Any
 INPUT_IMAGE_CLASS_TYPES = {"LoadImage"}
 OUTPUT_CLASS_TYPES = {"SaveImage", "PreviewImage"}
 SAMPLER_CLASS_TYPES = {"KSampler", "KSamplerAdvanced"}
+# Checkpoint/diffusion-model loaders -> the input key naming the model file.
+# Used only for describing a workflow ("what does this node type actually
+# run"), never for execution.
+MODEL_LOADER_INPUT_KEYS: dict[str, str] = {
+    "CheckpointLoaderSimple": "ckpt_name",
+    "CheckpointLoader": "ckpt_name",
+    "UNETLoader": "unet_name",
+    "DiffusionModelLoader": "unet_name",
+}
+# LoRA loaders -> (name key, strength key). LoraLoaderModelOnly has no CLIP
+# strength, hence the separate entry rather than one shared shape.
+LORA_LOADER_INPUT_KEYS: dict[str, tuple[str, str]] = {
+    "LoraLoader": ("lora_name", "strength_model"),
+    "LoraLoaderModelOnly": ("lora_name", "strength_model"),
+}
 # class_type -> the input key holding its literal prompt text (varies by
 # node family -- ComfyUI's own CLIPTextEncode uses "text", but e.g. Qwen
 # Image Edit's encoder uses "prompt").
@@ -187,11 +202,21 @@ class DetectedField:
 
 
 @dataclass
+class LoraInfo:
+    name: str
+    strength: float | None = None
+
+
+@dataclass
 class WorkflowAnalysis:
     input_image_nodes: list[WorkflowNodeInfo] = field(default_factory=list)
     output_nodes: list[WorkflowNodeInfo] = field(default_factory=list)
     detected_fields: list[DetectedField] = field(default_factory=list)
     duplicate_titles: list[str] = field(default_factory=list)
+    # Descriptive only (node-type fingerprinting, see core/node_fingerprint.py)
+    # -- nothing in execution reads these.
+    models: list[str] = field(default_factory=list)
+    loras: list[LoraInfo] = field(default_factory=list)
 
 
 def _node_info(node_id: str, node: dict) -> WorkflowNodeInfo:
@@ -243,7 +268,11 @@ def analyze_workflow(workflow_json: dict) -> WorkflowAnalysis:
     input_nodes = []
     output_nodes = []
     detected_fields: list[DetectedField] = []
+    models: list[str] = []
+    loras: list[LoraInfo] = []
 
+    # One pass over the graph for everything positional -- models/LoRAs are
+    # collected here rather than in a second walk of their own.
     for node_id, node in workflow_json.items():
         if not isinstance(node, dict):
             continue
@@ -252,6 +281,20 @@ def analyze_workflow(workflow_json: dict) -> WorkflowAnalysis:
             input_nodes.append(_node_info(node_id, node))
         elif class_type in OUTPUT_CLASS_TYPES:
             output_nodes.append(_node_info(node_id, node))
+
+        inputs = node.get("inputs", {})
+        model_key = MODEL_LOADER_INPUT_KEYS.get(class_type)
+        if model_key and not _is_link(inputs.get(model_key)):
+            value = inputs.get(model_key)
+            if isinstance(value, str) and value not in models:
+                models.append(value)
+        lora_keys = LORA_LOADER_INPUT_KEYS.get(class_type)
+        if lora_keys:
+            name_key, strength_key = lora_keys
+            name = inputs.get(name_key)
+            if isinstance(name, str) and not any(l.name == name for l in loras):
+                strength = inputs.get(strength_key)
+                loras.append(LoraInfo(name=name, strength=strength if isinstance(strength, (int, float)) else None))
 
     # Only the first sampler encountered in dict-iteration order is exposed as
     # fields -- a multi-stage workflow (e.g. a base + refiner pass with two
@@ -367,4 +410,6 @@ def analyze_workflow(workflow_json: dict) -> WorkflowAnalysis:
         output_nodes=output_nodes,
         detected_fields=detected_fields,
         duplicate_titles=duplicate_titles,
+        models=models,
+        loras=loras,
     )

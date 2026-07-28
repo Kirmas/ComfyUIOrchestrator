@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from app.db.models import AssetKind, BackendKind, ExecutionType, JobStatusEnum, NodeKind, NodeStatus
+from app.db.models import AnnotationSource, AssetKind, BackendKind, ExecutionType, JobStatusEnum, NodeKind, NodeStatus
 
 
 class ORMModel(BaseModel):
@@ -123,6 +123,28 @@ class NodeTemplateRead(ORMModel):
     # api/routes/node_templates.py's list_node_templates and core/node_types.py).
     # Not a DB column; set by the route handler after validation.
     node_type: str = ""
+    # What this node type does, resolved from the highest-priority source
+    # available (hand-written > agent-distilled > auto-derived from the
+    # workflows). Filled in by list_node_templates, see core/node_descriptions.py.
+    description: str = ""
+    description_source: str = "auto"
+    # The auto-derived facts behind the description: model, LoRAs, image
+    # inputs, prompt... Values differing between backends are shown per
+    # backend, so "same node, configured differently here" is visible.
+    fingerprint: dict[str, str] = {}
+
+
+class ManualDescriptionWrite(BaseModel):
+    description: str
+
+
+class AgentDescriptionWrite(BaseModel):
+    description: str
+    # How much text the agent actually read to write this. The server can't
+    # know that by itself -- the source might have been a merged fingerprint,
+    # a baked prompt, or a whole workflow graph -- so it's stated by the
+    # caller and used to check the summary is genuinely shorter.
+    source_length: int = 0
 
 
 # ---------- Workflow analysis (template creation wizard) ----------
@@ -353,3 +375,46 @@ class JobRead(ORMModel):
     finished_at: datetime | None
 
 
+
+
+# ---------- Annotation (comment blocks) ----------
+# No geometry here on purpose: an annotation is a set of member nodes, and the
+# frame drawn around them is derived from where those nodes currently are (see
+# db/models.py's Annotation docstring).
+class AnnotationCreate(BaseModel):
+    project_id: uuid.UUID
+    node_ids: list[uuid.UUID] = []
+    text: str = ""
+    source: AnnotationSource = AnnotationSource.user
+
+
+class AnnotationUpdate(BaseModel):
+    text: str | None = None
+    node_ids: list[uuid.UUID] | None = None
+
+
+class AnnotationRead(ORMModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    text: str
+    source: AnnotationSource
+    node_ids: list[uuid.UUID]
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------- Node-type authoring (agent-facing, see api/routes/node_types.py) ----------
+class CreateNodeTypeRequest(BaseModel):
+    workflow_json: dict[str, Any]
+    name: str
+    node_type_slug: str
+    backend_id: uuid.UUID
+    # Always required: the caller states up front what should be settable per
+    # cell. There is no follow-up screen to fix an omission on.
+    param_mapping: dict[str, Any]
+
+
+class AddCapabilityRequest(BaseModel):
+    backend_id: uuid.UUID
+    workflow_json: dict[str, Any]
+    param_mapping: dict[str, Any]

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { nodesApi, projectsApi, tracksApi } from "../api/endpoints";
-import type { Asset, NodeItem, ProgressEvent, Track } from "../types";
+import type { Annotation, Asset, NodeItem, ProgressEvent, Track } from "../types";
 
 // The API returns tracks already in list order (backend walks the linked
 // list). row_index is a purely client-side, derived positional index (array
@@ -36,10 +36,14 @@ interface ProjectState {
   // recomputing the span formula.
   spans: Record<string, { desired: number; achieved: number }>;
   blockedCells: Set<string>;
+  // Comment blocks. Held flat here; the frame each one draws is derived at
+  // render time from where its member nodes currently are.
+  annotations: Annotation[];
 
   loadProject: (projectId: string) => Promise<void>;
   reloadTracks: (projectId: string) => Promise<void>;
   reloadLayout: (projectId: string) => Promise<void>;
+  reloadAnnotations: (projectId: string) => Promise<void>;
   refreshTrack: (trackId: string) => Promise<void>;
   refreshNodeOutputs: (nodeId: string) => Promise<void>;
   applyProgressEvent: (event: ProgressEvent) => void;
@@ -59,6 +63,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   outputsByNode: {},
   spans: {},
   blockedCells: new Set(),
+  annotations: [],
 
   loadProject: async (projectId: string) => {
     const tracks = withRowIndex(await projectsApi.tracks(projectId));
@@ -68,6 +73,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       for (const node of nodes) nodesById[node.id] = node;
     }
     const layout = await projectsApi.layout(projectId).catch(() => ({ spans: {}, blocked_cells: [] as [number, number][] }));
+    const annotations = await projectsApi.annotations(projectId).catch(() => [] as Annotation[]);
     set({
       projectId,
       tracks,
@@ -75,6 +81,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       outputsByNode: {},
       spans: layout.spans,
       blockedCells: new Set(layout.blocked_cells.map(([r, c]) => `${r}:${c}`)),
+      annotations,
     });
 
     for (const node of Object.values(nodesById)) {
@@ -101,6 +108,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   reloadLayout: async (projectId: string) => {
     const layout = await projectsApi.layout(projectId);
     set({ spans: layout.spans, blockedCells: new Set(layout.blocked_cells.map(([r, c]) => `${r}:${c}`)) });
+  },
+
+  reloadAnnotations: async (projectId: string) => {
+    set({ annotations: await projectsApi.annotations(projectId) });
   },
 
   refreshTrack: async (trackId: string) => {

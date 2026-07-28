@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { backendsApi, capabilitiesApi, nodeTemplatesApi } from "../api/endpoints";
+import { NodeTypeDescription } from "./NodeTypeDescription";
 import type { Backend, Capability, DetectedField, NodeTemplate } from "../types";
 import { NodeTypeWizard } from "./NodeTypeWizard";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
@@ -621,6 +622,8 @@ function NodeTypeCard({
       <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
         {(template.param_schema.fields ?? []).map((f) => `${f.name}: ${f.type}`).join(", ") || "(no fields)"}
       </div>
+
+      <NodeTypeDescription template={template} onChanged={reloadTemplates} />
 
       <table>
         <thead>

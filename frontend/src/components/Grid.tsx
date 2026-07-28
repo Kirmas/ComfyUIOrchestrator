@@ -1,10 +1,11 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { backendsApi, capabilitiesApi, nodesApi, nodeTemplatesApi, projectsApi, tracksApi } from "../api/endpoints";
+import { annotationsApi, backendsApi, capabilitiesApi, nodesApi, nodeTemplatesApi, projectsApi, tracksApi } from "../api/endpoints";
 import { useProjectWs } from "../api/useProjectWs";
 import { useProjectStore } from "../state/projectStore";
 import { resolveSlotAsset } from "../slotResolution";
 import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project, Track } from "../types";
 import { cx } from "../utils";
+import { AnnotationFrame } from "./AnnotationFrame";
 import { ArrowsOverlay, type Edge } from "./ArrowsOverlay";
 import { CompareModal } from "./CompareModal";
 import { NodeCell } from "./NodeCell";
@@ -60,8 +61,12 @@ function isPickable(node: NodeItem, outputs: Asset[]): boolean {
 }
 
 export function Grid({ projectId }: { projectId: string }) {
-  const { tracks, nodesById, outputsByNode, spans, blockedCells, loadProject, reloadTracks, applyProgressEvent, addNode, removeTrack, refreshNodeOutputs } =
+  const { tracks, nodesById, outputsByNode, spans, blockedCells, annotations, loadProject, reloadTracks, reloadAnnotations, applyProgressEvent, addNode, removeTrack, refreshNodeOutputs } =
     useProjectStore();
+  // Nodes ticked for grouping into a comment block. Shift/Ctrl/Cmd-click on a
+  // cell toggles membership; a plain click is left alone so it keeps meaning
+  // whatever it meant before (compare, ref, open).
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [templates, setTemplates] = useState<NodeTemplate[]>([]);
   const [backends, setBackends] = useState<Backend[]>([]);
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
@@ -493,6 +498,49 @@ export function Grid({ projectId }: { projectId: string }) {
     else cellRefs.delete(nodeId);
   };
 
+  const toggleSelected = (nodeId: string) => {
+    setSelectedNodeIds((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(nodeId)) next.add(nodeId);
+      return next;
+    });
+  };
+
+  const createAnnotationFromSelection = async () => {
+    if (selectedNodeIds.size === 0) return;
+    await annotationsApi.create({ project_id: projectId, node_ids: [...selectedNodeIds], text: "" });
+    setSelectedNodeIds(new Set());
+    await reloadAnnotations(projectId);
+  };
+
+  // A frame's box is derived here, every render, from where its members
+  // currently are -- nothing positional is stored on the annotation, so a
+  // moved node carries its frame along instead of leaving it behind.
+  const annotationBoxes = useMemo(() => {
+    const rowOf = new Map(tracks.map((t) => [t.id, t.row_index]));
+    return annotations
+      .map((annotation) => {
+        const positions = annotation.node_ids
+          .map((id) => nodesById[id])
+          .filter((n): n is NodeItem => Boolean(n))
+          .map((n) => ({ row: rowOf.get(n.track_id), col: n.step_index }))
+          .filter((p): p is { row: number; col: number } => p.row !== undefined);
+        if (positions.length === 0) return null;
+        const rows = positions.map((p) => p.row);
+        const cols = positions.map((p) => p.col);
+        return {
+          annotation,
+          box: {
+            minRow: Math.min(...rows),
+            maxRow: Math.max(...rows),
+            minCol: Math.min(...cols),
+            maxCol: Math.max(...cols),
+          },
+        };
+      })
+      .filter((x): x is { annotation: (typeof annotations)[number]; box: { minRow: number; maxRow: number; minCol: number; maxCol: number } } => x !== null);
+  }, [annotations, nodesById, tracks]);
+
   const addTrackRow = async () => {
     // Tail append (no anchor, not head) -- backend splices it after the
     // current last track; reloadTracks re-derives row numbers.
@@ -845,7 +893,14 @@ export function Grid({ projectId }: { projectId: string }) {
     // this exclusion, any pointerdown inside a modal (e.g. painting a mask)
     // arms this pan-drag, whose window-level pointermove then visibly drags
     // the grid underneath the modal as the user interacts with it.
-    if (target.closest("button, input, select, textarea, a, .node-cell, [draggable='true'], .image-modal-backdrop")) return;
+    // .annotation-label is the interactive part of a comment block's frame;
+    // like the modals, it sits inside the grid and would otherwise arm a pan.
+    if (
+      target.closest(
+        "button, input, select, textarea, a, .node-cell, [draggable='true'], .image-modal-backdrop, .annotation-label",
+      )
+    )
+      return;
     const container = containerRef.current;
     if (!container) return;
     // Track touch pointers for pinch-zoom. A second finger landing turns the
@@ -923,6 +978,20 @@ export function Grid({ projectId }: { projectId: string }) {
           reset
         </button>
       </div>
+      {selectedNodeIds.size > 0 && (
+        // Same reasoning as .zoom-indicator above: a sibling of the scaled
+        // wrapper, so its position: sticky isn't captured by the zoom
+        // transform's containing block.
+        <div className="selection-bar">
+          {selectedNodeIds.size} cell{selectedNodeIds.size === 1 ? "" : "s"} selected
+          <button onClick={createAnnotationFromSelection} title="Draw a comment frame around the selected cells">
+            + comment
+          </button>
+          <button onClick={() => setSelectedNodeIds(new Set())} title="Clear the selection">
+            clear
+          </button>
+        </div>
+      )}
       {/* A sibling of the scaled grid-wrapper, not a descendant -- its path
           coordinates are already computed in real (post-transform) pixels
           via getBoundingClientRect (see ArrowsOverlay), so nesting it inside
@@ -1021,6 +1090,15 @@ export function Grid({ projectId }: { projectId: string }) {
                   // leaving invisible dead space below it and making a span
                   // look identical to a single row.
                   style={{ gridColumn, gridRow, display: "flex" }}
+                  className={cx(selectedNodeIds.has(node.id) && "cell-selected")}
+                  // Capture phase, so ticking a cell for a comment block never
+                  // also triggers whatever a plain click on that cell does.
+                  onClickCapture={(e) => {
+                    if (!(e.shiftKey || e.ctrlKey || e.metaKey)) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    toggleSelected(node.id);
+                  }}
                   draggable={isDraggableAsset || isDraggableWorkflow}
                   onDragStart={() => {
                     if (isDraggableAsset) setDraggingAssetId(node.id);
@@ -1070,6 +1148,22 @@ export function Grid({ projectId }: { projectId: string }) {
               );
             });
           })}
+
+          {annotationBoxes.map(({ annotation, box }) => (
+            <AnnotationFrame
+              key={annotation.id}
+              annotation={annotation}
+              box={box}
+              onSave={async (text) => {
+                await annotationsApi.update(annotation.id, { text });
+                await reloadAnnotations(projectId);
+              }}
+              onDelete={async () => {
+                await annotationsApi.remove(annotation.id);
+                await reloadAnnotations(projectId);
+              }}
+            />
+          ))}
 
           {emptyReachableCells.map(({ row, step }) => (
             <div

@@ -1,5 +1,6 @@
 import { api } from "./client";
 import type {
+  Annotation,
   Asset,
   Backend,
   Capability,
@@ -49,6 +50,11 @@ export const nodeTemplatesApi = {
   create: (data: Partial<NodeTemplate>) => api.post<NodeTemplate>("/api/node-templates", data),
   update: (id: string, data: Partial<NodeTemplate>) => api.patch<NodeTemplate>(`/api/node-templates/${id}`, data),
   remove: (id: string) => api.delete(`/api/node-templates/${id}`),
+  // Descriptions are addressed by slug, not template id: native node types
+  // have no template row but still have a description.
+  setDescription: (slug: string, description: string) =>
+    api.patch(`/api/node-templates/by-slug/${slug}/description`, { description }),
+  resetDescription: (slug: string) => api.delete(`/api/node-templates/by-slug/${slug}/description`),
   analyzeWorkflow: (file: File) => {
     const form = new FormData();
     form.append("file", file);
@@ -64,7 +70,16 @@ export const projectsApi = {
   // Backend-computed derived layout: workflow row-spans + blocked cells. The
   // client renders from this instead of recomputing the span formula.
   layout: (id: string) => api.get<GridLayout>(`/api/projects/${id}/layout`),
+  annotations: (id: string) => api.get<Annotation[]>(`/api/projects/${id}/annotations`),
   remove: (id: string) => api.delete(`/api/projects/${id}`),
+};
+
+export const annotationsApi = {
+  create: (data: { project_id: string; node_ids: string[]; text?: string }) =>
+    api.post<Annotation>("/api/annotations", data),
+  update: (id: string, data: { text?: string; node_ids?: string[] }) =>
+    api.patch<Annotation>(`/api/annotations/${id}`, data),
+  remove: (id: string) => api.delete(`/api/annotations/${id}`),
 };
 
 export const tracksApi = {

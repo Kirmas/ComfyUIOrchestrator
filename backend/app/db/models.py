@@ -297,3 +297,83 @@ class ApiUsageLog(Base):
     backend_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("backends.id", ondelete="CASCADE"), nullable=False)
     node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AnnotationSource(str, enum.Enum):
+    user = "user"
+    agent = "agent"
+
+
+class Annotation(Base):
+    """A comment block: free text attached to a set of nodes, drawn as a frame
+    around them in the grid.
+
+    Deliberately stores no coordinates. The frame's box is derived from where
+    its member nodes currently are, so moving a node moves the frame with it --
+    the same rule the grid already follows for nodes themselves (a node's
+    position is always exactly its track_id + step_index, never a stored
+    display-only override). Storing a rect here would reintroduce exactly the
+    kind of position that can silently desync from the content it describes.
+
+    An agent flagging an ambiguous cell (the MCP flag_cell tool) creates one of
+    these with source=agent and a single member, so agent flags and hand-written
+    notes are the same object and are reviewed in the same place.
+    """
+
+    __tablename__ = "annotations"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    source: Mapped[AnnotationSource] = mapped_column(String(16), default=AnnotationSource.user, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    members: Mapped[list["AnnotationNode"]] = relationship(back_populates="annotation", cascade="all, delete-orphan")
+
+
+class AnnotationNode(Base):
+    """Membership of one node in one annotation. Both FKs cascade: deleting a
+    node drops it out of any frame it was in (leaving the frame around the
+    remaining members), and deleting the annotation drops all its rows."""
+
+    __tablename__ = "annotation_nodes"
+
+    annotation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("annotations.id", ondelete="CASCADE"), primary_key=True
+    )
+    node_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("nodes.id", ondelete="CASCADE"), primary_key=True)
+
+    annotation: Mapped["Annotation"] = relationship(back_populates="members")
+
+
+class DescriptionSource(str, enum.Enum):
+    auto = "auto"
+    manual = "manual"
+
+
+class NodeTypeDescription(Base):
+    """What a node type actually does, in words.
+
+    Keyed by slug rather than being a column on NodeTemplate because native
+    node types have no NodeTemplate row at all -- this one table covers both
+    them and workflow-backed types.
+
+    Three sources, in descending priority: a description a person wrote
+    (manual_description, which freezes the entry -- it stops being regenerated
+    until explicitly reset), one an agent distilled (agent_description), and
+    otherwise an auto one derived from the workflows themselves at read time.
+
+    config_hash pins the agent's version to the configuration it was written
+    against: once the workflows change, that cached text is stale by
+    definition and is ignored rather than left to mislead.
+    """
+
+    __tablename__ = "node_type_descriptions"
+
+    node_type_slug: Mapped[str] = mapped_column(String(128), primary_key=True)
+    manual_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_source: Mapped[DescriptionSource] = mapped_column(String(16), default=DescriptionSource.auto, nullable=False)
+    config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

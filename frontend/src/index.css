@@ -994,3 +994,127 @@ th, td {
     max-height: 100vh;
   }
 }
+
+/* ---- Comment blocks (annotations) ---- */
+/* The frame is a grid item spanning its members' rows/columns, sitting behind
+   the cells. pointer-events: none so it never swallows a click meant for a
+   cell inside it -- only .annotation-label takes input. */
+.annotation-frame {
+  pointer-events: none;
+  position: relative;
+  z-index: 0;
+  border: 2px dashed var(--accent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  margin: -4px;
+}
+
+.annotation-frame.annotation-agent {
+  border-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 7%, transparent);
+}
+
+.annotation-label {
+  pointer-events: auto;
+  position: absolute;
+  top: -11px;
+  left: 10px;
+  max-width: calc(100% - 20px);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.annotation-agent .annotation-label {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.annotation-text {
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.annotation-actions {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.annotation-actions button {
+  font-size: 10px;
+  padding: 0 4px;
+}
+
+.cell-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+.selection-bar {
+  position: sticky;
+  top: 8px;
+  left: 8px;
+  z-index: 11;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin-top: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  font-size: 11px;
+  color: var(--text);
+}
+
+/* ---- Node type descriptions ---- */
+.node-type-description {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.description-text {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.description-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.description-actions button {
+  font-size: 10px;
+  padding: 1px 5px;
+}
+
+.description-facts summary {
+  cursor: pointer;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.description-facts ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 11px;
+  color: var(--text-dim);
+}

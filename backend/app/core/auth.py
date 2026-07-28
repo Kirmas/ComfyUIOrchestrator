@@ -9,7 +9,10 @@ PUBLIC_PATHS = {"/api/health"}
 async def auth_middleware(request: Request, call_next):
     settings = get_settings()
     path = request.url.path
-    if not path.startswith("/api/") and not path.startswith("/ws/"):
+    # /mcp is the MCP server (app/mcp/server.py). It must be behind the same
+    # token as /api: the unit binds 0.0.0.0, so an unguarded /mcp would hand
+    # any device on the LAN full node-creation and generation control.
+    if not path.startswith("/api/") and not path.startswith("/ws/") and not path.startswith("/mcp"):
         return await call_next(request)
     if path in PUBLIC_PATHS:
         return await call_next(request)

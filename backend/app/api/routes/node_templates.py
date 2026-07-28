@@ -6,11 +6,19 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.node_descriptions import resolve_descriptions, upsert_description
 from app.core.node_types import NATIVE_NODE_TYPES
 from app.core.workflow_analyzer import analyze_workflow
 from app.db.base import get_db
 from app.db.models import NodeTemplate
-from app.schemas.schemas import NodeTemplateCreate, NodeTemplateRead, NodeTemplateUpdate, WorkflowAnalysisOut
+from app.schemas.schemas import (
+    AgentDescriptionWrite,
+    ManualDescriptionWrite,
+    NodeTemplateCreate,
+    NodeTemplateRead,
+    NodeTemplateUpdate,
+    WorkflowAnalysisOut,
+)
 
 router = APIRouter(prefix="/api/node-templates", tags=["node_templates"])
 
@@ -62,6 +70,14 @@ async def list_node_templates(db: AsyncSession = Depends(get_db)):
         out.append(item)
     for native in NATIVE_NODE_TYPES.values():
         out.append(_native_template_read(native))
+
+    resolved = await resolve_descriptions(db, [(item.node_type_slug, item.name) for item in out])
+    for item in out:
+        entry = resolved.get(item.node_type_slug)
+        if entry:
+            item.description = entry.description
+            item.description_source = entry.source
+            item.fingerprint = entry.fingerprint
     return out
 
 
@@ -101,3 +117,75 @@ async def delete_node_template(template_id: uuid.UUID, db: AsyncSession = Depend
         raise HTTPException(404, "Node template not found")
     await db.delete(template)
     await db.commit()
+
+
+async def _resolve_one(db: AsyncSession, slug: str):
+    """A slug's own display name, whether it's a DB template or a native type."""
+    result = await db.execute(select(NodeTemplate).where(NodeTemplate.node_type_slug == slug))
+    template = result.scalar_one_or_none()
+    if template is not None:
+        name = template.name
+    elif slug in NATIVE_NODE_TYPES:
+        name = NATIVE_NODE_TYPES[slug].name
+    else:
+        raise HTTPException(404, f"Unknown node type: {slug}")
+    resolved = await resolve_descriptions(db, [(slug, name)])
+    return resolved[slug]
+
+
+@router.get("/by-slug/{slug}/description")
+async def get_description(slug: str, db: AsyncSession = Depends(get_db)):
+    entry = await _resolve_one(db, slug)
+    return {
+        "node_type_slug": slug,
+        "description": entry.description,
+        "description_source": entry.source,
+        "fingerprint": entry.fingerprint,
+        "config_hash": entry.config_hash,
+    }
+
+
+@router.patch("/by-slug/{slug}/description")
+async def set_manual_description(slug: str, payload: ManualDescriptionWrite, db: AsyncSession = Depends(get_db)):
+    """A hand-written description wins over everything else and stops being
+    regenerated -- until it's reset (DELETE below)."""
+    await _resolve_one(db, slug)  # 404s on an unknown slug before writing
+    await upsert_description(db, slug, manual=payload.description)
+    return await get_description(slug, db)
+
+
+@router.delete("/by-slug/{slug}/description")
+async def reset_description_to_auto(slug: str, db: AsyncSession = Depends(get_db)):
+    """Drop the hand-written text and let the description follow the workflows
+    again."""
+    await _resolve_one(db, slug)
+    await upsert_description(db, slug, reset_to_auto=True)
+    return await get_description(slug, db)
+
+
+@router.post("/by-slug/{slug}/agent-description")
+async def write_agent_description(slug: str, payload: AgentDescriptionWrite, db: AsyncSession = Depends(get_db)):
+    """Let an agent replace a long auto description with its own shorter
+    reading of the same thing.
+
+    The point is to save whoever reads this next from wading through the
+    original, so a candidate that isn't actually shorter than what the agent
+    read is refused. Length in characters, not words: JSON and graph dumps are
+    almost no words at all but plenty to read.
+    """
+    entry = await _resolve_one(db, slug)
+    candidate = payload.description.strip()
+    if not candidate:
+        raise HTTPException(422, "description must not be empty")
+
+    ceiling = max(payload.source_length, len(entry.description))
+    if len(candidate) >= ceiling:
+        raise HTTPException(
+            422,
+            f"description must be shorter than what it summarises ({len(candidate)} >= {ceiling} characters)",
+        )
+    if entry.source == "manual":
+        raise HTTPException(409, "this node type has a hand-written description; not overwriting it")
+
+    await upsert_description(db, slug, agent=candidate, config_hash=entry.config_hash)
+    return await get_description(slug, db)

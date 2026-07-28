@@ -18,6 +18,51 @@ Product overview & architecture: [README.md](README.md) — the source of truth 
 - **Any modal opened from `NodeCell.tsx` must render via `createPortal(..., document.body)`**, never inline in the cell's own JSX. A cell sits inside Grid's pan/zoom CSS transform (`Grid.tsx`); per the CSS transform spec, any ancestor transform (even a no-op `scale(1)`) establishes a new containing block for `position: fixed` descendants, so an inline (non-portaled) `.image-modal-backdrop` silently stops being viewport-relative and can open hundreds of pixels off-screen — only reproduces once the modal's content is tall enough to need `.params-modal-content`'s own scroll area, which is why it went unnoticed until `native.mask`'s paint canvas hit it (2026-07-21 incident; the params-modal `paramsOpen` block was the one `.image-modal-backdrop` usage in the file that wasn't portaled, unlike the other three).
 - **Portaling a modal to `document.body` does *not* remove it from Grid's drag-to-pan event handling.** `onBackgroundPointerDown` (Grid.tsx) arms a `window`-level pan drag on any pointerdown that bubbles up to the grid container without matching its exclusion selector — and React's *synthetic* event bubbling follows the React tree, not the real DOM tree, so a portaled child (still a React descendant of Grid) bubbles a pointerdown up to it regardless of where it actually sits in the DOM. Interactive content inside any modal (e.g. `MaskPreview.tsx`'s paint canvas) must therefore be covered by the `.image-modal-backdrop` entry already in `onBackgroundPointerDown`'s `closest()` exclusion list, or a pointerdown inside the modal visibly pans/drags the grid underneath it (2026-07-21 incident, found right after the createPortal fix above while testing `native.mask`'s paint canvas).
 
+## MCP server (`backend/app/mcp/`)
+
+An agent-facing MCP server runs **inside the same FastAPI process**, mounted at
+`/mcp` (streamable HTTP), behind the same bearer `API_TOKEN` — `core/auth.py`'s
+prefix check covers `/mcp` explicitly, which matters because the unit binds
+`0.0.0.0`. Its tools live in `app/mcp/tools.py` and almost all of them call this
+app's **own REST API in-process** via `app/mcp/client.py` (`httpx.ASGITransport`),
+so route validation stays the single source of truth instead of being mirrored.
+
+Two mounting gotchas, both already fixed — don't reintroduce them:
+- `FastMCP(..., streamable_http_path="/")`. The default is `/mcp`, which lands at
+  `/mcp/mcp` once the sub-app is itself mounted at `/mcp`.
+- A Starlette `Mount` only matches paths *below* its prefix, so exact `/mcp` never
+  reaches it and falls through to the frontend's catch-all `StaticFiles` mount,
+  which answers POST with **405**. `main.py` adds an explicit 307 redirect for the
+  no-trailing-slash form. This only reproduces when `FRONTEND_DIST_DIR` is set —
+  i.e. on prod but not on a bare dev run.
+
+`mcp==1.28.1` is pinned deliberately: it's the first release with all published
+transport advisories closed (unverified-session + DNS-rebinding in 1.27.2,
+Host/Origin validation in 1.28.1). It requires `pydantic>=2.11`; pulling it in
+also moved `fastapi` to 0.140.7 / `starlette` to 1.3.1, since starlette 0.41.x
+carried seven unfixed advisories (including an SSRF in `StaticFiles`, which this
+app uses to serve the frontend). `Pillow`/`python-multipart` were bumped for the
+same reason. Note fastapi 0.140 represents included routers as `_IncludedRouter`
+objects rather than flattening them into `app.routes` — route *counts* look
+wildly different, but routing is unchanged.
+
+## Dev environment (`backend/.venv` + `backend/.env`, both gitignored)
+
+The dev copy is runnable now: a venv plus a `.env` pointing at
+`sqlite+aiosqlite:///./dev.db` (the app supports SQLite as a documented
+fallback). Build the schema with `Base.metadata.create_all` rather than
+`alembic upgrade head` — the migration chain isn't SQLite-clean (0010 does an
+ALTER of constraints, unsupported there). Set `FRONTEND_DIST_DIR` in dev too, or
+prod-only routing bugs like the `/mcp` 405 above stay invisible.
+
+Migrations are still validated against the real Postgres with the
+`BEGIN … ROLLBACK` technique (`alembic upgrade X:Y --sql`, swap COMMIT for
+ROLLBACK, probe the new tables inside the transaction) before any deploy.
+
+`scripts/mcp_smoke_test.py` drives a scratch project end-to-end through the MCP
+tools and deletes it afterwards:
+`backend/.venv/bin/python scripts/mcp_smoke_test.py http://127.0.0.1:8011 dev-local-token`
+
 ## Where this code runs
 
 This working copy (`~/comfy-orchestrator`) is the **development copy**, owned by `keresh`, editable directly (no sudo). It is separate from the **live production copy** at `/opt/comfy-orchestrator`, owned by the `orchestrator` system user, run as systemd unit `comfy-orchestrator-api`. The two are not symlinked or synced automatically — deploying means copying dev → prod on purpose (see below).

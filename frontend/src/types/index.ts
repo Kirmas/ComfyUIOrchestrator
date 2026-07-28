@@ -62,6 +62,14 @@ export interface NodeTemplate {
   param_schema: ParamSchema;
   defaults: Record<string, unknown>;
   created_at: string;
+  // What this node type does. Resolved server-side from the best available
+  // source -- hand-written, agent-distilled, or derived from the workflows --
+  // with description_source saying which. fingerprint holds the derived facts
+  // behind it (model, LoRAs, image inputs, prompt), values shown per backend
+  // where the backends differ.
+  description?: string;
+  description_source?: "auto" | "manual" | "agent";
+  fingerprint?: Record<string, string>;
   // "template.<slug>" for a real DB-backed type, "native.<slug>" for one
   // synthesized from the backend's native registry (no DB row behind it).
   node_type: string;
@@ -80,6 +88,21 @@ export interface Project {
 export interface GridLayout {
   spans: Record<string, { desired: number; achieved: number }>;
   blocked_cells: [number, number][];
+}
+
+// A comment block: text attached to a set of nodes, drawn as a frame around
+// them. No coordinates -- the frame is derived from where its members
+// currently sit, so it follows them when they move. "agent" ones are cells an
+// agent flagged as needing a look; they're the same object as a hand-written
+// note and are reviewed together.
+export interface Annotation {
+  id: string;
+  project_id: string;
+  text: string;
+  source: "user" | "agent";
+  node_ids: string[];
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Track {
