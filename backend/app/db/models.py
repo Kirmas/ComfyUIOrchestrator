@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -273,10 +273,29 @@ class Asset(Base):
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("nodes.id", ondelete="CASCADE"), nullable=True)
+    # Set instead of node_id for a project-scoped library asset -- one that no
+    # grid cell owns, uploaded straight onto the idea board (see Board below).
+    # Exactly one of the two is set in practice: node_id for generated/uploaded
+    # cell output, project_id for board media. They are deliberately NOT both
+    # set on one row: node_id cascades on cell deletion, so a board image that
+    # a cell also owned would vanish from the board the moment that cell was
+    # deleted. The grid only ever *references* library assets (asset.refasset),
+    # never owns them, which is why there is no "send this output to the board"
+    # direction at all (roadmap.md §1).
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
+    )
     storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
     kind: Mapped[AssetKind] = mapped_column(String(32), default=AssetKind.image, nullable=False)
     selected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Free-form labels, only meaningful for project-scoped library assets: the
+    # board shows them by position, the grid's "з референсів" picker shows the
+    # same assets as a flat filterable list (one storage, two presentations --
+    # roadmap.md §1). Filtering happens in Python, not SQL: a project's library
+    # is hundreds of rows at most, and a JSON containment predicate that works
+    # on both Postgres and the SQLite dev fallback isn't worth writing.
+    tags: Mapped[list] = mapped_column(JSONVariant, default=list, nullable=False)
     meta: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -345,6 +364,106 @@ class AnnotationNode(Base):
     node_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("nodes.id", ondelete="CASCADE"), primary_key=True)
 
     annotation: Mapped["Annotation"] = relationship(back_populates="members")
+
+
+class BoardItemKind(str, enum.Enum):
+    """What one sticker *is*. A sticker holds exactly one kind of content --
+    there is no mixed card -- so this doubles as the content-type discriminator
+    (roadmap.md §1)."""
+
+    text = "text"  # markdown body, optionally tagged for prompt macros
+    image = "image"
+    audio = "audio"
+    video = "video"  # no 3D on purpose: a model-viewer per sticker would sink the board
+    frame = "frame"  # the lasso drawn around a group; rect or ellipse, see BoardItem.shape
+    ink = "ink"  # freehand stroke, no semantics at all
+    connector = "connector"  # source_item -> target_item, anchored to the items themselves
+    comment = "comment"  # a remark about target_item, no position of its own
+
+
+class Board(Base):
+    """One idea board per project. Not "for now": a second board per project was
+    considered and dropped, so the row is created on first access and nothing
+    ever offers another.
+
+    The board is where pre-production lives: the idea, the references, the
+    divergence. The grid stays convergent-by-construction and is a poor fit for
+    any of that; see roadmap.md §1 for why this reversed the earlier
+    "no separate view" decision.
+    """
+
+    __tablename__ = "boards"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), default="Ideas", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    items: Mapped[list["BoardItem"]] = relationship(back_populates="board", cascade="all, delete-orphan")
+
+
+class BoardItem(Base):
+    """A sticker on the board.
+
+    Unlike a grid node -- whose position is *derived* from track_id/step_index
+    and may never be a stored display-only override -- a sticker's x/y IS its
+    only truth. Nothing computes it, nothing validates it against a layout, and
+    that freedom is the entire point of the board.
+
+    The two self-FKs cascade, so deleting a sticker takes its connectors and its
+    comments with it instead of leaving them dangling at coordinates that no
+    longer mean anything. They're real columns rather than ids buried in
+    `content` precisely so the database enforces that.
+    """
+
+    __tablename__ = "board_items"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    board_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("boards.id", ondelete="CASCADE"), nullable=False)
+    kind: Mapped[BoardItemKind] = mapped_column(String(16), nullable=False)
+
+    x: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    y: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    w: Mapped[float] = mapped_column(Float, default=220.0, nullable=False)
+    h: Mapped[float] = mapped_column(Float, default=180.0, nullable=False)
+    z: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    color: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    # text stickers
+    text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Handle for the `{tag}` prompt macro (bridge 2 in roadmap.md §1). Unique
+    # per board at the DB level; the route additionally rejects a tag already
+    # used on another board of the same project, because a macro resolves
+    # against the project, not one board -- two stickers answering to {head}
+    # would make it ambiguous which text a run actually used.
+    tag: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # image/audio/video stickers -- always a project-scoped Asset (Asset.project_id)
+    asset_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), nullable=True)
+
+    # frame: "rect" | "ellipse". One entity, two renderings -- not two kinds.
+    shape: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # ink: an SVG path in board coordinates, plus stroke width in `w`-independent
+    # px. Erasing is per-stroke (delete the row); there is no raster layer.
+    path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stroke_width: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    source_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("board_items.id", ondelete="CASCADE", use_alter=True, name="fk_board_items_source_item"),
+        nullable=True,
+    )
+    target_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("board_items.id", ondelete="CASCADE", use_alter=True, name="fk_board_items_target_item"),
+        nullable=True,
+    )
+
+    source: Mapped[AnnotationSource] = mapped_column(String(16), default=AnnotationSource.user, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    board: Mapped["Board"] = relationship(back_populates="items")
+
+    __table_args__ = (UniqueConstraint("board_id", "tag", name="uq_board_items_board_tag"),)
 
 
 class DescriptionSource(str, enum.Enum):

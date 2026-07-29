@@ -18,6 +18,58 @@ Product overview & architecture: [README.md](README.md) — the source of truth 
 - **Any modal opened from `NodeCell.tsx` must render via `createPortal(..., document.body)`**, never inline in the cell's own JSX. A cell sits inside Grid's pan/zoom CSS transform (`Grid.tsx`); per the CSS transform spec, any ancestor transform (even a no-op `scale(1)`) establishes a new containing block for `position: fixed` descendants, so an inline (non-portaled) `.image-modal-backdrop` silently stops being viewport-relative and can open hundreds of pixels off-screen — only reproduces once the modal's content is tall enough to need `.params-modal-content`'s own scroll area, which is why it went unnoticed until `native.mask`'s paint canvas hit it (2026-07-21 incident; the params-modal `paramsOpen` block was the one `.image-modal-backdrop` usage in the file that wasn't portaled, unlike the other three).
 - **Portaling a modal to `document.body` does *not* remove it from Grid's drag-to-pan event handling.** `onBackgroundPointerDown` (Grid.tsx) arms a `window`-level pan drag on any pointerdown that bubbles up to the grid container without matching its exclusion selector — and React's *synthetic* event bubbling follows the React tree, not the real DOM tree, so a portaled child (still a React descendant of Grid) bubbles a pointerdown up to it regardless of where it actually sits in the DOM. Interactive content inside any modal (e.g. `MaskPreview.tsx`'s paint canvas) must therefore be covered by the `.image-modal-backdrop` entry already in `onBackgroundPointerDown`'s `closest()` exclusion list, or a pointerdown inside the modal visibly pans/drags the grid underneath it (2026-07-21 incident, found right after the createPortal fix above while testing `native.mask`'s paint canvas).
 
+## Idea board (`backend/app/api/routes/boards.py`, `frontend/src/components/Board.tsx`)
+
+Pre-production — the idea, the references, the divergence — lives on a separate
+**Board** view per project, not in the grid (`roadmap.md` §1 explains why this
+reversed the earlier "everything in the grid" decision). The grid is convergent
+by construction; a **sticker's `x`/`y` is its only truth**, nothing derives or
+validates it, which is the exact opposite of the grid's rule that a node's
+position is always `track_id` + `step_index`. Don't "fix" one to match the other.
+
+- A `BoardItem` holds **exactly one content type** (`kind`): `text` (markdown),
+  `image`/`audio`/`video` (→ a project asset), `frame` (the lasso, rect or
+  ellipse), `ink` (freehand, no semantics, erased per-stroke), `connector`
+  (anchored to two items so it follows them), `comment` (anchored to one).
+  Connectors/comments are `board_items` rows with self-FKs, not their own table,
+  so one request loads a whole board and both cascade when their anchor dies.
+- **`Asset.project_id` vs `Asset.node_id`**: alternatives, never both.
+  `node_id` is `ondelete=CASCADE`, so an asset owned by a grid cell would be
+  destroyed when that cell is deleted. The board owns library assets; **the grid
+  only ever references them** (`asset.refasset` with
+  `inputs=[{type:"explicit", output_id}]` and no `node_id` — both
+  `_explicit_ref_asset` and `resolveSlotAsset` already resolve by asset id
+  alone). There is deliberately **no "send a generated output to the board"**
+  direction; that was the only thing that made this hazardous.
+- **Prompt bridge**: `core/idea_macros.py` strips markdown and expands `{tag}`
+  macros against the project's tagged text stickers. It runs at **run time in
+  `resolve_node_inputs`**, on the node instance's own text params — never in a
+  capability's baked `workflow_json`, which is global and would leak one
+  project's character description into every other project using it. Tags are
+  unique project-wide (enforced in `boards.py`, on top of a per-board DB
+  constraint) because a macro resolves against the project. An unknown `{tag}`
+  is left **literal**, never expanded to empty — a quietly emptied prompt
+  generates the wrong thing unnoticed. `POST /api/projects/{id}/resolve-macros`
+  serves the node-config preview from that same function so preview and run
+  can't drift.
+- `frontend/src/markdown.ts` is a deliberately tiny escape-then-format renderer,
+  not `marked`: a real renderer passes raw HTML through and would need a
+  sanitizer too — two dependencies to un-bold a sticker, on a box where
+  `vite build` has been OOM-killed.
+- A sticker's root carries `board-kind-<kind>`, **not** `board-sticker-<kind>`:
+  the latter collides with `.board-sticker-text`, the class of a note's own body
+  field, so the root of every text note matched every rule and selector meant for
+  the field — including the "don't start a drag here" list, which made text notes
+  the only kind that could not be dragged or selected at all.
+- Empty canvas is `.board-plane` (or `.board-svg`), never the container element:
+  the plane covers the container edge to edge, so `e.target === containerRef.current`
+  is never true and any check written that way silently disables itself.
+- Board connectors are drawn from stored coordinates, **not** via
+  `ArrowsOverlay.tsx` (it measures the DOM and re-polls every 500 ms — fine for
+  the grid, visibly laggy while dragging). `usePinchPan` is shared, generalized
+  with `{minZoom, maxZoom, panAtMinZoom}`; the board is the one caller that pans
+  at min zoom.
+
 ## MCP server (`backend/app/mcp/`)
 
 An agent-facing MCP server runs **inside the same FastAPI process**, mounted at

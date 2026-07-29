@@ -6,6 +6,7 @@ import { resolveSlotAsset } from "../slotResolution";
 import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project, Track } from "../types";
 import { cx } from "../utils";
 import { AnnotationFrame } from "./AnnotationFrame";
+import { ReferencePicker } from "./ReferencePicker";
 import { ArrowsOverlay, type Edge } from "./ArrowsOverlay";
 import { CompareModal } from "./CompareModal";
 import { NodeCell } from "./NodeCell";
@@ -90,6 +91,8 @@ export function Grid({ projectId }: { projectId: string }) {
   // clicking any reachable empty cell, which creates a RefAsset there instead
   // of relocating the original.
   const [refFor, setRefFor] = useState<{ nodeId: string } | null>(null);
+  // Which empty cell the "з референсів" picker is filling, if open.
+  const [pickRefAt, setPickRefAt] = useState<{ row: number; step: number } | null>(null);
   // How many leading columns an as-yet-empty track should skip before its
   // first real cell -- purely a UI notion (never sent to the backend on its
   // own): a track only gets a step_index once a node actually exists at it,
@@ -487,7 +490,10 @@ export function Grid({ projectId }: { projectId: string }) {
     for (const node of Object.values(nodesById)) {
       if (node.node_type !== "asset.refasset") continue;
       const ref = node.inputs[0];
-      if (ref?.type === "explicit") result.push({ from: ref.node_id, to: node.id, kind: "ref" });
+      // No node_id means it points at a library asset, which has no owning
+      // cell anywhere in the grid -- there's nothing on screen to draw an
+      // arrow back to, so it just renders as an ordinary reference card.
+      if (ref?.type === "explicit" && ref.node_id) result.push({ from: ref.node_id, to: node.id, kind: "ref" });
     }
 
     return result;
@@ -866,6 +872,27 @@ export function Grid({ projectId }: { projectId: string }) {
     addNode(refNode);
   };
 
+  /** Places a library asset (one the idea board owns) in a cell.
+   *
+   * Same node shape as createRefAssetAt above, minus node_id: a library asset
+   * has no owning node, and `explicit` refs resolve straight by asset id on
+   * both ends (_explicit_ref_asset in worker/tasks.py, resolveSlotAsset here).
+   * A refasset rather than a real asset node is the whole point -- Asset.node_id
+   * cascades, so a cell that OWNED a board image would destroy it on deletion.
+   */
+  const placeLibraryAssetAt = async (asset: Asset, row: number, step: number) => {
+    const targetTrack = trackByRowIndex.get(row);
+    if (!targetTrack) return;
+    const refNode = await nodesApi.create({
+      track_id: targetTrack.id,
+      step_index: step,
+      kind: "asset",
+      node_type: "asset.refasset",
+      inputs: [{ type: "explicit", output_id: asset.id }],
+    });
+    addNode(refNode);
+  };
+
   const onStartRef = (node: NodeItem) => setRefFor({ nodeId: node.id });
 
   const completeRefAt = async (row: number, step: number) => {
@@ -1184,18 +1211,27 @@ export function Grid({ projectId }: { projectId: string }) {
                   place ref here
                 </button>
               ) : (
-                <button
-                  style={{ fontSize: 10, padding: "1px 4px", opacity: 0.6 }}
-                  title="Load an asset here manually -- not tied to the adjacent workflow node's output"
-                  onClick={async () => {
-                    const targetTrack = trackByRowIndex.get(row);
-                    if (!targetTrack) return;
-                    const created = await nodesApi.create({ track_id: targetTrack.id, step_index: step, kind: "asset" });
-                    addNode(created);
-                  }}
-                >
-                  + asset
-                </button>
+                <>
+                  <button
+                    style={{ fontSize: 10, padding: "1px 4px", opacity: 0.6 }}
+                    title="Load an asset here manually -- not tied to the adjacent workflow node's output"
+                    onClick={async () => {
+                      const targetTrack = trackByRowIndex.get(row);
+                      if (!targetTrack) return;
+                      const created = await nodesApi.create({ track_id: targetTrack.id, step_index: step, kind: "asset" });
+                      addNode(created);
+                    }}
+                  >
+                    + asset
+                  </button>
+                  <button
+                    style={{ fontSize: 10, padding: "1px 4px", opacity: 0.6, marginLeft: 4 }}
+                    title="Place an image from the project's reference library (the idea board's)"
+                    onClick={() => setPickRefAt({ row, step })}
+                  >
+                    з референсів
+                  </button>
+                </>
               )}
             </div>
           ))}
@@ -1377,6 +1413,17 @@ export function Grid({ projectId }: { projectId: string }) {
       </div>
 
       {comparePair && <CompareModal left={comparePair[0]} right={comparePair[1]} onClose={() => setComparePair(null)} />}
+      {pickRefAt && (
+        <ReferencePicker
+          projectId={projectId}
+          onClose={() => setPickRefAt(null)}
+          onPick={async (asset) => {
+            const target = pickRefAt;
+            setPickRefAt(null);
+            await placeLibraryAssetAt(asset, target.row, target.step);
+          }}
+        />
+      )}
     </div>
   );
 }

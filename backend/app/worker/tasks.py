@@ -14,6 +14,7 @@ from app.core.job_backend import JobStatus as BackendJobStatus
 from app.core.node_types import resolve_effective_template, sync_legacy_fields
 from app.core.queue import job_queue
 from app.core.storage import get_storage
+from app.core.idea_macros import apply_macros, project_idea_texts
 from app.core.template_engine import validate_params
 from app.core.track_order import ordered_tracks, splice_after
 from app.core.ws_manager import ws_manager
@@ -417,6 +418,27 @@ async def resolve_node_inputs(db, node: Node, param_schema: dict[str, Any] | Non
         resolved[field_name] = random.randint(0, MAX_SEED_VALUE)
 
     track = await db.get(Track, node.track_id)
+
+    # `{tag}` macros pointing at idea-board stickers are expanded here, at run
+    # time, in this node instance's own params -- never in the capability's
+    # baked workflow_json, which is global and would leak one project's
+    # character description into every other project sharing that capability
+    # (roadmap.md §1, bridge 2). Text-typed fields only: nothing else can
+    # meaningfully contain prose.
+    text_fields = [f["name"] for f in fields if f.get("type") == "text"]
+    macro_fields = [f for f in text_fields if isinstance(resolved.get(f), str) and "{" in resolved[f]]
+    if macro_fields:
+        idea_texts = await project_idea_texts(db, track.project_id)
+        for field_name in macro_fields:
+            expanded, unresolved = apply_macros(resolved[field_name], idea_texts)
+            resolved[field_name] = expanded
+            if unresolved:
+                logger.warning(
+                    "node %s field '%s': no idea sticker tagged %s -- left as written",
+                    node.id,
+                    field_name,
+                    ", ".join(f"{{{t}}}" for t in unresolved),
+                )
 
     for i, field_name in enumerate(slot_fields):
         if i >= len(node.inputs or []):

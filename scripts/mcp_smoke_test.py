@@ -115,6 +115,41 @@ async def main(base_url: str, token: str) -> int:
                 flags = payload(await session.call_tool("list_flags", {"project_id": project_id}))
                 check("list_flags returns it", any(f["id"] == flag["id"] for f in flags))
 
+                # Idea board (roadmap.md §1): a sticker the agent wrote, a
+                # comment on it, and the project-wide uniqueness of a {tag}.
+                board = payload(await session.call_tool("get_board", {"project_id": project_id}))
+                check("get_board creates one on first access", bool(board.get("id")))
+
+                note = payload(
+                    await session.call_tool(
+                        "create_note",
+                        {"board_id": board["id"], "text": "**smoke** brow", "tag": "smoke_head", "x": 20, "y": 20},
+                    )
+                )
+                check("create_note", note.get("tag") == "smoke_head" and note.get("source") == "agent")
+
+                dup = await session.call_tool(
+                    "create_note", {"board_id": board["id"], "text": "other", "tag": "smoke_head"}
+                )
+                check("duplicate {tag} is refused", dup.isError is True)
+
+                comment = payload(
+                    await session.call_tool(
+                        "comment_on_board_item",
+                        {"board_id": board["id"], "item_id": note["id"], "text": "too vague"},
+                    )
+                )
+                check("comment_on_board_item", comment.get("target_item_id") == note["id"])
+
+                items = payload(await session.call_tool("list_board_items", {"board_id": board["id"]}))
+                check("list_board_items sees both", len(items) == 2, f"{len(items)} items")
+
+                # Deleting the sticker must take its comment with it (self-FK
+                # cascade), not leave it anchored to nothing.
+                await session.call_tool("delete_board_item", {"item_id": note["id"]})
+                left = payload(await session.call_tool("list_board_items", {"board_id": board["id"]}))
+                check("deleting a sticker cascades to its comment", left == [], str(left)[:60])
+
                 # Cost guard: a paid run while unattended must be refused outright.
                 blocked = payload(
                     await session.call_tool(

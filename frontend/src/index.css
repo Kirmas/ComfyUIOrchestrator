@@ -1118,3 +1118,612 @@ th, td {
   font-size: 11px;
   color: var(--text-dim);
 }
+
+/* ---------- Idea board (roadmap.md §1) ---------- */
+/* A sticker's left/top ARE its position -- unlike the grid, where a node's
+   place is derived from track_id/step_index and a stored coordinate would be a
+   bug. The board is the one place free positioning is the point. */
+
+.board-area {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.board-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  z-index: 3;
+}
+
+.board-toolbar button {
+  font-size: 12px;
+  padding: 3px 8px;
+}
+
+.board-toolbar button.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.board-toolbar-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.board-colors {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.board-color {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+}
+
+.board-color.active {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+
+.board-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.board-error {
+  color: var(--danger);
+  font-size: 11px;
+  cursor: pointer;
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-canvas {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+  touch-action: none;
+  background:
+    radial-gradient(circle, color-mix(in srgb, var(--text-dim) 30%, transparent) 1px, transparent 1px)
+    0 0 / 24px 24px;
+}
+
+.board-canvas.grabbing {
+  cursor: grabbing;
+}
+
+.board-canvas.drawing {
+  cursor: crosshair;
+}
+
+.board-plane {
+  position: absolute;
+  inset: 0;
+  transform-origin: center center;
+}
+
+/* The svg layer holds ink and connectors. It must not eat pointer events meant
+   for stickers -- only the ink strokes themselves opt back in, so a stroke can
+   be clicked to erase it (erasing is per-stroke; there is no raster layer). */
+.board-svg {
+  position: absolute;
+  left: -5000px;
+  top: -5000px;
+  width: 10000px;
+  height: 10000px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.board-canvas.erasing {
+  cursor: crosshair;
+}
+
+.board-tool-group {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.board-tool-group button {
+  min-width: 26px;
+}
+
+.board-sticker {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border-radius: 4px;
+  background: #f6d36b;
+  color: #1b1f24;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.25);
+  /* Everything on a card is a drag surface except the parts that aren't: the
+     text field and the controls each declare their own cursor and opt out of
+     dragging themselves. The empty space below a short note is the card, so it
+     drags and selects like the header does -- it was dead space otherwise. */
+  cursor: grab;
+  overflow: hidden;
+  touch-action: none;
+}
+
+.board-sticker.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.board-sticker.from-agent {
+  border-left: 4px solid var(--warning);
+}
+
+/* The drag handle, and the only part of a sticker that is one. */
+.board-sticker-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 2px 6px;
+  background: rgb(0 0 0 / 0.14);
+  border-bottom: 1px solid rgb(0 0 0 / 0.12);
+  cursor: grab;
+}
+
+.board-sticker:active,
+.board-sticker-bar:active {
+  cursor: grabbing;
+}
+
+.board-drag-dots {
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.45;
+  letter-spacing: -1px;
+}
+
+/* Media has no editable body, so the picture drags too -- there's nothing
+   underneath it to click into. */
+.board-sticker img,
+.board-sticker video {
+  cursor: grab;
+}
+
+.board-sticker-actions {
+  margin-left: auto;
+}
+
+.board-tag {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgb(0 0 0 / 0.12);
+}
+
+.board-sticker-actions {
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.board-sticker:hover .board-sticker-actions {
+  opacity: 1;
+}
+
+.board-sticker-actions button {
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 5px;
+  background: rgb(255 255 255 / 0.6);
+  border: none;
+  border-radius: 4px;
+  color: #1b1f24;
+}
+
+.board-sticker-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 5px 5px 0;
+  padding: 4px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 0.5);
+}
+
+.board-tag-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.board-tag-field input {
+  width: 90px;
+  font-size: 11px;
+  padding: 1px 4px;
+}
+
+.board-sticker-text {
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  /* Reads as the input it is: inset, its own surface, text cursor. The editor
+     below uses identical metrics so nothing shifts when it opens. */
+  margin: 5px;
+  padding: 4px 5px;
+  border-radius: 3px;
+  background: rgb(255 255 255 / 0.42);
+  min-height: 42px;
+  cursor: text;
+}
+
+.board-sticker-text:hover {
+  background: rgb(255 255 255 / 0.62);
+}
+
+.board-sticker-text h3,
+.board-sticker-text h4,
+.board-sticker-text h5,
+.board-sticker-text h6 {
+  margin: 2px 0;
+  font-size: 14px;
+}
+
+.board-sticker-text p {
+  margin: 3px 0;
+}
+
+.board-sticker-text ul,
+.board-sticker-text ol {
+  margin: 3px 0;
+  padding-left: 18px;
+}
+
+.board-sticker-text code {
+  background: rgb(0 0 0 / 0.1);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+.board-empty {
+  color: rgb(0 0 0 / 0.4);
+  font-style: italic;
+}
+
+.board-sticker-editor {
+  flex: 1;
+  min-height: 96px;
+  resize: none;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.35;
+  margin: 5px;
+  padding: 4px 5px;
+  border: none;
+  border-radius: 3px;
+  background: rgb(255 255 255 / 0.85);
+  color: #1b1f24;
+}
+
+.board-sticker img,
+.board-sticker video {
+  width: 100%;
+  display: block;
+}
+
+.board-sticker audio {
+  width: calc(100% - 10px);
+  margin: 5px;
+}
+
+.board-comments {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0 5px 5px;
+}
+
+.board-comment {
+  display: flex;
+  gap: 3px;
+  align-items: flex-start;
+}
+
+.board-comment textarea {
+  flex: 1;
+  min-height: 34px;
+  font: inherit;
+  font-size: 11px;
+  border: none;
+  border-radius: 3px;
+  padding: 3px;
+  background: rgb(255 255 255 / 0.85);
+  color: #1b1f24;
+}
+
+.board-comment.from-agent textarea {
+  border-left: 3px solid var(--warning);
+}
+
+.board-comment button {
+  font-size: 10px;
+  padding: 1px 4px;
+  border: none;
+  background: transparent;
+  color: #1b1f24;
+}
+
+/* Erasable marks (freehand strokes and circles): an invisible fat stroke laid
+   over the visible thin one, because a 3px line is nearly impossible to hit.
+   Only rendered while the eraser is active. */
+.board-erasable {
+  stroke: transparent;
+  stroke-width: 18;
+  pointer-events: stroke;
+  cursor: crosshair;
+}
+
+/* The reference picker: the flat, filterable view of the same library the
+   board shows by position. */
+.reference-picker {
+  min-width: min(560px, 92vw);
+}
+
+.reference-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.reference-tags button {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 10px;
+}
+
+.reference-tags button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.reference-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 6px;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+
+.reference-item {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg);
+  aspect-ratio: 1;
+}
+
+.reference-item:hover {
+  border-color: var(--accent);
+}
+
+.reference-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* "З ідей": pulling a board sticker's text into a node's prompt field. */
+.idea-picker-anchor {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+.idea-picker-open {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+
+.idea-picker {
+  position: absolute;
+  top: 22px;
+  left: 0;
+  z-index: 5;
+  width: min(360px, 80vw);
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.28);
+}
+
+.idea-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.idea-picker-list {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.idea-picker-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  padding: 3px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.idea-picker-row:hover,
+.idea-picker-row.picked {
+  background: var(--accent-dim);
+}
+
+.idea-picker-text {
+  display: block;
+  overflow: hidden;
+  max-height: 3.2em;
+}
+
+.idea-picker-text code {
+  margin-right: 5px;
+  font-size: 11px;
+}
+
+.idea-picker-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.idea-picker-actions button {
+  font-size: 11px;
+}
+
+/* The guardrail that makes the {tag} mode honest: a macro can never hide what
+   will actually run. Resolved server-side, by the function the worker calls. */
+.macro-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-left: 2px solid var(--border);
+  padding-left: 6px;
+}
+
+.macro-preview-label {
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 10px;
+}
+
+.macro-preview-missing {
+  color: var(--danger);
+}
+
+/* Resize handle. Its own pointer events must not reach the sticker's drag
+   handler or the canvas pan below it -- both are stopped in BoardSticker. */
+.board-resize {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  cursor: nwse-resize;
+  touch-action: none;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+/* The visible box stays 14px (a bigger square would look clumsy on a sticker),
+   but the tappable area is a lot bigger: a ::before with negative inset,
+   invisible, real hit-testing target. Pseudo-elements aren't separate DOM
+   nodes, so a tap landing on one still fires the handle's own pointer
+   handlers -- this only widens the target, it doesn't need a second set of
+   listeners. Sized for a finger (~40px), not a mouse cursor, which is the
+   whole gap: a mouse can place a pixel exactly, a fingertip can't get
+   anywhere near a 14px square at anything but a very tall zoom. */
+.board-resize::before,
+.board-grip::before {
+  content: "";
+  position: absolute;
+  inset: -14px;
+}
+
+.board-sticker:hover .board-resize,
+.board-sticker.selected .board-resize {
+  opacity: 1;
+}
+
+/* A circle's outline is drawn in the SVG layer, not here -- this box is
+   invisible and exists only to carry the two grips. Same rule as the grid's
+   .annotation-frame: a shape drawn AROUND stickers must not swallow the clicks
+   meant for them, and an ellipse border can't be targeted separately in CSS, so
+   a whole-box hit area would make every sticker inside it unclickable. */
+.board-frame-grips {
+  position: absolute;
+  pointer-events: none;
+}
+
+.board-frame-grips .board-resize,
+.board-frame-grips .board-grip {
+  pointer-events: auto;
+  opacity: 1;
+}
+
+/* A card clips to its own rounded corners (so the header band and any image
+   inside follow them), which would also clip a handle hanging off the edge --
+   so on a card the handle sits just inside it instead. A drawn mark's grips
+   have no such box and keep their outside position. */
+.board-sticker .board-resize {
+  right: 2px;
+  bottom: 2px;
+}
+
+.board-grip {
+  position: absolute;
+  left: -3px;
+  top: -3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  cursor: grab;
+  touch-action: none;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+
+
+.board-tag-field-wide input {
+  width: 150px;
+}
+
+/* Library labels shown on the sticker's face -- the same strings the grid's
+   reference picker filters on. */
+.board-asset-tags {
+  font-size: 10px;
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

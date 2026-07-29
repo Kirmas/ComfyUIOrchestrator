@@ -12,6 +12,7 @@ import { cx } from "../utils";
 import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
 import { CropPreview, type CropBox } from "./CropPreview";
 import { MaskPreview } from "./MaskPreview";
+import { IdeaTextPicker, MacroPreview } from "./IdeaTextPicker";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
 import { Model3DThumb } from "./Model3DThumb";
 import { ZoomableImage } from "./ZoomableImage";
@@ -549,6 +550,11 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   // fields, variants, backend) lives behind this modal so the node stays the
   // same footprint whether it has 2 fields or 20.
   const [paramsOpen, setParamsOpen] = useState(false);
+  // Which text field currently has the "з ідей" picker open, if any.
+  const [ideaPickerField, setIdeaPickerField] = useState<string | null>(null);
+  // A node's project is reached through its track, the same way every other
+  // handler in this file does it -- the cell isn't handed one directly.
+  const projectId = tracks.find((t) => t.id === node.track_id)?.project_id ?? null;
   // Read-only peek at the 3 hidden cells of a collapsed chain (this node,
   // the pass-through asset, the consumer workflow -- see collapseInfo's
   // docstring) -- no editing, no slot resolution, just "what was this".
@@ -817,6 +823,33 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                 value={(node.params[field.name] as string) ?? ""}
                 onChange={(e) => updateParam(field.name, e.target.value)}
               />
+              {/* Bridge 2 of the idea board: prompt text can come from a
+                  sticker, by value (frozen) or by {tag} (resolved at run
+                  time, with the preview below showing what that expands to).
+                  Scoped to this node instance's own params -- never to the
+                  capability's baked workflow_json, which is global and would
+                  leak one project's description into every other project. */}
+              {projectId && (
+                <div className="idea-picker-anchor">
+                  <button
+                    type="button"
+                    className="idea-picker-open"
+                    onClick={() => setIdeaPickerField((f) => (f === field.name ? null : field.name))}
+                    title="Взяти текст із дошки ідей"
+                  >
+                    з ідей
+                  </button>
+                  {ideaPickerField === field.name && (
+                    <IdeaTextPicker
+                      projectId={projectId}
+                      value={(node.params[field.name] as string) ?? ""}
+                      onInsert={(next) => updateParam(field.name, next)}
+                      onClose={() => setIdeaPickerField(null)}
+                    />
+                  )}
+                  <MacroPreview projectId={projectId} text={(node.params[field.name] as string) ?? ""} />
+                </div>
+              )}
               {isMultiAngle && (
                 <MultiAngleBuilder
                   value={(node.params[field.name] as string) ?? ""}

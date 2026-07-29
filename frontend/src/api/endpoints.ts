@@ -3,11 +3,16 @@ import type {
   Annotation,
   Asset,
   Backend,
+  Board,
+  BoardItem,
+  BoardItemKind,
   Capability,
   DetectedField,
   GridLayout,
+  IdeaText,
   InputRef,
   Job,
+  MacroResolveResult,
   NodeItem,
   NodeKind,
   NodeTemplate,
@@ -154,7 +159,36 @@ export const assetsApi = {
   get: (id: string) => api.get<Asset>(`/api/assets/${id}`),
   select: (id: string, selected: boolean) => api.patch<Asset>(`/api/assets/${id}/select`, { selected }),
   move: (id: string, nodeId: string) => api.post<Asset>(`/api/assets/${id}/move`, { node_id: nodeId }),
+  setTags: (id: string, tags: string[]) => api.patch<Asset>(`/api/assets/${id}/tags`, { tags }),
   remove: (id: string) => api.delete(`/api/assets/${id}`),
+};
+
+// The idea board and the project asset library it owns (roadmap.md §1). Note
+// there is no "send a grid output to the board" call on purpose: the grid only
+// ever references library assets, never owns them.
+export const boardApi = {
+  get: (projectId: string) => api.get<Board>(`/api/projects/${projectId}/board`),
+  items: (boardId: string) => api.get<BoardItem[]>(`/api/boards/${boardId}/items`),
+  createItem: (boardId: string, data: Partial<BoardItem> & { kind: BoardItemKind }) =>
+    api.post<BoardItem>(`/api/boards/${boardId}/items`, data),
+  updateItem: (itemId: string, data: Partial<BoardItem>) => api.patch<BoardItem>(`/api/board-items/${itemId}`, data),
+  removeItem: (itemId: string) => api.delete(`/api/board-items/${itemId}`),
+
+  // Project-scoped assets: no node, no cell, no column parity -- this is what
+  // makes collecting loose references possible at all.
+  assets: (projectId: string, tag?: string) =>
+    api.get<Asset[]>(`/api/projects/${projectId}/assets${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`),
+  uploadAsset: (projectId: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return api.postForm<Asset>(`/api/projects/${projectId}/assets`, form);
+  },
+
+  ideaTexts: (projectId: string) => api.get<IdeaText[]>(`/api/projects/${projectId}/idea-texts`),
+  // Resolved server-side so the preview shown in a node's config is literally
+  // the same computation the worker runs -- a macro must never hide what runs.
+  resolveMacros: (projectId: string, text: string) =>
+    api.post<MacroResolveResult>(`/api/projects/${projectId}/resolve-macros`, { text }),
 };
 
 export const jobsApi = {

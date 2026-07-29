@@ -46,6 +46,12 @@ async def _patch(path: str, payload: dict):
         return r.json() if r.content else None
 
 
+async def _delete(path: str) -> None:
+    async with get_client() as client:
+        r = await client.delete(path)
+        raise_for_api_error(r)
+
+
 # ---------- projects / tracks ----------
 @mcp_server.tool()
 async def list_projects() -> list[dict]:
@@ -479,4 +485,103 @@ async def add_capability(node_type_slug: str, backend_id: str, workflow_json: di
     return await _post(
         f"/api/node-types/{node_type_slug}/capabilities",
         {"backend_id": backend_id, "workflow_json": workflow_json, "param_mapping": param_mapping},
+    )
+
+
+# ---------- idea board (roadmap.md §1) ----------
+# The point of exposing the board to the agent is that an idea has somewhere to
+# land other than a chat that disappears: "propose eight directions for this
+# character" becomes eight stickers the user can see, circle and pick from.
+@mcp_server.tool()
+async def get_board(project_id: str) -> dict:
+    """The project's idea board (created on first access). Pre-production lives
+    here -- the brief, the references, the divergence -- because the grid is
+    convergent by construction and can't hold any of it."""
+    return await _get(f"/api/projects/{project_id}/board")
+
+
+@mcp_server.tool()
+async def list_board_items(board_id: str) -> list[dict]:
+    """Everything on a board: text stickers, media, circles, freehand strokes,
+    connectors and comments. Each item carries its own x/y -- unlike the grid,
+    position here is stored, not derived."""
+    return await _get(f"/api/boards/{board_id}/items")
+
+
+@mcp_server.tool()
+async def create_note(board_id: str, text: str, x: float = 0, y: float = 0, tag: str | None = None, color: str | None = None) -> dict:
+    """Put a text sticker (markdown) on the board.
+
+    `tag` makes it referencable from a node's prompt as `{tag}`, resolved at run
+    time. Tags are unique per project; reusing one is rejected rather than left
+    ambiguous. Leave it unset for a sticker that's just a thought.
+
+    Stickers you create are marked source="agent" so the user can tell at a
+    glance which ideas came from where.
+    """
+    payload: dict = {"kind": "text", "text": text, "x": x, "y": y, "source": "agent"}
+    if tag:
+        payload["tag"] = tag
+    if color:
+        payload["color"] = color
+    return await _post(f"/api/boards/{board_id}/items", payload)
+
+
+@mcp_server.tool()
+async def comment_on_board_item(board_id: str, item_id: str, text: str) -> dict:
+    """Leave a remark about one sticker -- the board's equivalent of flag_cell."""
+    return await _post(
+        f"/api/boards/{board_id}/items",
+        {"kind": "comment", "target_item_id": item_id, "text": text, "source": "agent"},
+    )
+
+
+@mcp_server.tool()
+async def connect_board_items(board_id: str, source_item_id: str, target_item_id: str) -> dict:
+    """Draw an arrow between two stickers. Anchored to the items themselves, so
+    it follows them when they're moved."""
+    return await _post(
+        f"/api/boards/{board_id}/items",
+        {"kind": "connector", "source_item_id": source_item_id, "target_item_id": target_item_id, "source": "agent"},
+    )
+
+
+@mcp_server.tool()
+async def update_board_item(item_id: str, text: str | None = None, x: float | None = None, y: float | None = None) -> dict:
+    """Edit a sticker's text or move it."""
+    payload = {k: v for k, v in {"text": text, "x": x, "y": y}.items() if v is not None}
+    return await _patch(f"/api/board-items/{item_id}", payload)
+
+
+@mcp_server.tool()
+async def delete_board_item(item_id: str) -> dict:
+    """Remove a sticker. Its connectors and comments go with it."""
+    await _delete(f"/api/board-items/{item_id}")
+    return {"deleted": item_id}
+
+
+@mcp_server.tool()
+async def list_reference_assets(project_id: str, tag: str | None = None) -> list[dict]:
+    """The project's reference library -- images the board owns, which no grid
+    cell does. Place one in a cell with place_reference_asset."""
+    return await _get(f"/api/projects/{project_id}/assets", **({"tag": tag} if tag else {}))
+
+
+@mcp_server.tool()
+async def place_reference_asset(track_id: str, step_index: int, asset_id: str) -> dict:
+    """Put a library image into a grid cell as a reference node.
+
+    A reference, never a copy and never an owned asset: assets owned by a cell
+    are destroyed when that cell is deleted, which would take the picture off
+    the board with it. The grid references the library; the board owns it.
+    """
+    return await _post(
+        "/api/nodes",
+        {
+            "track_id": track_id,
+            "step_index": step_index,
+            "kind": "asset",
+            "node_type": "asset.refasset",
+            "inputs": [{"type": "explicit", "output_id": asset_id}],
+        },
     )

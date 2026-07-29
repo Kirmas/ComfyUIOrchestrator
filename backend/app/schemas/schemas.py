@@ -4,7 +4,16 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from app.db.models import AnnotationSource, AssetKind, BackendKind, ExecutionType, JobStatusEnum, NodeKind, NodeStatus
+from app.db.models import (
+    AnnotationSource,
+    AssetKind,
+    BackendKind,
+    BoardItemKind,
+    ExecutionType,
+    JobStatusEnum,
+    NodeKind,
+    NodeStatus,
+)
 
 
 class ORMModel(BaseModel):
@@ -342,13 +351,19 @@ class NodeRead(ORMModel):
 class AssetRead(ORMModel):
     id: uuid.UUID
     node_id: uuid.UUID | None
+    project_id: uuid.UUID | None = None
     storage_key: str
     mime_type: str
     kind: AssetKind
     selected: bool
+    tags: list[str] = []
     meta: dict
     created_at: datetime
     url: str | None = None
+
+
+class AssetTagsUpdate(BaseModel):
+    tags: list[str]
 
 
 class AssetSelectUpdate(BaseModel):
@@ -401,6 +416,107 @@ class AnnotationRead(ORMModel):
     node_ids: list[uuid.UUID]
     created_at: datetime
     updated_at: datetime
+
+
+# ---------- Idea board (roadmap.md §1) ----------
+# Geometry IS stored here, unlike Annotation above -- a sticker's x/y is its
+# only truth, nothing derives or validates it. That's the point of the board.
+class BoardRead(ORMModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    name: str
+    created_at: datetime
+
+
+class BoardItemCreate(BaseModel):
+    kind: BoardItemKind
+    x: float = 0.0
+    y: float = 0.0
+    w: float = 220.0
+    h: float = 180.0
+    z: int = 0
+    color: str | None = None
+    text: str = ""
+    tag: str | None = None
+    asset_id: uuid.UUID | None = None
+    shape: str | None = None
+    path: str | None = None
+    stroke_width: float | None = None
+    source_item_id: uuid.UUID | None = None
+    target_item_id: uuid.UUID | None = None
+    source: AnnotationSource = AnnotationSource.user
+
+
+class BoardItemUpdate(BaseModel):
+    # Every field optional and None-means-untouched: dragging a sticker PATCHes
+    # x/y alone several times a second, and must not have to echo back its text.
+    x: float | None = None
+    y: float | None = None
+    w: float | None = None
+    h: float | None = None
+    z: int | None = None
+    color: str | None = None
+    text: str | None = None
+    # None means "leave the tag alone"; the empty string means "remove it".
+    # A nullable field whose absence and whose clearing are the same value
+    # can't express both, and untagging a sticker has to be possible.
+    tag: str | None = None
+    shape: str | None = None
+    path: str | None = None
+    stroke_width: float | None = None
+
+
+class BoardItemRead(ORMModel):
+    id: uuid.UUID
+    board_id: uuid.UUID
+    kind: BoardItemKind
+    x: float
+    y: float
+    w: float
+    h: float
+    z: int
+    color: str | None
+    text: str
+    tag: str | None
+    asset_id: uuid.UUID | None
+    shape: str | None
+    path: str | None
+    stroke_width: float | None
+    source_item_id: uuid.UUID | None
+    target_item_id: uuid.UUID | None
+    source: AnnotationSource
+    created_at: datetime
+    updated_at: datetime
+    # Populated for image/audio/video stickers so the client can render without
+    # a second round-trip per sticker. asset_tags is what the grid's reference
+    # picker filters on -- the labels are set here, on the board that owns the
+    # asset, and read over there.
+    asset_url: str | None = None
+    asset_mime_type: str | None = None
+    asset_tags: list[str] = []
+
+
+class IdeaTextRead(BaseModel):
+    """A text sticker as the node-config prompt picker sees it. Both forms are
+    returned: the markdown for display, the stripped text because that's what
+    actually gets inserted (see core/idea_macros.py)."""
+
+    item_id: uuid.UUID
+    tag: str | None
+    text_markdown: str
+    text_plain: str
+
+
+class MacroResolveRequest(BaseModel):
+    text: str
+
+
+class MacroResolveResult(BaseModel):
+    resolved: str
+    # Tags with no sticker behind them. They stay literal in `resolved` rather
+    # than expanding to nothing; the UI marks them so a stale macro is visible
+    # instead of quietly emptying a prompt.
+    unresolved: list[str]
 
 
 # ---------- Node-type authoring (agent-facing, see api/routes/node_types.py) ----------

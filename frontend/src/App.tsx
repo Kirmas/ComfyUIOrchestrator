@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getApiToken } from "./api/client";
 import { projectsApi } from "./api/endpoints";
+import { Board } from "./components/Board";
 import { ConnectionBar } from "./components/ConnectionBar";
 import { Grid } from "./components/Grid";
 import { Logs } from "./components/Logs";
@@ -8,14 +9,28 @@ import { ProjectPicker } from "./components/ProjectPicker";
 import { Settings } from "./components/Settings";
 import { cx } from "./utils";
 
-type View = "grid" | "settings" | "logs";
+type View = "grid" | "board" | "settings" | "logs";
 type AuthStatus = "checking" | "unauthenticated" | "authenticated";
 
 const LAST_PROJECT_KEY = "comfy-orchestrator:lastProjectId";
+const LAST_VIEW_KEY = "comfy-orchestrator:lastView";
+
+const VIEWS: View[] = ["grid", "board", "settings", "logs"];
+
+/** Reloading should put you back where you were, the same way the project
+ * picker already remembers its selection -- landing back on the grid after
+ * every F5 means losing your place on the board or halfway down settings.
+ * Validated rather than trusted: a stored value can outlive the view it names
+ * (a renamed or removed tab), and an unrecognised one must not leave the app
+ * rendering nothing. */
+const storedView = (): View => {
+  const saved = localStorage.getItem(LAST_VIEW_KEY) as View | null;
+  return saved && VIEWS.includes(saved) ? saved : "grid";
+};
 
 export default function App() {
   const [projectId, setProjectId] = useState<string | null>(() => localStorage.getItem(LAST_PROJECT_KEY));
-  const [view, setView] = useState<View>("grid");
+  const [view, setView] = useState<View>(storedView);
   // On phones the whole topbar (project picker + nav + connection) collapses
   // behind a hamburger -- it's rarely needed mid-session and eats scarce
   // screen width. No effect on desktop, where CSS keeps .topbar-menu always
@@ -46,6 +61,7 @@ export default function App() {
 
   const goTo = (next: View) => {
     setView(next);
+    localStorage.setItem(LAST_VIEW_KEY, next);
     setMenuOpen(false);
   };
 
@@ -78,6 +94,12 @@ export default function App() {
           <ProjectPicker projectId={projectId} onSelect={selectProject} />
           <div className="topbar-spacer" />
           {view !== "grid" && <button onClick={() => goTo("grid")}>Back to grid</button>}
+          {/* Pre-production lives here: idea, references, divergence. The grid
+              is convergent by construction and can't hold any of it -- see
+              roadmap.md §1. */}
+          <button onClick={() => goTo(view === "board" ? "grid" : "board")} className={view === "board" ? "active" : ""}>
+            Board
+          </button>
           <button onClick={() => goTo(view === "logs" ? "grid" : "logs")} className={view === "logs" ? "active" : ""}>
             Logs
           </button>
@@ -95,6 +117,14 @@ export default function App() {
         <div className="main-area">
           <Logs />
         </div>
+      ) : view === "board" ? (
+        projectId ? (
+          <Board projectId={projectId} />
+        ) : (
+          <div className="main-area" style={{ padding: 24, color: "var(--text-dim)" }}>
+            Select a project to open its idea board.
+          </div>
+        )
       ) : projectId ? (
         <Grid projectId={projectId} />
       ) : (

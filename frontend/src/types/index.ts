@@ -125,7 +125,12 @@ export interface Track {
 export type InputRef =
   | { type: "self_prev" }
   | { type: "track_below_prev" }
-  | { type: "explicit"; node_id: string; output_id: string }
+  // node_id is optional: an asset in the project's reference library (the idea
+  // board's) has no owning node at all, and resolution on both ends goes by
+  // asset id anyway (_explicit_ref_asset / resolveSlotAsset). It stays part of
+  // the ref when there IS an owner, since that's what the grid draws its "ref"
+  // arrow from.
+  | { type: "explicit"; node_id?: string; output_id: string }
   | { type: "upload"; asset_id: string }
   | { type: "text"; value: string }
   // Row-span paradigm positional ref: reads whatever asset node's row (its
@@ -179,13 +184,75 @@ export interface NodeItem {
 export interface Asset {
   id: string;
   node_id: string | null;
+  // Set instead of node_id for a project-library asset -- one the idea board
+  // owns and no grid cell does (see BoardItem below / roadmap.md §1).
+  project_id?: string | null;
   storage_key: string;
   mime_type: string;
   kind: AssetKind;
   selected: boolean;
+  tags?: string[];
   meta: Record<string, unknown>;
   created_at: string;
   url: string | null;
+}
+
+// ---------- Idea board ----------
+// A sticker holds exactly one kind of content, so `kind` is also the
+// content-type discriminator. Unlike a grid node, whose position is derived
+// from track_id/step_index, a sticker's x/y IS its only truth -- that freedom
+// is the point of the board.
+export type BoardItemKind = "text" | "image" | "audio" | "video" | "frame" | "ink" | "connector" | "comment";
+
+export interface Board {
+  id: string;
+  project_id: string;
+  name: string;
+  created_at: string;
+}
+
+export interface BoardItem {
+  id: string;
+  board_id: string;
+  kind: BoardItemKind;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  z: number;
+  color: string | null;
+  text: string;
+  // Handle for the `{tag}` prompt macro. Unique per project, enforced server-side.
+  tag: string | null;
+  asset_id: string | null;
+  shape: string | null;
+  path: string | null;
+  stroke_width: number | null;
+  source_item_id: string | null;
+  target_item_id: string | null;
+  source: "user" | "agent";
+  created_at: string;
+  updated_at: string;
+  asset_url: string | null;
+  asset_mime_type: string | null;
+  // Labels on the underlying library asset (not the `tag` above, which is the
+  // text sticker's prompt-macro handle). Set here on the board; read by the
+  // grid's reference picker to filter.
+  asset_tags: string[];
+}
+
+export interface IdeaText {
+  item_id: string;
+  tag: string | null;
+  text_markdown: string;
+  // What actually gets inserted into a prompt: markdown belongs on the board,
+  // not in front of a sampler.
+  text_plain: string;
+}
+
+export interface MacroResolveResult {
+  resolved: string;
+  unresolved: string[];
 }
 
 export interface Job {
