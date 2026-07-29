@@ -58,6 +58,14 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["http://localhost:5173"]
 
+    # Host header values the MCP server (/mcp) accepts -- DNS-rebinding
+    # protection (mcp SDK's TransportSecuritySettings) rejects any request
+    # whose Host doesn't match one of these, which is correct but means the
+    # LAN address every non-localhost client actually connects through
+    # (CLAUDE.md's documented 192.168.0.3) has to be listed explicitly, not
+    # just 127.0.0.1/localhost.
+    mcp_allowed_hosts: list[str] = ["127.0.0.1:*", "localhost:*", "[::1]:*", "192.168.0.3:*"]
+
     @model_validator(mode="after")
     def _resolve_relative_paths(self) -> "Settings":
         if self.database_url.startswith("sqlite") and ":///" in self.database_url:
