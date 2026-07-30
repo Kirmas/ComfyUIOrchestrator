@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { useT } from "../i18n";
 import type { Annotation } from "../types";
 
 interface Props {
@@ -13,6 +14,7 @@ interface Props {
 }
 
 export function AnnotationFrame({ annotation, box, onSave, onDelete }: Props) {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(annotation.text);
   const [saving, setSaving] = useState(false);
@@ -41,17 +43,17 @@ export function AnnotationFrame({ annotation, box, onSave, onDelete }: Props) {
           gridColumn: `${box.minCol + 2} / span ${box.maxCol - box.minCol + 1}`,
         }}
         onDoubleClick={() => setEditing(true)}
-        title={annotation.text || "Double-click to add a comment"}
+        title={annotation.text || t("annotation.addTitle")}
       >
         {/* The frame body must not eat clicks meant for the cells inside it
             (pointer-events: none in CSS); only this label is interactive. */}
         <div className="annotation-label">
-          <span className="annotation-text">{annotation.text || "(empty comment)"}</span>
+          <span className="annotation-text">{annotation.text || t("annotation.empty")}</span>
           <span className="annotation-actions">
-            <button onClick={() => setEditing(true)} title="Edit this comment">
-              edit
+            <button onClick={() => setEditing(true)} title={t("annotation.editTitle")}>
+              {t("common.edit")}
             </button>
-            <button onClick={onDelete} title="Delete this comment block">
+            <button onClick={onDelete} title={t("annotation.deleteTitle")}>
               ×
             </button>
           </span>
@@ -66,21 +68,21 @@ export function AnnotationFrame({ annotation, box, onSave, onDelete }: Props) {
         createPortal(
           <div className="image-modal-backdrop" onClick={() => !saving && setEditing(false)}>
             <div className="params-modal-content" onClick={(e) => e.stopPropagation()}>
-              <h3>Comment</h3>
+              <h3>{t("annotation.title")}</h3>
               <textarea
                 autoFocus
                 rows={5}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder="Note for this group of cells"
+                placeholder={t("annotation.placeholder")}
                 style={{ width: "100%" }}
               />
               <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
                 <button onClick={() => setEditing(false)} disabled={saving}>
-                  Cancel
+                  {t("common.cancel")}
                 </button>
                 <button onClick={save} disabled={saving}>
-                  {saving ? "Saving…" : "Save"}
+                  {saving ? t("common.saving") : t("common.save")}
                 </button>
               </div>
             </div>

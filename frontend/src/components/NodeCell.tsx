@@ -8,7 +8,8 @@ import { detectMaskGroups, resolveMaskImageField } from "../maskUtils";
 import { resolveSlotAsset } from "../slotResolution";
 import { useProjectStore } from "../state/projectStore";
 import { defaultInputsForSchema, slotFields } from "../templateUtils";
-import type { Asset, Backend, Capability, InputRef, Job, NodeItem, NodeTemplate } from "../types";
+import type { Asset, Backend, Capability, InputRef, Job, NodeItem, NodeStatus, NodeTemplate } from "../types";
+import { useT, type TFunc } from "../i18n";
 import { cx } from "../utils";
 import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
 import { CropPreview, type CropBox } from "./CropPreview";
@@ -17,6 +18,19 @@ import { IdeaTextPicker, MacroPreview } from "./IdeaTextPicker";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
 import { Model3DThumb } from "./Model3DThumb";
 import { ZoomableImage } from "./ZoomableImage";
+
+const STATUS_LABEL_KEY: Record<NodeStatus, `status.${NodeStatus}`> = {
+  draft: "status.draft",
+  queued: "status.queued",
+  running: "status.running",
+  done: "status.done",
+  error: "status.error",
+  discarded: "status.discarded",
+};
+
+function statusLabel(t: TFunc, status: NodeStatus): string {
+  return t(STATUS_LABEL_KEY[status]);
+}
 
 // Shared by CandidatesGrid and SingleOutput -- resolution (read off the
 // loaded <img>, not stored anywhere) plus, when known, which backend
@@ -96,6 +110,7 @@ function CandidatesGrid({
   onImageOpen: (url: string) => void;
   onCompare: (asset: Asset) => void;
 }) {
+  const t = useT();
   const [dimsById, setDimsById] = useState<Record<string, { w: number; h: number }>>({});
   return (
     // No stopPropagation here (unlike the buttons below) -- the thumbnail is
@@ -118,7 +133,7 @@ function CandidatesGrid({
                   if (!img) return;
                   setDimsById((d) => ({ ...d, [asset.id]: { w: img.naturalWidth, h: img.naturalHeight } }));
                 }}
-                title="Double-click to open full size"
+                title={t("cell.doubleClickFullSize")}
                 style={{ cursor: "zoom-in" }}
               />
               {/* Double-click alone is unreliable on a phone (same reason the
@@ -130,7 +145,7 @@ function CandidatesGrid({
                   e.stopPropagation();
                   onImageOpen(resolveAssetUrl(asset.url));
                 }}
-                title="Open full size"
+                title={t("cell.openFullSize")}
               >
                 🔍
               </button>
@@ -141,7 +156,7 @@ function CandidatesGrid({
                   e.stopPropagation();
                   onCompare(asset);
                 }}
-                title="Compare with another asset node"
+                title={t("cell.compareWith")}
               >
                 ⇄
               </button>
@@ -158,9 +173,9 @@ function CandidatesGrid({
                 e.stopPropagation();
                 onSelect(asset);
               }}
-              title="Keep this one here -- moves the other candidates to a new row"
+              title={t("cell.selectTitle")}
             >
-              select ★
+              {t("cell.select")}
             </button>
             <button
               style={{ fontSize: 10, padding: "1px 4px" }}
@@ -168,9 +183,9 @@ function CandidatesGrid({
                 e.stopPropagation();
                 onDiscard(asset);
               }}
-              title="Reject this candidate"
+              title={t("cell.discardCandidateTitle")}
             >
-              discard ✕
+              {t("cell.discardCandidate")}
             </button>
           </div>
         </div>
@@ -180,6 +195,7 @@ function CandidatesGrid({
 }
 
 function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImageOpen: (url: string) => void; onCompare: (asset: Asset) => void }) {
+  const t = useT();
   const [dims, setDims] = useState<{ w: number; h: number } | undefined>(undefined);
   return (
     <div className="output-grid">
@@ -198,7 +214,7 @@ function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImage
                 if (!img) return;
                 setDims({ w: img.naturalWidth, h: img.naturalHeight });
               }}
-              title="Double-click to open full size"
+              title={t("cell.doubleClickFullSize")}
               style={{ cursor: "zoom-in" }}
             />
             <button
@@ -208,7 +224,7 @@ function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImage
                 e.stopPropagation();
                 onImageOpen(resolveAssetUrl(asset.url));
               }}
-              title="Open full size"
+              title={t("cell.openFullSize")}
             >
               🔍
             </button>
@@ -219,7 +235,7 @@ function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImage
                 e.stopPropagation();
                 onCompare(asset);
               }}
-              title="Compare with another asset node"
+              title={t("cell.compareWith")}
             >
               ⇄
             </button>
@@ -243,6 +259,7 @@ function BaseAssetNodeView({
   onStartCompare,
   onStartRef,
 }: Props) {
+  const t = useT();
   const setNode = useProjectStore((s) => s.setNode);
   const refreshOutputs = useProjectStore((s) => s.refreshNodeOutputs);
   const removeNode = useProjectStore((s) => s.removeNode);
@@ -269,7 +286,7 @@ function BaseAssetNodeView({
   // cell, so a full reload is simpler and safer than trying to hand-patch
   // the store to match.
   const deleteCell = async () => {
-    if (!confirm("Delete this cell? This can't be undone.")) return;
+    if (!confirm(t("cell.confirmDelete"))) return;
     await nodesApi.remove(node.id);
     const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
     if (projectId) await loadProject(projectId);
@@ -286,12 +303,7 @@ function BaseAssetNodeView({
   const detachFromWorkflow = async () => {
     const creatorId = node.created_by_node_id;
     if (!creatorId) return;
-    if (
-      !confirm(
-        "Detach this asset from its workflow? The workflow node (and any other still-pending result of the same generation) will be deleted -- this asset stays. Can't be undone.",
-      )
-    )
-      return;
+    if (!confirm(t("cell.confirmDetach"))) return;
     await nodesApi.update(node.id, { created_by_node_id: null });
     await nodesApi.remove(creatorId);
     const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
@@ -315,7 +327,7 @@ function BaseAssetNodeView({
       const updated = await nodesApi.collapse(node.id);
       setNode(updated);
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Couldn't collapse this chain.");
+      alert(err instanceof Error ? err.message : t("cell.collapseFailed"));
     }
   };
 
@@ -377,7 +389,7 @@ function BaseAssetNodeView({
       const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
       if (projectId) await loadProject(projectId);
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Couldn't keep this candidate.");
+      alert(e instanceof Error ? e.message : t("cell.keepCandidateFailed"));
     }
   };
 
@@ -387,7 +399,7 @@ function BaseAssetNodeView({
   // cell in its track (see NodeCell's isLastInTrack invariant for manual
   // deletes).
   const discardCandidate = async (asset: Asset) => {
-    if (!confirm("Discard this image? This can't be undone.")) return;
+    if (!confirm(t("cell.confirmDiscardImage"))) return;
     await assetsApi.remove(asset.id);
     await refreshOutputs(node.id);
     const remaining = await nodesApi.outputs(node.id).catch(() => outputs);
@@ -402,7 +414,7 @@ function BaseAssetNodeView({
   };
 
   const discardAll = async () => {
-    if (!confirm(`Discard all ${outputs.length} remaining images? This can't be undone.`)) return;
+    if (!confirm(t("cell.confirmDiscardAll", { n: outputs.length }))) return;
     for (const asset of outputs) {
       await assetsApi.remove(asset.id);
     }
@@ -420,7 +432,7 @@ function BaseAssetNodeView({
       const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
       if (projectId) await loadProject(projectId);
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Couldn't settle the candidates.");
+      alert(e instanceof Error ? e.message : t("cell.settleFailed"));
     }
   };
 
@@ -457,13 +469,13 @@ function BaseAssetNodeView({
       onClick={() => compareActive && onCellClicked(node)}
     >
       <div className="node-cell-header">
-        <span>{isCandidatesGrid ? "Asset Select" : "Asset"}</span>
+        <span>{isCandidatesGrid ? t("cell.assetSelect") : t("cell.asset")}</span>
         {isManualPlacement && (
-          <span title="Manually placed -- not this workflow's output" style={{ fontSize: 11, opacity: 0.7 }}>
+          <span title={t("cell.manualPinTitle")} style={{ fontSize: 11, opacity: 0.7 }}>
             📌
           </span>
         )}
-        <span className="status-pill">{node.status}</span>
+        <span className="status-pill">{statusLabel(t, node.status)}</span>
       </div>
 
       <input
@@ -480,48 +492,48 @@ function BaseAssetNodeView({
       <div className="node-actions" onClick={(e) => e.stopPropagation()}>
         {outputs.length === 1 && !isCandidatesGrid && (
           <a className="primary" style={{ textDecoration: "none", padding: "4px 8px" }} href={resolveAssetUrl(outputs[0].url)} download>
-            Download
+            {t("cell.download")}
           </a>
         )}
         {outputs.length === 0 && (
-          <button className="primary" onClick={() => fileInputRef.current?.click()} title="Or click this cell and press Ctrl+V to paste an image from the clipboard">
-            Upload…
+          <button className="primary" onClick={() => fileInputRef.current?.click()} title={t("cell.uploadTitle")}>
+            {t("cell.upload")}
           </button>
         )}
         {isCandidatesGrid && (
           <>
-            <button className="primary" onClick={selectAll} title="Keep every remaining candidate, each as its own new track">
-              Select all
+            <button className="primary" onClick={selectAll} title={t("cell.selectAllTitle")}>
+              {t("cell.selectAll")}
             </button>
-            <button onClick={discardAll} title="Reject every remaining candidate">
-              Discard all
+            <button onClick={discardAll} title={t("cell.discardAllTitle")}>
+              {t("cell.discardAll")}
             </button>
           </>
         )}
         {!isCandidatesGrid && outputs.length >= 1 && (
-          <button onClick={() => onStartRef(node)} title="Place a reference to this asset in another empty cell">
-            + ref elsewhere
+          <button onClick={() => onStartRef(node)} title={t("cell.refElsewhereTitle")}>
+            {t("cell.refElsewhere")}
           </button>
         )}
         {!isCandidatesGrid && node.created_by_node_id && (
           <button
             onClick={detachFromWorkflow}
-            title="Unbind this asset from its creator workflow, then delete that workflow -- this asset stays, and is then free to move anywhere"
+            title={t("cell.detachTitle")}
           >
-            detach ✂
+            {t("cell.detach")}
           </button>
         )}
         {!isCandidatesGrid && node.created_by_node_id && (
           <button
             onClick={collapseChain}
-            title="Fold this asset and its creator/consumer workflow nodes into one card, and lock them from regenerating -- for a finished chain (e.g. crop then upscale) you just want the lineage of, not the intermediate steps"
+            title={t("cell.collapseChainTitle")}
           >
-            ⛶ collapse chain
+            {t("cell.collapseChain")}
           </button>
         )}
         {!isCandidatesGrid && (
-          <button onClick={deleteCell} title="Delete this cell only">
-            Delete
+          <button onClick={deleteCell} title={t("cell.deleteOnlyTitle")}>
+            {t("common.delete")}
           </button>
         )}
       </div>
@@ -529,7 +541,7 @@ function BaseAssetNodeView({
       {node.error && <div className="error-text">{node.error}</div>}
 
       {outputs.length === 0 && !isCandidatesGrid && (
-        <div style={{ fontSize: 10, color: "var(--text-dim)" }}>drop a file here, or click then Ctrl+V to paste</div>
+        <div style={{ fontSize: 10, color: "var(--text-dim)" }}>{t("cell.dropOrPaste")}</div>
       )}
 
       {isCandidatesGrid ? (
@@ -539,11 +551,11 @@ function BaseAssetNodeView({
       ) : null}
 
       {isComparingSource && (
-        <div style={{ fontSize: 10, color: "var(--accent)" }}>click another asset node to compare with…</div>
+        <div style={{ fontSize: 10, color: "var(--accent)" }}>{t("cell.clickToCompare")}</div>
       )}
 
       {isRefSource && (
-        <div style={{ fontSize: 10, color: "var(--warning)" }}>click an empty cell to place the reference…</div>
+        <div style={{ fontSize: 10, color: "var(--warning)" }}>{t("cell.clickToPlaceRef")}</div>
       )}
 
       {fullSizeUrl &&
@@ -558,7 +570,7 @@ function BaseAssetNodeView({
           // draggable, which is why that modal never had this problem.
           <div className="image-modal-backdrop" onClick={closeImage}>
             <div className="image-modal-content image-modal-fullscreen" onClick={(e) => e.stopPropagation()}>
-              <button type="button" className="image-modal-close" onClick={closeImage} title="Close full-size image">
+              <button type="button" className="image-modal-close" onClick={closeImage} title={t("cell.closeFullSize")}>
                 ×
               </button>
               <ZoomableImage src={fullSizeUrl} />
@@ -571,6 +583,7 @@ function BaseAssetNodeView({
 }
 
 function BaseWorkflowNodeView({ node, templates, backends, capabilities, registerRef, onShrinkToFit, onStartCopy, isCopySource, collapseInfo }: Props) {
+  const t = useT();
   const setNode = useProjectStore((s) => s.setNode);
   const tracks = useProjectStore((s) => s.tracks);
   const nodesById = useProjectStore((s) => s.nodesById);
@@ -591,7 +604,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   // fields, variants, backend) lives behind this modal so the node stays the
   // same footprint whether it has 2 fields or 20.
   const [paramsOpen, setParamsOpen] = useState(false);
-  // Which text field currently has the "з ідей" picker open, if any.
+  // Which text field currently has the "from ideas" picker open, if any.
   const [ideaPickerField, setIdeaPickerField] = useState<string | null>(null);
   // A node's project is reached through its track, the same way every other
   // handler in this file does it -- the cell isn't handed one directly.
@@ -684,7 +697,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   // to hand-patch the store to match (same reason BaseAssetNodeView's own
   // deleteCell already reloads instead of just removing one id).
   const deleteCell = async () => {
-    if (!confirm("Delete this workflow cell and all of its own outputs? This can't be undone.")) return;
+    if (!confirm(t("cell.confirmDeleteWorkflow"))) return;
     await nodesApi.remove(node.id);
     const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
     if (projectId) await loadProject(projectId);
@@ -701,7 +714,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
       const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
       if (projectId) await loadProject(projectId);
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Couldn't expand this chain.");
+      alert(err instanceof Error ? err.message : t("cell.expandFailed"));
     }
   };
 
@@ -822,12 +835,12 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
       const index = ref?.type === "cell_index" ? ref.index : slotIndex;
       return (
         <div key={field.name} className="slot-row">
-          <span>{field.label ?? field.name}: cell</span>
+          <span>{t("cell.slotCell", { label: field.label ?? field.name })}</span>
           <input
             type="number"
             min={0}
             value={index}
-            title="Row offset within this node's span (0 = its own row)"
+            title={t("cell.slotRowTitle")}
             style={{ width: 44 }}
             onChange={(e) => setSlotSource(slotIndex, { type: "cell_index", index: Math.max(0, Number(e.target.value)) })}
           />
@@ -879,9 +892,9 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                     type="button"
                     className="idea-picker-open"
                     onClick={() => setIdeaPickerField((f) => (f === field.name ? null : field.name))}
-                    title="Взяти текст із дошки ідей"
+                    title={t("cell.fromIdeasTitle")}
                   >
-                    з ідей
+                    {t("cell.fromIdeas")}
                   </button>
                   {ideaPickerField === field.name && (
                     <IdeaTextPicker
@@ -923,7 +936,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   // key the backend ignores (not in param_schema/param_mapping), used purely to
   // tell two same-type nodes apart on the grid. Replaces the shown name when set.
   const customLabel = ((node.params.__label as string | undefined) ?? "").trim();
-  const displayName = customLabel || collapseInfo?.combinedLabel || template?.name || "(choose template)";
+  const displayName = customLabel || collapseInfo?.combinedLabel || template?.name || t("cell.chooseTemplate");
   // Locked/history (see collapseInfo) means there's no regeneration left to tune
   // params for, so the modal/gear/hint are suppressed there. Otherwise any
   // workflow node with a template can open the modal -- if only to set a label.
@@ -934,13 +947,13 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
       ref={(el) => registerRef(node.id, el)}
       className={cls}
       onDoubleClick={() => canEditParams && setParamsOpen(true)}
-      title={canEditParams ? "⚙ or double-click to edit parameters" : undefined}
+      title={canEditParams ? t("cell.editParamsHint") : undefined}
     >
       <div className="node-cell-header">
         <span title={customLabel ? template?.name : undefined}>{displayName}</span>
         {isNative && !collapseInfo && (
-          <span className="native-pill" title="Native node type: built into the backend code, not a DB-stored workflow.json template">
-            native
+          <span className="native-pill" title={t("cell.nativeTitle")}>
+            {t("cell.native")}
           </span>
         )}
         {collapseInfo && (
@@ -950,12 +963,12 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
           // on prod).
           <span
             className="native-pill"
-            title="Part of a collapsed chain -- generate/re-roll/discard are locked; expand to work on these cells individually again"
+            title={t("cell.collapsedTitle")}
           >
-            🔗 collapsed
+            {t("cell.collapsed")}
           </span>
         )}
-        <span className="status-pill">{node.status}</span>
+        <span className="status-pill">{statusLabel(t, node.status)}</span>
         {canEditParams && (
           // Double-click still works (desktop), but it's an unreliable gesture
           // on a phone once the face is full of tappable fields -- a plain
@@ -965,7 +978,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
               e.stopPropagation();
               setParamsOpen(true);
             }}
-            title="Edit parameters"
+            title={t("cell.editParams")}
           >
             ⚙
           </button>
@@ -976,7 +989,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
               e.stopPropagation();
               setViewChainOpen(true);
             }}
-            title="See the 3 hidden cells this card folds together, read-only"
+            title={t("cell.viewChainTitle")}
           >
             👁
           </button>
@@ -994,7 +1007,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
               e.stopPropagation();
               onStartCopy(node);
             }}
-            title="Copy this node with all of its settings -- then click an empty workflow cell to place the copy"
+            title={t("cell.copyNodeTitle")}
           >
             ⧉
           </button>
@@ -1004,7 +1017,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
             e.stopPropagation();
             onShrinkToFit(node);
           }}
-          title="Recompute this card's height and remove any empty extra rows it doesn't actually need"
+          title={t("cell.shrinkTitle")}
         >
           ⤢
         </button>
@@ -1013,7 +1026,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
             e.stopPropagation();
             deleteCell();
           }}
-          title="Remove this workflow cell and all of its own outputs"
+          title={t("cell.removeWorkflowTitle")}
         >
           ×
         </button>
@@ -1022,12 +1035,12 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
       {!template && (
         <select onChange={(e) => chooseTemplate(e.target.value)} value="" onClick={(e) => e.stopPropagation()}>
           <option value="" disabled>
-            Select node type…
+            {t("cell.selectNodeType")}
           </option>
           {/* Grouped so native (code-registry, no DB row) and template.<slug>
               (uploaded workflow.json) types are visually distinguishable
               here too, not just on the placed cell. */}
-          <optgroup label="Native">
+          <optgroup label={t("cell.groupNative")}>
             {templates
               .filter((t) => t.node_type.startsWith("native."))
               .map((t) => (
@@ -1036,7 +1049,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                 </option>
               ))}
           </optgroup>
-          <optgroup label="Templates">
+          <optgroup label={t("cell.groupTemplates")}>
             {templates
               .filter((t) => !t.node_type.startsWith("native."))
               .map((t) => (
@@ -1054,7 +1067,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
 
           {!isNative && (
             <div className="field-row">
-              <label>Variants</label>
+              <label>{t("cell.variants")}</label>
               <input
                 type="number"
                 min={1}
@@ -1069,7 +1082,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
 
           {!isNative && (
             <div className="field-row">
-              <label>Backend</label>
+              <label>{t("cell.backend")}</label>
               <select
                 value={node.backend_mode}
                 onChange={async (e) => {
@@ -1077,15 +1090,15 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                   setNode(updated);
                 }}
               >
-                <option value="auto">Auto (balance)</option>
-                <option value="comfyui_only">ComfyUI only</option>
+                <option value="auto">{t("cell.backendAuto")}</option>
+                <option value="comfyui_only">{t("cell.backendComfyOnly")}</option>
                 {/* Picking this without "Use API" checked would just never
                     dispatch anywhere -- dispatcher.eligible_capabilities hard-
                     gates every api_call capability on Node.use_api regardless
                     of backend_mode, so there's nothing this option could do
                     yet. Only offered once it could actually work. */}
-                {node.use_api && apiCapability && <option value="api_only">API only</option>}
-                <option value="manual">Manual…</option>
+                {node.use_api && apiCapability && <option value="api_only">{t("cell.backendApiOnly")}</option>}
+                <option value="manual">{t("cell.backendManual")}</option>
               </select>
               {node.backend_mode === "manual" && (
                 <select
@@ -1095,7 +1108,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                     setNode(updated);
                   }}
                 >
-                  <option value="">choose backend…</option>
+                  <option value="">{t("cell.chooseBackend")}</option>
                   {backends
                     .filter((b) => b.kind !== "api_provider" || (node.use_api && apiCapability))
                     .map((b) => (
@@ -1110,9 +1123,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
 
           {!isNative && apiCapability && (
             <div className="field-row">
-              <label title="Explicit opt-in: even 'Auto'/'API only' backend modes never make a paid call unless this is checked.">
-                Use API (paid)
-              </label>
+              <label title={t("cell.useApiTitle")}>{t("cell.useApi")}</label>
               <input
                 type="checkbox"
                 checked={node.use_api}
@@ -1127,7 +1138,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
       )}
 
       {!collapseInfo && ((paramFieldInputs && paramFieldInputs.length > 0) || cropGroups.length > 0 || maskGroups.length > 0) && (
-        <div className="node-cell-hint">⚙ for more parameters</div>
+        <div className="node-cell-hint">{t("cell.moreParams")}</div>
       )}
 
       {jobs.length > 0 && node.status !== "done" && node.status !== "discarded" && (
@@ -1142,12 +1153,12 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
 
       {node.error && <div className="error-text">{node.error}</div>}
 
-      {isCopySource && <div style={{ fontSize: 10, color: "var(--accent)" }}>click an empty workflow cell to place the copy…</div>}
+      {isCopySource && <div style={{ fontSize: 10, color: "var(--accent)" }}>{t("cell.clickToPlaceCopy")}</div>}
 
       {template && collapseInfo && (
         <div className="node-actions" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
-          <button onClick={expandChain} title="Show this chain's cells individually again, unlocking generate/re-roll/discard">
-            ⛶ expand
+          <button onClick={expandChain} title={t("cell.expandTitle")}>
+            {t("cell.expand")}
           </button>
         </div>
       )}
@@ -1155,20 +1166,20 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
       {template && !collapseInfo && (
         <div className="node-actions" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
           <button className="primary" onClick={requestGenerate} disabled={node.status === "queued" || node.status === "running"}>
-            Generate
+            {t("cell.generate")}
           </button>
           {(node.status === "queued" || node.status === "running") && (
-            <button onClick={cancel} title="Stop the in-progress generation -- already-finished variants are kept">
-              Cancel
+            <button onClick={cancel} title={t("cell.cancelRunTitle")}>
+              {t("common.cancel")}
             </button>
           )}
           {(node.status === "done" || node.status === "error") && (
-            <button onClick={requestReroll} title="Discard and regenerate">
-              Re-roll
+            <button onClick={requestReroll} title={t("cell.rerollTitle")}>
+              {t("cell.reroll")}
             </button>
           )}
           <button onClick={discard} disabled={node.status === "discarded"}>
-            Discard
+            {t("cell.discard")}
           </button>
         </div>
       )}
@@ -1178,17 +1189,19 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
           <div className="image-modal-backdrop" onClick={() => setPayConfirmAction(null)}>
             <div className="image-modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 380 }}>
               <div className="node-cell-header">
-                <span>This is paid</span>
+                <span>{t("cell.paidTitle")}</span>
               </div>
               <p style={{ fontSize: 13 }}>
-                This will call <strong>{apiBackend?.name ?? apiBackend?.provider ?? "a paid API"}</strong>
-                {apiCapability?.config.model_id ? ` (${apiCapability.config.model_id as string})` : ""}. Continue with this generation?
+                {t("cell.paidBodyPrefix")}
+                <strong>{apiBackend?.name ?? apiBackend?.provider ?? t("cell.paidApiFallback")}</strong>
+                {apiCapability?.config.model_id ? ` (${apiCapability.config.model_id as string})` : ""}
+                {t("cell.paidBodySuffix")}
               </p>
               <div className="node-actions">
                 <button className="primary" onClick={confirmPaidAction}>
-                  Yes, generate (paid)
+                  {t("cell.confirmPaid")}
                 </button>
-                <button onClick={() => setPayConfirmAction(null)}>Cancel</button>
+                <button onClick={() => setPayConfirmAction(null)}>{t("common.cancel")}</button>
               </div>
             </div>
           </div>,
@@ -1210,17 +1223,17 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
           // same reason.
           <div className="image-modal-backdrop" onClick={(e) => { e.stopPropagation(); setParamsOpen(false); }}>
             <div className="params-modal-content" onClick={(e) => e.stopPropagation()}>
-              <button type="button" className="image-modal-close" onClick={() => setParamsOpen(false)} title="Close">
+              <button type="button" className="image-modal-close" onClick={() => setParamsOpen(false)} title={t("common.close")}>
                 ×
               </button>
               <div className="node-cell-header">
                 <span>{template.name}</span>
-                <span className="status-pill">{node.status}</span>
+                <span className="status-pill">{statusLabel(t, node.status)}</span>
               </div>
 
               <div className="field-row">
                 <label>
-                  Label <span style={{ color: "var(--text-dim)" }}>(optional — shown on the cell)</span>
+                  {t("cell.label")} <span style={{ color: "var(--text-dim)" }}>{t("cell.labelHint")}</span>
                 </label>
                 <input
                   type="text"
@@ -1260,7 +1273,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                       />
                     ) : (
                       <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
-                        No source image to preview yet -- x={box.x}, y={box.y}, w={box.width}, h={box.height}
+                        {t("cell.noCropSource", { x: box.x, y: box.y, w: box.width, h: box.height })}
                       </div>
                     )}
                   </div>
@@ -1279,7 +1292,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                         onCommit={(maskPng) => updateParam(group.maskField, maskPng)}
                       />
                     ) : (
-                      <div style={{ fontSize: 11, color: "var(--text-dim)" }}>No source image to paint on yet</div>
+                      <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("cell.noMaskSource")}</div>
                     )}
                   </div>
                 );
@@ -1296,7 +1309,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
         createPortal(
           <div className="image-modal-backdrop" onClick={() => setViewChainOpen(false)}>
             <div className="params-modal-content" onClick={(e) => e.stopPropagation()}>
-              <button type="button" className="image-modal-close" onClick={() => setViewChainOpen(false)} title="Close">
+              <button type="button" className="image-modal-close" onClick={() => setViewChainOpen(false)} title={t("common.close")}>
                 ×
               </button>
               <div className="node-cell-header">
@@ -1317,22 +1330,24 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
 // popup (BaseWorkflowNodeView above) -- no slot resolution, no editing, no
 // generate/reroll -- just enough to see what this cell used to be.
 function ChainMemberView({ node, templates, outputs }: { node: NodeItem; templates: NodeTemplate[]; outputs: Asset[] }) {
-  const template = templates.find((t) => t.node_type === node.node_type);
+  const t = useT();
+  // `tpl`, not `t`: the translate function owns that name in this scope now.
+  const template = templates.find((tpl) => tpl.node_type === node.node_type);
   return (
     <div className="field-row" style={{ flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
       <label>
-        {node.kind === "asset" ? "Asset" : (template?.name ?? node.node_type ?? "?")} <span className="status-pill">{node.status}</span>
+        {node.kind === "asset" ? t("cell.asset") : (template?.name ?? node.node_type ?? "?")} <span className="status-pill">{statusLabel(t, node.status)}</span>
       </label>
       {node.kind === "asset" ? (
         outputs[0] ? (
           <img src={resolveAssetUrl(outputs[0].url)} alt="" style={{ maxWidth: 200, borderRadius: 4 }} />
         ) : (
-          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>no output</span>
+          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("cell.chainNoOutput")}</span>
         )
       ) : Object.keys(node.params).length > 0 ? (
         <pre style={{ fontSize: 11, whiteSpace: "pre-wrap", margin: 0 }}>{JSON.stringify(node.params, null, 2)}</pre>
       ) : (
-        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>no params</span>
+        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("cell.chainNoParams")}</span>
       )}
     </div>
   );
@@ -1348,6 +1363,7 @@ function ChainMemberView({ node, templates, outputs }: { node: NodeItem; templat
 // real asset is already spoken for elsewhere), so it's also the only node
 // left that gets a drawn arrow (Grid.tsx's edges memo, kind "ref").
 function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: Props) {
+  const t = useT();
   const tracks = useProjectStore((s) => s.tracks);
   const nodesById = useProjectStore((s) => s.nodesById);
   const outputsByNode = useProjectStore((s) => s.outputsByNode);
@@ -1368,7 +1384,7 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: P
   }, [node.inputs, outputsByNode]);
 
   const deleteCell = async () => {
-    if (!confirm("Remove this reference? The real asset elsewhere is untouched.")) return;
+    if (!confirm(t("cell.confirmRemoveRef"))) return;
     await nodesApi.remove(node.id);
     removeNode(node.id);
   };
@@ -1380,8 +1396,8 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: P
       onClick={() => compareActive && onCellClicked(node)}
     >
       <div className="node-cell-header">
-        <span>↗ Reference</span>
-        <span className="status-pill">ref</span>
+        <span>{t("cell.reference")}</span>
+        <span className="status-pill">{t("cell.refPill")}</span>
       </div>
 
       {resolved && (
@@ -1394,7 +1410,7 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: P
                 src={resolveAssetUrl(resolved.url)}
                 alt="referenced output"
                 onDoubleClick={() => setFullSizeUrl(resolveAssetUrl(resolved.url))}
-                title="Double-click to open full size"
+                title={t("cell.doubleClickFullSize")}
                 style={{ cursor: "zoom-in", opacity: 0.85 }}
               />
             )}
@@ -1403,8 +1419,8 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: P
       )}
 
       <div className="node-actions">
-        <button onClick={deleteCell} title="Remove this reference (doesn't touch the real asset)">
-          Delete
+        <button onClick={deleteCell} title={t("cell.removeRefTitle")}>
+          {t("common.delete")}
         </button>
       </div>
 
@@ -1416,7 +1432,7 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: P
           // inside it, portal or not, into a native drag).
           <div className="image-modal-backdrop" onClick={() => setFullSizeUrl(null)}>
             <div className="image-modal-content image-modal-fullscreen" onClick={(e) => e.stopPropagation()}>
-              <button type="button" className="image-modal-close" onClick={() => setFullSizeUrl(null)} title="Close full-size image">
+              <button type="button" className="image-modal-close" onClick={() => setFullSizeUrl(null)} title={t("cell.closeFullSize")}>
                 ×
               </button>
               <ZoomableImage src={fullSizeUrl} />

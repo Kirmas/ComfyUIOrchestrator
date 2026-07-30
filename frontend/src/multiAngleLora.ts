@@ -1,3 +1,4 @@
+import type { TKey } from "./i18n";
 import type { Capability } from "./types";
 
 // The fal Qwen-Image-Edit-2511 "Multiple-Angles" LoRA
@@ -28,33 +29,35 @@ export function capabilityUsesMultiAngleLora(capability: Capability | undefined 
 
 export interface AngleOption {
   value: string;
-  label: string;
+  /** i18n key for the UI caption -- the `value` above is the literal LoRA
+   * token and must never be translated. */
+  labelKey: TKey;
 }
 
 // The eight azimuths, in clockwise order starting from the camera facing the
 // subject head-on. `value` is the exact LoRA token; `label` is the UI caption.
 export const AZIMUTHS: AngleOption[] = [
-  { value: "front view", label: "Front" },
-  { value: "front-right quarter view", label: "Front-right ¼" },
-  { value: "right side view", label: "Right" },
-  { value: "back-right quarter view", label: "Back-right ¼" },
-  { value: "back view", label: "Back" },
-  { value: "back-left quarter view", label: "Back-left ¼" },
-  { value: "left side view", label: "Left" },
-  { value: "front-left quarter view", label: "Front-left ¼" },
+  { value: "front view", labelKey: "angle.front" },
+  { value: "front-right quarter view", labelKey: "angle.frontRight" },
+  { value: "right side view", labelKey: "angle.right" },
+  { value: "back-right quarter view", labelKey: "angle.backRight" },
+  { value: "back view", labelKey: "angle.back" },
+  { value: "back-left quarter view", labelKey: "angle.backLeft" },
+  { value: "left side view", labelKey: "angle.left" },
+  { value: "front-left quarter view", labelKey: "angle.frontLeft" },
 ];
 
 export const ELEVATIONS: AngleOption[] = [
-  { value: "low-angle shot", label: "Low angle · look up (−30°)" },
-  { value: "eye-level shot", label: "Eye level (0°)" },
-  { value: "elevated shot", label: "Elevated (30°)" },
-  { value: "high-angle shot", label: "High angle · look down (60°)" },
+  { value: "low-angle shot", labelKey: "angle.low" },
+  { value: "eye-level shot", labelKey: "angle.eye" },
+  { value: "elevated shot", labelKey: "angle.elevated" },
+  { value: "high-angle shot", labelKey: "angle.high" },
 ];
 
 export const DISTANCES: AngleOption[] = [
-  { value: "close-up", label: "Close-up" },
-  { value: "medium shot", label: "Medium shot" },
-  { value: "wide shot", label: "Wide shot" },
+  { value: "close-up", labelKey: "angle.closeUp" },
+  { value: "medium shot", labelKey: "angle.medium" },
+  { value: "wide shot", labelKey: "angle.wide" },
 ];
 
 export const TRIGGER = "<sks>";

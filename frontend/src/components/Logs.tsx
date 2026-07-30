@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { logsApi } from "../api/endpoints";
 import { clearClientLog, getClientLog, subscribeClientLog, type ClientLogEntry } from "../clientLog";
+import { useT } from "../i18n";
 import { cx } from "../utils";
 
 type Source = "server" | "browser";
 
 export function Logs() {
+  const t = useT();
   const [source, setSource] = useState<Source>("server");
 
   return (
@@ -14,10 +16,10 @@ export function Logs() {
         <div className="node-cell-header">
           <div style={{ display: "flex", gap: 6 }}>
             <button className={cx(source === "server" && "active")} onClick={() => setSource("server")}>
-              Server
+              {t("logs.server")}
             </button>
             <button className={cx(source === "browser" && "active")} onClick={() => setSource("browser")}>
-              Browser
+              {t("logs.browser")}
             </button>
           </div>
         </div>
@@ -28,6 +30,7 @@ export function Logs() {
 }
 
 function ServerLog() {
+  const t = useT();
   const [lines, setLines] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -40,7 +43,7 @@ function ServerLog() {
         setError(null);
         setLines(r.lines);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load logs."));
+      .catch((err) => setError(err instanceof Error ? err.message : t("logs.loadFailed")));
 
   useEffect(() => {
     reload();
@@ -64,24 +67,24 @@ function ServerLog() {
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <label style={{ fontWeight: 400, fontSize: 12, display: "flex", gap: 4, alignItems: "center" }}>
             <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
-            auto-refresh
+            {t("logs.autoRefresh")}
           </label>
-          <button onClick={reload}>Refresh</button>
+          <button onClick={reload}>{t("common.refresh")}</button>
           <button
             onClick={async () => {
-              if (!confirm("Clear the log file? This can't be undone.")) return;
+              if (!confirm(t("logs.confirmClear"))) return;
               await logsApi.clear();
               reload();
             }}
-            title="Truncates the log file on disk"
+            title={t("logs.clearTitle")}
           >
-            Clear
+            {t("common.clear")}
           </button>
         </div>
       </div>
       {error && <div className="error-text">{error}</div>}
       <pre ref={boxRef} className="log-viewer">
-        {lines.length > 0 ? lines.join("\n") : "(no log output yet)"}
+        {lines.length > 0 ? lines.join("\n") : t("logs.empty")}
       </pre>
     </>
   );
@@ -91,6 +94,7 @@ function ServerLog() {
 // phone-only crashes be read back on the site, since a mobile browser has no
 // dev console.
 function BrowserLog() {
+  const t = useT();
   const [entries, setEntries] = useState<ClientLogEntry[]>(getClientLog());
   const boxRef = useRef<HTMLPreElement>(null);
 
@@ -111,23 +115,23 @@ function BrowserLog() {
     <>
       <div className="node-cell-header" style={{ justifyContent: "flex-end" }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span className="node-cell-hint">{entries.length} entries</span>
+          <span className="node-cell-hint">{t("logs.entries", { n: entries.length })}</span>
           <button
             onClick={() => {
               navigator.clipboard?.writeText(text).then(
-                () => alert("Copied browser log to clipboard."),
-                () => alert("Copy failed — select the text manually."),
+                () => alert(t("logs.copied")),
+                () => alert(t("logs.copyFailed")),
               );
             }}
           >
-            Copy
+            {t("common.copy")}
           </button>
-          <button onClick={() => setEntries([...getClientLog()])}>Refresh</button>
-          <button onClick={() => clearClientLog()}>Clear</button>
+          <button onClick={() => setEntries([...getClientLog()])}>{t("common.refresh")}</button>
+          <button onClick={() => clearClientLog()}>{t("common.clear")}</button>
         </div>
       </div>
       <pre ref={boxRef} className="log-viewer">
-        {entries.length > 0 ? text : "(no browser errors captured this session)"}
+        {entries.length > 0 ? text : t("logs.browserEmpty")}
       </pre>
     </>
   );

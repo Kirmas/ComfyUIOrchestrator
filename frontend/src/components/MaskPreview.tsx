@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useT } from "../i18n";
 
 // Capped independent of the source image's real resolution -- a painted
 // brush mask doesn't need source-resolution precision, and this keeps the
@@ -82,6 +83,7 @@ export function MaskPreview({
   maskPng: string | null;
   onCommit: (maskPng: string | null) => void;
 }) {
+  const t = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
   const [brushRadius, setBrushRadius] = useState(24);
@@ -207,17 +209,17 @@ export function MaskPreview({
     <div onClick={(e) => e.stopPropagation()}>
       <div style={{ display: "flex", gap: 6, marginBottom: 4, alignItems: "center", flexWrap: "wrap" }}>
         <label style={{ fontSize: 10, display: "flex", alignItems: "center", gap: 4 }}>
-          Brush
+          {t("mask.brush")}
           <input type="range" min={4} max={100} value={brushRadius} onChange={(e) => setBrushRadius(Number(e.target.value))} />
         </label>
         <button className={erasing ? "active" : ""} style={{ fontSize: 10, padding: "1px 6px" }} onClick={() => setErasing((v) => !v)}>
-          {erasing ? "Erasing" : "Painting"}
+          {erasing ? t("mask.erasing") : t("mask.painting")}
         </button>
         <button style={{ fontSize: 10, padding: "1px 6px" }} onClick={undo} disabled={undoCount === 0}>
-          Undo
+          {t("mask.undo")}
         </button>
         <button style={{ fontSize: 10, padding: "1px 6px" }} onClick={clear} disabled={!hasStrokes}>
-          Clear
+          {t("common.clear")}
         </button>
       </div>
       <div style={{ position: "relative", userSelect: "none", lineHeight: 0 }}>

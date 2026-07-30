@@ -12,6 +12,7 @@ import {
   type FieldResolution,
 } from "../workflowMatching";
 import type { Backend, NodeTemplate, ParamField, ParamMappingEntry, WorkflowAnalysis } from "../types";
+import { useT } from "../i18n";
 
 export type WizardMode = { kind: "create" } | { kind: "add-instance"; template: NodeTemplate; excludeBackendIds: string[] };
 
@@ -52,6 +53,7 @@ function ResolveFieldRow<T>({
   optionLabel: (opt: T) => string;
   onChange: (value: string) => void;
 }) {
+  const t = useT();
   return (
     <div className="inline-form" style={{ marginTop: 0 }}>
       <span style={{ width: 140 }}>
@@ -59,23 +61,24 @@ function ResolveFieldRow<T>({
       </span>
       <select value={value} onChange={(e) => onChange(e.target.value)}>
         <option value="" disabled>
-          — choose —
+          {t("wizard.choose")}
         </option>
         {options.map((o) => (
           <option key={optionValue(o)} value={optionValue(o)}>
             {optionLabel(o)}
           </option>
         ))}
-        <option value={ABSENT}>— not present in this workflow —</option>
+        <option value={ABSENT}>{t("wizard.notPresent")}</option>
       </select>
-      {value === ABSENT && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>will be left as-is in this workflow</span>}
-      {value !== ABSENT && value !== "" && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>matched</span>}
-      {value === "" && <span className="error-text">no confident auto-match -- choose one</span>}
+      {value === ABSENT && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("wizard.leftAsIs")}</span>}
+      {value !== ABSENT && value !== "" && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("wizard.matched")}</span>}
+      {value === "" && <span className="error-text">{t("wizard.noAutoMatch")}</span>}
     </div>
   );
 }
 
 export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends: Backend[]; mode: WizardMode; onCancel: () => void; onSaved: () => void }) {
+  const t = useT();
   const comfyBackends = backends.filter((b) => b.kind === "comfyui");
   const availableBackends = mode.kind === "add-instance" ? comfyBackends.filter((b) => !mode.excludeBackendIds.includes(b.id)) : comfyBackends;
 
@@ -155,7 +158,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
     try {
       parsed = JSON.parse(text);
     } catch {
-      setAnalyzeError("File is not valid JSON.");
+      setAnalyzeError(t("wizard.notJson"));
       return;
     }
     setWorkflowJson(parsed);
@@ -164,7 +167,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
     try {
       result = await nodeTemplatesApi.analyzeWorkflow(file);
     } catch (err) {
-      setAnalyzeError(err instanceof Error ? err.message : "Failed to analyze workflow.");
+      setAnalyzeError(err instanceof Error ? err.message : t("wizard.analyzeFailed"));
       return;
     }
 
@@ -353,7 +356,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
       else await submitAddInstance();
       onSaved();
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "Failed to save.");
+      setSaveError(err instanceof Error ? err.message : t("wizard.saveFailed"));
     } finally {
       setSaving(false);
     }
@@ -363,15 +366,15 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
 
   return (
     <div className="settings-section">
-      <h2>{mode.kind === "create" ? "New node type (from a ComfyUI workflow)" : `Add ComfyUI instance to "${mode.template.name}"`}</h2>
+      <h2>{mode.kind === "create" ? t("wizard.createTitle") : t("wizard.addInstanceTitle", { name: mode.template.name })}</h2>
 
       {step === 1 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {mode.kind === "create" && (
             <>
               <div className="field-row">
-                <label>Display name</label>
-                <input value={name} onChange={(e) => updateName(e.target.value)} placeholder="Text to Image" />
+                <label>{t("wizard.displayName")}</label>
+                <input value={name} onChange={(e) => updateName(e.target.value)} placeholder={t("wizard.displayNamePlaceholder")} />
               </div>
               <div className="field-row">
                 <label>node_type_slug</label>
@@ -388,10 +391,10 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
           )}
 
           <div className="field-row">
-            <label>ComfyUI backend this instance runs on</label>
+            <label>{t("wizard.backendLabel")}</label>
             {availableBackends.length === 0 && (
               <span style={{ color: "var(--text-dim)" }}>
-                {mode.kind === "add-instance" ? "All registered ComfyUI backends already have an instance of this node type." : "No ComfyUI backends registered yet."}
+                {mode.kind === "add-instance" ? t("wizard.allBackendsTaken") : t("wizard.noComfyBackends")}
               </span>
             )}
             {mode.kind === "add-instance" ? (
@@ -400,7 +403,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
               availableBackends.length === 1 && <span>{availableBackends[0].name}</span>
             ) : (
               <select value={selectedBackendId} onChange={(e) => setSelectedBackendId(e.target.value)}>
-                <option value="">choose backend…</option>
+                <option value="">{t("wizard.chooseBackend")}</option>
                 {availableBackends.map((b) => (
                   <option key={b.id} value={b.id}>
                     {b.name}
@@ -413,23 +416,23 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
           {mode.kind === "create" && (
             <>
               <div className="field-row">
-                <label>Input image slots (0 or more -- e.g. a reference photo)</label>
+                <label>{t("wizard.inputSlots")}</label>
                 {inputSlots.map((slot, i) => (
                   <div key={i} className="inline-form" style={{ marginTop: 0 }}>
                     <input
                       value={slot.label}
                       onChange={(e) => setInputSlots((s) => s.map((x, idx) => (idx === i ? { ...x, label: e.target.value } : x)))}
                     />
-                    <button onClick={() => removeInputSlot(i)}>remove</button>
+                    <button onClick={() => removeInputSlot(i)}>{t("common.remove")}</button>
                   </div>
                 ))}
                 <button onClick={addInputSlot} style={{ alignSelf: "flex-start" }}>
-                  + input slot
+                  {t("wizard.addInputSlot")}
                 </button>
               </div>
 
               <div className="field-row">
-                <label>Expected output count (SaveImage/PreviewImage nodes in the workflow)</label>
+                <label>{t("wizard.expectedOutputs")}</label>
                 <input
                   type="number"
                   min={1}
@@ -443,9 +446,9 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
 
           <div className="node-actions">
             <button className="primary" disabled={!canGoToUpload} onClick={() => setStep(2)}>
-              Next: upload workflow.json
+              {t("wizard.nextUpload")}
             </button>
-            <button onClick={onCancel}>Cancel</button>
+            <button onClick={onCancel}>{t("common.cancel")}</button>
           </div>
         </div>
       )}
@@ -462,7 +465,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
           />
           {analyzeError && <div className="error-text">{analyzeError}</div>}
           <button onClick={() => setStep(1)} style={{ alignSelf: "flex-start" }}>
-            ← back
+            {t("wizard.back")}
           </button>
         </div>
       )}
@@ -470,23 +473,20 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
       {step === 3 && analysis && (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {activeDuplicateTitles.length > 0 && (
-            <div className="error-text">
-              These node titles are duplicated among the fields you're keeping, so mapping by title is ambiguous: {activeDuplicateTitles.join(", ")}.
-              Uncheck/remap enough of them to leave only one per title, or rename the nodes in ComfyUI and re-upload.
-            </div>
+            <div className="error-text">{t("wizard.duplicateTitles", { titles: activeDuplicateTitles.join(", ") })}</div>
           )}
 
           {mode.kind === "create" &&
             inputSlots.map((slot, i) => (
               <div key={i} className="field-row">
-                <label>{slot.label} -- source LoadImage node</label>
+                <label>{t("wizard.sourceLoadImage", { label: slot.label })}</label>
                 <select
                   value={slot.nodeId}
                   onChange={(e) => setInputSlots((s) => s.map((x, idx) => (idx === i ? { ...x, nodeId: e.target.value } : x)))}
                 >
                   {analysis.input_image_nodes.map((n) => (
                     <option key={n.node_id} value={n.node_id}>
-                      {n.title ?? `(untitled node ${n.node_id})`}
+                      {n.title ?? t("wizard.untitledNode", { id: n.node_id })}
                     </option>
                   ))}
                 </select>
@@ -496,14 +496,14 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
           {mode.kind === "add-instance" &&
             templateImageFields.map((field, i) => (
               <div key={field.name} className="field-row">
-                <label>{field.label ?? field.name} -- source LoadImage node</label>
+                <label>{t("wizard.sourceLoadImage", { label: field.label ?? field.name })}</label>
                 <select
                   value={imageSlotNodeIds[i] ?? ""}
                   onChange={(e) => setImageSlotNodeIds((s) => s.map((x, idx) => (idx === i ? e.target.value : x)))}
                 >
                   {analysis.input_image_nodes.map((n) => (
                     <option key={n.node_id} value={n.node_id}>
-                      {n.title ?? `(untitled node ${n.node_id})`}
+                      {n.title ?? t("wizard.untitledNode", { id: n.node_id })}
                     </option>
                   ))}
                 </select>
@@ -511,14 +511,14 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
             ))}
 
           <div className="field-row">
-            <label>Output nodes found</label>
+            <label>{t("wizard.outputNodes")}</label>
             <span>{analysis.output_nodes.map((n) => n.title ?? n.node_id).join(", ")}</span>
           </div>
 
           {mode.kind === "create" && (
             <div className="field-row">
-              <label>Detected fields</label>
-              {analysis.detected_fields.length === 0 && <span style={{ color: "var(--text-dim)" }}>None detected (no KSampler found).</span>}
+              <label>{t("wizard.detectedFields")}</label>
+              {analysis.detected_fields.length === 0 && <span style={{ color: "var(--text-dim)" }}>{t("wizard.noneDetected")}</span>}
               {groupDetectedFields(analysis.detected_fields).map((group) =>
                 group.fields.length === 1 ? (
                   (() => {
@@ -536,7 +536,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
                           style={{ width: 140 }}
                         />
                         <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
-                          {f.type}, default: {String(f.default)}
+                          {t("wizard.fieldDefault", { type: f.type, value: String(f.default) })}
                         </span>
                       </div>
                     );
@@ -572,7 +572,10 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
                       style={{ width: 140 }}
                     />
                     <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
-                      {group.fields.length} numbers ({group.fields.map((f) => groupMemberSuffix(group.fields, f)).join("/")})
+                      {t("wizard.groupNumbers", {
+                        n: group.fields.length,
+                        parts: group.fields.map((f) => groupMemberSuffix(group.fields, f)).join("/"),
+                      })}
                     </span>
                   </div>
                 ),
@@ -582,8 +585,8 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
 
           {mode.kind === "add-instance" && (
             <div className="field-row">
-              <label>Fields (matched against this node type's existing schema)</label>
-              {templateOtherFields.length === 0 && <span style={{ color: "var(--text-dim)" }}>No non-image fields on this template.</span>}
+              <label>{t("wizard.matchedFields")}</label>
+              {templateOtherFields.length === 0 && <span style={{ color: "var(--text-dim)" }}>{t("wizard.noNonImageFields")}</span>}
 
               {templateCropGroups.map((group) => {
                 const names = [group.xField, group.yField, group.widthField, group.heightField];
@@ -602,11 +605,11 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
                   <ResolveFieldRow
                     key={group.prefix}
                     label={group.prefix}
-                    typeHint="crop, 4x int"
+                    typeHint={t("wizard.cropTypeHint")}
                     value={value}
                     options={detectedCropGroups}
                     optionValue={(g) => g.signature}
-                    optionLabel={(g) => `${defaultGroupLabel(g.fields)} (crop)`}
+                    optionLabel={(g) => t("wizard.cropOption", { label: defaultGroupLabel(g.fields) })}
                     onChange={(v) =>
                       setFieldResolutions((m) => {
                         const next = { ...m };
@@ -652,16 +655,16 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
           )}
 
           {missingTitlesCount > 0 && (
-            <div className="error-text">Some assigned nodes have no title in ComfyUI -- rename them and re-upload before saving.</div>
+            <div className="error-text">{t("wizard.missingTitles")}</div>
           )}
           {saveError && <div className="error-text">{saveError}</div>}
 
           <div className="node-actions">
             <button className="primary" onClick={submit} disabled={!canApprove}>
-              {saving ? "Saving…" : "Approve"}
+              {saving ? t("common.saving") : t("wizard.approve")}
             </button>
-            <button onClick={() => setStep(2)}>← back</button>
-            <button onClick={onCancel}>Cancel</button>
+            <button onClick={() => setStep(2)}>{t("wizard.back")}</button>
+            <button onClick={onCancel}>{t("common.cancel")}</button>
           </div>
         </div>
       )}

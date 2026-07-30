@@ -1,14 +1,16 @@
 import { useState } from "react";
 import { nodeTemplatesApi } from "../api/endpoints";
+import { useT, type TKey } from "../i18n";
 import type { NodeTemplate } from "../types";
 
-const SOURCE_HINT: Record<string, string> = {
-  auto: "Derived from this node type's workflows. Updates by itself when they change.",
-  manual: "Written by hand. It stays as-is until reset.",
-  agent: "Written by an agent. Replaced by the auto text once the workflows change.",
+const SOURCE_HINT: Record<string, TKey> = {
+  auto: "desc.sourceAuto",
+  manual: "desc.sourceManual",
+  agent: "desc.sourceAgent",
 };
 
 export function NodeTypeDescription({ template, onChanged }: { template: NodeTemplate; onChanged: () => void }) {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(template.description ?? "");
   const [busy, setBusy] = useState(false);
@@ -46,34 +48,34 @@ export function NodeTypeDescription({ template, onChanged }: { template: NodeTem
             rows={3}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            placeholder="What does this node type do?"
+            placeholder={t("desc.placeholder")}
             style={{ width: "100%" }}
           />
           <div className="description-actions">
             <button className="primary" onClick={save} disabled={busy}>
-              {busy ? "Saving…" : "Save"}
+              {busy ? t("common.saving") : t("common.save")}
             </button>
             <button onClick={() => { setDraft(template.description ?? ""); setEditing(false); }} disabled={busy}>
-              Cancel
+              {t("common.cancel")}
             </button>
           </div>
         </>
       ) : (
         <>
-          <div className="description-text">{template.description || "(no description)"}</div>
+          <div className="description-text">{template.description || t("desc.none")}</div>
           <div className="description-actions">
-            <span className="status-pill" title={SOURCE_HINT[source]}>
+            <span className="status-pill" title={SOURCE_HINT[source] ? t(SOURCE_HINT[source]) : undefined}>
               {source}
             </span>
-            <button onClick={() => { setDraft(template.description ?? ""); setEditing(true); }}>edit</button>
+            <button onClick={() => { setDraft(template.description ?? ""); setEditing(true); }}>{t("common.edit")}</button>
             {source !== "auto" && (
-              <button onClick={resetToAuto} disabled={busy} title="Go back to the description derived from the workflows">
-                reset to auto
+              <button onClick={resetToAuto} disabled={busy} title={t("desc.resetTitle")}>
+                {t("desc.resetToAuto")}
               </button>
             )}
             {fingerprint.length > 0 && (
               <details className="description-facts">
-                <summary>facts</summary>
+                <summary>{t("desc.facts")}</summary>
                 <ul>
                   {fingerprint.map(([key, value]) => (
                     <li key={key}>

@@ -4,6 +4,7 @@ import { useProjectWs } from "../api/useProjectWs";
 import { useProjectStore } from "../state/projectStore";
 import { resolveSlotAsset } from "../slotResolution";
 import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project, Track } from "../types";
+import { useT } from "../i18n";
 import { cx } from "../utils";
 import { isFileDrag } from "../dragUtils";
 import { AnnotationFrame } from "./AnnotationFrame";
@@ -63,6 +64,7 @@ function isPickable(node: NodeItem, outputs: Asset[]): boolean {
 }
 
 export function Grid({ projectId }: { projectId: string }) {
+  const t = useT();
   const { tracks, nodesById, outputsByNode, spans, blockedCells, annotations, loadProject, reloadTracks, reloadAnnotations, applyProgressEvent, addNode, setNode, removeTrack, refreshNodeOutputs } =
     useProjectStore();
   // Nodes ticked for grouping into a comment block. Shift/Ctrl/Cmd-click on a
@@ -104,7 +106,7 @@ export function Grid({ projectId }: { projectId: string }) {
   // Files can also be dropped straight onto an existing empty asset cell, which
   // NodeCell handles itself.
   const [fileDragActive, setFileDragActive] = useState(false);
-  // Which empty cell the "з референсів" picker is filling, if open.
+  // Which empty cell the reference picker is filling, if open.
   const [pickRefAt, setPickRefAt] = useState<{ row: number; step: number } | null>(null);
   // How many leading columns an as-yet-empty track should skip before its
   // first real cell -- purely a UI notion (never sent to the backend on its
@@ -575,9 +577,9 @@ export function Grid({ projectId }: { projectId: string }) {
   // the 2026-07-21 data-loss surface). We just drop the deleted track's nodes
   // locally and re-derive every row number from the shorter list.
   const deleteTrackRow = async (trackId: string) => {
-    if (!confirm("Delete this whole track and every cell in it? This can't be undone.")) return;
+    if (!confirm(t("grid.confirmDeleteTrack"))) return;
     if (structuralOpRef.current) {
-      alert("Another move is still in progress -- try again in a moment.");
+      alert(t("grid.moveInProgress"));
       return;
     }
     structuralOpRef.current = true;
@@ -587,7 +589,7 @@ export function Grid({ projectId }: { projectId: string }) {
       await reloadTracks(projectId);
     } catch (e) {
       // e.g. the backend refuses deleting a multi-input workflow's span row.
-      alert(e instanceof Error ? e.message : "Couldn't delete this track.");
+      alert(e instanceof Error ? e.message : t("grid.deleteTrackFailed"));
     } finally {
       structuralOpRef.current = false;
     }
@@ -602,7 +604,7 @@ export function Grid({ projectId }: { projectId: string }) {
   // 409), which we just skip -- no uncaught errors, no half-done loop.
   const shrinkWorkflowToFit = async (node: NodeItem) => {
     if (structuralOpRef.current) {
-      alert("Another move is still in progress -- try again in a moment.");
+      alert(t("grid.moveInProgress"));
       return;
     }
     structuralOpRef.current = true;
@@ -614,7 +616,7 @@ export function Grid({ projectId }: { projectId: string }) {
           !Object.values(live.nodesById).some((n) => n.track_id === t.id),
       );
       if (emptySpawned.length === 0) {
-        alert("Nothing to clean up -- this card has no empty candidate rows.");
+        alert(t("grid.nothingToCleanUp"));
         return;
       }
       let removed = 0;
@@ -698,7 +700,7 @@ export function Grid({ projectId }: { projectId: string }) {
     const track = tracks.find((t) => t.id === trackId);
     if (!track) return;
     if (wouldBreakOutputBinding(track.row_index, 1)) {
-      alert("Can't insert a track there -- it would push a workflow's own output out of its valid range. Try inserting elsewhere.");
+      alert(t("grid.insertTrackBlocked"));
       return;
     }
     await insertTracksAt(track.row_index, 1);
@@ -753,7 +755,7 @@ export function Grid({ projectId }: { projectId: string }) {
     if (compareFor && compareFor.nodeId !== node.id) {
       const asset = await resolvePrimaryOutput(node);
       if (!asset) {
-        alert("This cell has no outputs yet.");
+        alert(t("grid.noOutputsYet"));
         return;
       }
       setComparePair([compareFor.asset, asset]);
@@ -780,7 +782,7 @@ export function Grid({ projectId }: { projectId: string }) {
     if (targetRow === draggedRow && targetStep === dragged.step_index) return;
 
     if (structuralOpRef.current) {
-      alert("Another move is still in progress -- try again in a moment.");
+      alert(t("grid.moveInProgress"));
       return;
     }
     structuralOpRef.current = true;
@@ -788,7 +790,7 @@ export function Grid({ projectId }: { projectId: string }) {
       await nodesApi.move(dragged.id, { target_row: targetRow, target_step: targetStep });
       await loadProject(projectId);
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Couldn't move this cell.");
+      alert(e instanceof Error ? e.message : t("grid.moveCellFailed"));
     } finally {
       structuralOpRef.current = false;
     }
@@ -801,7 +803,7 @@ export function Grid({ projectId }: { projectId: string }) {
   // the authoritative layout.
   const dropWorkflowAt = async (workflowNode: NodeItem, targetRow: number, targetStep: number) => {
     if (structuralOpRef.current) {
-      alert("Another move is still in progress -- try again in a moment.");
+      alert(t("grid.moveInProgress"));
       return;
     }
     if (targetRow === effectiveRow(workflowNode) && targetStep === workflowNode.step_index) return;
@@ -810,7 +812,7 @@ export function Grid({ projectId }: { projectId: string }) {
       await nodesApi.move(workflowNode.id, { target_row: targetRow, target_step: targetStep });
       await loadProject(projectId);
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Couldn't move this node.");
+      alert(e instanceof Error ? e.message : t("grid.moveNodeFailed"));
     } finally {
       structuralOpRef.current = false;
     }
@@ -896,7 +898,7 @@ export function Grid({ projectId }: { projectId: string }) {
     if (!targetTrack) return;
     const asset = await resolvePrimaryOutput(sourceNode);
     if (!asset) {
-      alert("This asset has no resolved output yet -- can't reference it.");
+      alert(t("grid.refNoOutput"));
       return;
     }
     const refNode = await nodesApi.create({
@@ -957,7 +959,7 @@ export function Grid({ projectId }: { projectId: string }) {
       // (ensure_span_rows), same as choosing a template on a fresh cell does.
       await reloadTracks(projectId);
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Couldn't copy this node.");
+      alert(e instanceof Error ? e.message : t("grid.copyFailed"));
     }
   };
 
@@ -983,7 +985,7 @@ export function Grid({ projectId }: { projectId: string }) {
       // already.)
       setNode(await nodesApi.get(created.id));
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Couldn't load the dropped file here.");
+      alert(e instanceof Error ? e.message : t("grid.dropFileFailed"));
     }
   };
 
@@ -1100,9 +1102,9 @@ export function Grid({ projectId }: { projectId: string }) {
           container, breaking position: sticky. Mouse wheel over the canvas
           zooms (onBackgroundPointerDown's pan took over plain scrolling). */}
       <div className="zoom-indicator">
-        zoom {zoomIndex > 2 ? `+${zoomIndex - 2}` : zoomIndex - 2} ({Math.round(zoomScale * 100)}%)
-        <button onClick={() => setZoomIndex(2)} title="Reset zoom to 0 (100%)" disabled={zoomIndex === 2}>
-          reset
+        {t("grid.zoom")} {zoomIndex > 2 ? `+${zoomIndex - 2}` : zoomIndex - 2} ({Math.round(zoomScale * 100)}%)
+        <button onClick={() => setZoomIndex(2)} title={t("grid.resetZoomTitle")} disabled={zoomIndex === 2}>
+          {t("common.reset")}
         </button>
       </div>
       {selectedNodeIds.size > 0 && (
@@ -1110,12 +1112,14 @@ export function Grid({ projectId }: { projectId: string }) {
         // wrapper, so its position: sticky isn't captured by the zoom
         // transform's containing block.
         <div className="selection-bar">
-          {selectedNodeIds.size} cell{selectedNodeIds.size === 1 ? "" : "s"} selected
-          <button onClick={createAnnotationFromSelection} title="Draw a comment frame around the selected cells">
-            + comment
+          {selectedNodeIds.size === 1
+            ? t("grid.selectedOne", { n: selectedNodeIds.size })
+            : t("grid.selectedMany", { n: selectedNodeIds.size })}
+          <button onClick={createAnnotationFromSelection} title={t("grid.addCommentTitle")}>
+            {t("grid.addComment")}
           </button>
-          <button onClick={() => setSelectedNodeIds(new Set())} title="Clear the selection">
-            clear
+          <button onClick={() => setSelectedNodeIds(new Set())} title={t("grid.clearSelectionTitle")}>
+            {t("common.clearLower")}
           </button>
         </div>
       )}
@@ -1162,16 +1166,16 @@ export function Grid({ projectId }: { projectId: string }) {
               // that only *appeared* to belong to some other row).
               style={{ gridColumn: 1, gridRow: track.row_index + 1, display: "flex", alignItems: "center", justifyContent: "space-between" }}
             >
-              track {track.row_index}
+              {t("grid.track", { n: track.row_index })}
               <div style={{ display: "flex", gap: 4 }}>
                 <button
                   onClick={() => addTrackAbove(track.id)}
-                  title="Insert a new empty track above this one"
+                  title={t("grid.addTrackAboveTitle")}
                   style={{ fontSize: 10, padding: "1px 4px" }}
                 >
-                  + track above
+                  {t("grid.addTrackAbove")}
                 </button>
-                <button onClick={() => deleteTrackRow(track.id)} title="Delete this track and all its cells" style={{ fontSize: 10, padding: "1px 4px" }}>
+                <button onClick={() => deleteTrackRow(track.id)} title={t("grid.deleteTrackTitle")} style={{ fontSize: 10, padding: "1px 4px" }}>
                   ×
                 </button>
               </div>
@@ -1309,14 +1313,14 @@ export function Grid({ projectId }: { projectId: string }) {
               onClick={() => refFor && completeRefAt(row, step)}
             >
               {refFor ? (
-                <button style={{ fontSize: 10, padding: "1px 4px" }} title="Place the reference here">
-                  place ref here
+                <button style={{ fontSize: 10, padding: "1px 4px" }} title={t("grid.placeRefHereTitle")}>
+                  {t("grid.placeRefHere")}
                 </button>
               ) : (
                 <>
                   <button
                     style={{ fontSize: 10, padding: "1px 4px", opacity: 0.6 }}
-                    title="Load an asset here manually -- not tied to the adjacent workflow node's output"
+                    title={t("grid.addAssetManualTitle")}
                     onClick={async () => {
                       const targetTrack = trackByRowIndex.get(row);
                       if (!targetTrack) return;
@@ -1324,14 +1328,14 @@ export function Grid({ projectId }: { projectId: string }) {
                       addNode(created);
                     }}
                   >
-                    + asset
+                    {t("grid.addAsset")}
                   </button>
                   <button
                     style={{ fontSize: 10, padding: "1px 4px", opacity: 0.6, marginLeft: 4 }}
-                    title="Place an image from the project's reference library (the idea board's)"
+                    title={t("grid.fromReferencesTitle")}
                     onClick={() => setPickRefAt({ row, step })}
                   >
-                    з референсів
+                    {t("grid.fromReferences")}
                   </button>
                 </>
               )}
@@ -1361,8 +1365,8 @@ export function Grid({ projectId }: { projectId: string }) {
               onClick={() => copyFor && completeCopyAt(row, step)}
             >
               {copyFor && (
-                <button style={{ fontSize: 10, padding: "1px 4px" }} title="Place the copy here">
-                  place copy here
+                <button style={{ fontSize: 10, padding: "1px 4px" }} title={t("grid.placeCopyHereTitle")}>
+                  {t("grid.placeCopyHere")}
                 </button>
               )}
             </div>
@@ -1446,35 +1450,35 @@ export function Grid({ projectId }: { projectId: string }) {
                 >
                   {showStartChoice ? (
                     <>
-                      <button onClick={() => addStep(track.id, "asset")} title="First column in this project: asset cells (manual upload)">
-                        + start with asset
+                      <button onClick={() => addStep(track.id, "asset")} title={t("grid.startWithAssetTitle")}>
+                        {t("grid.startWithAsset")}
                       </button>
-                      <button onClick={() => addStep(track.id, "workflow")} title="First column in this project: workflow cells">
-                        + start with workflow
+                      <button onClick={() => addStep(track.id, "workflow")} title={t("grid.startWithWorkflowTitle")}>
+                        {t("grid.startWithWorkflow")}
                       </button>
                     </>
                   ) : emptyTrackKind === "asset" ? (
                     refFor ? (
-                      <button onClick={() => completeRefAt(track.row_index, buttonStep)} title="Place the reference here">
-                        place ref here
+                      <button onClick={() => completeRefAt(track.row_index, buttonStep)} title={t("grid.placeRefHereTitle")}>
+                        {t("grid.placeRefHere")}
                       </button>
                     ) : (
                       <>
-                        <button onClick={() => addStep(track.id, "asset", buttonStep)} title="This column in this track: asset cell (manual upload)">
-                          + asset
+                        <button onClick={() => addStep(track.id, "asset", buttonStep)} title={t("grid.addAssetHereTitle")}>
+                          {t("grid.addAsset")}
                         </button>
-                        <button onClick={skipColumn} title="Leave this column blank for this track and offer the next one instead">
-                          empty
+                        <button onClick={skipColumn} title={t("grid.emptyTitle")}>
+                          {t("grid.empty")}
                         </button>
                       </>
                     )
                   ) : emptyTrackKind === "workflow" ? (
                     <>
-                      <button onClick={() => addStep(track.id, "workflow", buttonStep)} title="This column in this track: workflow cell">
-                        + step
+                      <button onClick={() => addStep(track.id, "workflow", buttonStep)} title={t("grid.addStepTitle")}>
+                        {t("grid.addStep")}
                       </button>
-                      <button onClick={skipColumn} title="Leave this column blank for this track and offer the next one instead">
-                        empty
+                      <button onClick={skipColumn} title={t("grid.emptyTitle")}>
+                        {t("grid.empty")}
                       </button>
                     </>
                   ) : null}
@@ -1482,12 +1486,12 @@ export function Grid({ projectId }: { projectId: string }) {
                 {!showStartChoice && secondAvailable && (
                   <div style={{ gridColumn: secondStep + 2, gridRow: rowIdx + 1, alignSelf: "center", display: "flex", gap: 4 }}>
                     {secondKind === "asset" ? (
-                      <button onClick={() => addStep(track.id, "asset", secondStep)} title="This column in this track: asset cell (manual upload)">
-                        + asset
+                      <button onClick={() => addStep(track.id, "asset", secondStep)} title={t("grid.addAssetHereTitle")}>
+                        {t("grid.addAsset")}
                       </button>
                     ) : (
-                      <button onClick={() => addStep(track.id, "workflow", secondStep)} title="This column in this track: workflow cell -- no asset needed first">
-                        + step
+                      <button onClick={() => addStep(track.id, "workflow", secondStep)} title={t("grid.addStepNoAssetTitle")}>
+                        {t("grid.addStep")}
                       </button>
                     )}
                   </div>
@@ -1498,7 +1502,7 @@ export function Grid({ projectId }: { projectId: string }) {
 
           {/* Last of the overlay layers on purpose: overlapping grid items are
               painted (and hit-tested) in DOM order, so while a file drag is in
-              progress this sits on top of the "+ asset"/"з референсів" buttons
+              progress this sits on top of the "+ asset"/"from references" buttons
               in the same cell -- which are click affordances that would
               otherwise swallow the drop. */}
           {fileDropCells.map(({ row, step }) => (
@@ -1523,7 +1527,7 @@ export function Grid({ projectId }: { projectId: string }) {
                 dropFilesAt(row, step, Array.from(e.dataTransfer.files));
               }}
             >
-              drop here
+              {t("grid.dropHere")}
             </div>
           ))}
 
@@ -1532,28 +1536,28 @@ export function Grid({ projectId }: { projectId: string }) {
               key={`add-asset-${node.id}`}
               style={{ gridColumn: step + 2, gridRow: row + 1, alignSelf: "center", display: "flex", gap: 4 }}
             >
-              <button onClick={() => addStep(node.track_id, undefined, step)} title="Add a workflow cell after this asset cell">
-                + step
+              <button onClick={() => addStep(node.track_id, undefined, step)} title={t("grid.addStepAfterAssetTitle")}>
+                {t("grid.addStep")}
               </button>
             </div>
           ))}
         </div>
 
         <div style={{ marginTop: 16 }}>
-          <button onClick={addTrackRow}>+ New track</button>
+          <button onClick={addTrackRow}>{t("grid.newTrack")}</button>
           {compareFor && (
             <button style={{ marginLeft: 8 }} onClick={() => setCompareFor(null)}>
-              Cancel comparing
+              {t("grid.cancelCompare")}
             </button>
           )}
           {refFor && (
             <button style={{ marginLeft: 8 }} onClick={() => setRefFor(null)}>
-              Cancel reference
+              {t("grid.cancelRef")}
             </button>
           )}
           {copyFor && (
             <button style={{ marginLeft: 8 }} onClick={() => setCopyFor(null)}>
-              Cancel copy
+              {t("grid.cancelCopy")}
             </button>
           )}
         </div>

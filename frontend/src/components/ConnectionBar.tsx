@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { ApiError, getApiBaseUrl, getApiToken, setApiBaseUrl, setApiToken } from "../api/client";
 import { projectsApi } from "../api/endpoints";
+import { useT } from "../i18n";
 
 export function ConnectionBar({ forceOpen = false }: { forceOpen?: boolean } = {}) {
+  const t = useT();
   const [baseUrl, setBaseUrlState] = useState(getApiBaseUrl());
   const [token, setTokenState] = useState(getApiToken());
   // forceOpen is for the pre-auth gate in App.tsx: a *saved* token that
@@ -32,15 +34,21 @@ export function ConnectionBar({ forceOpen = false }: { forceOpen?: boolean } = {
     } catch (err) {
       setApiBaseUrl(prevBaseUrl);
       setApiToken(prevToken);
-      setError(err instanceof ApiError && err.status === 401 ? "Invalid API token." : err instanceof Error ? err.message : "Could not reach the backend.");
+      setError(
+        err instanceof ApiError && err.status === 401
+          ? t("conn.invalidToken")
+          : err instanceof Error
+            ? err.message
+            : t("conn.unreachable"),
+      );
       setChecking(false);
     }
   };
 
   if (!open) {
     return (
-      <button onClick={() => setOpen(true)} title={baseUrl || "same origin"}>
-        Connection
+      <button onClick={() => setOpen(true)} title={baseUrl || t("conn.sameOrigin")}>
+        {t("conn.button")}
       </button>
     );
   }
@@ -48,20 +56,20 @@ export function ConnectionBar({ forceOpen = false }: { forceOpen?: boolean } = {
   return (
     <div className="inline-form" style={{ flexWrap: "wrap" }}>
       <input
-        placeholder="API base URL (blank = same origin)"
+        placeholder={t("conn.baseUrlPlaceholder")}
         value={baseUrl}
         onChange={(e) => setBaseUrlState(e.target.value)}
         style={{ width: 260 }}
       />
       <input
-        placeholder="API token"
+        placeholder={t("conn.tokenPlaceholder")}
         type="password"
         value={token}
         onChange={(e) => setTokenState(e.target.value)}
         style={{ width: 180 }}
       />
       <button className="primary" onClick={save} disabled={checking}>
-        {checking ? "Checking…" : "Save & reload"}
+        {checking ? t("conn.checking") : t("conn.saveAndReload")}
       </button>
       {error && <span className="error-text">{error}</span>}
     </div>

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Asset } from "../types";
 import { resolveAssetUrl } from "../api/client";
+import { useT } from "../i18n";
 import { cx } from "../utils";
 import { usePinchPan } from "../usePinchPan";
 
@@ -29,6 +30,7 @@ const aspectMismatch = (l: Dims, r: Dims): boolean => {
  *
  * Image-vs-image only -- mesh assets aren't offered as compare candidates. */
 export function CompareModal({ left, right, onClose }: { left: Asset; right: Asset; onClose: () => void }) {
+  const t = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const [mode, setMode] = useState<"compare" | "zoom">("compare");
   // The divider position as a fraction (0..1) of the image's own content
@@ -119,7 +121,7 @@ export function CompareModal({ left, right, onClose }: { left: Asset; right: Ass
       <div className="compare-modal-content image-modal-fullscreen" onClick={(e) => e.stopPropagation()}>
         {mismatch ? (
           <div className="compare-error">
-            <p className="error-text">Can’t compare images with different aspect ratios.</p>
+            <p className="error-text">{t("compare.mismatch")}</p>
             <p className="node-cell-hint">
               {dims.l!.w}×{dims.l!.h} vs {dims.r!.w}×{dims.r!.h}
             </p>
@@ -188,10 +190,10 @@ export function CompareModal({ left, right, onClose }: { left: Asset; right: Ass
           onClick={toggleMode}
           onPointerDown={(e) => e.stopPropagation()}
           onPointerUp={(e) => e.stopPropagation()}
-          title={zoomMode ? "Back to compare (resets zoom)" : "Zoom in to inspect detail"}
+          title={zoomMode ? t("compare.backTitle") : t("compare.zoomTitle")}
           disabled={mismatch}
         >
-          {zoomMode ? "⇔ Compare" : "🔍 Zoom"}
+          {zoomMode ? t("compare.compare") : t("compare.zoom")}
         </button>
         <button
           type="button"
@@ -199,7 +201,7 @@ export function CompareModal({ left, right, onClose }: { left: Asset; right: Ass
           onClick={onClose}
           onPointerDown={(e) => e.stopPropagation()}
           onPointerUp={(e) => e.stopPropagation()}
-          title="Close compare"
+          title={t("compare.closeTitle")}
         >
           ×
         </button>

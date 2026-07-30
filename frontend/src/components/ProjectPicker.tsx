@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { projectsApi } from "../api/endpoints";
+import { useT } from "../i18n";
 import type { Project } from "../types";
 
 export function ProjectPicker({
@@ -9,6 +10,7 @@ export function ProjectPicker({
   projectId: string | null;
   onSelect: (id: string) => void;
 }) {
+  const t = useT();
   const [projects, setProjects] = useState<Project[]>([]);
   const [newName, setNewName] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -28,7 +30,7 @@ export function ProjectPicker({
       // An empty dropdown from a swallowed error looks identical to "you
       // have no projects yet" -- surface it instead (see ConnectionBar for
       // the same problem on the token-entry path).
-      .catch((err) => setLoadError(err instanceof Error ? err.message : "Failed to load projects."));
+      .catch((err) => setLoadError(err instanceof Error ? err.message : t("project.loadFailed")));
 
   useEffect(() => {
     reload();
@@ -46,7 +48,7 @@ export function ProjectPicker({
   const deleteProject = async () => {
     if (!projectId) return;
     const project = projects.find((p) => p.id === projectId);
-    if (!confirm(`Delete project "${project?.name ?? projectId}" and everything in it? This can't be undone.`)) return;
+    if (!confirm(t("project.confirmDelete", { name: project?.name ?? projectId }))) return;
     await projectsApi.remove(projectId);
     await reload();
     onSelect("");
@@ -61,7 +63,7 @@ export function ProjectPicker({
       )}
       <select value={projectId ?? ""} onChange={(e) => onSelect(e.target.value)}>
         <option value="" disabled>
-          Select project…
+          {t("project.select")}
         </option>
         {projects.map((p) => (
           <option key={p.id} value={p.id}>
@@ -70,12 +72,12 @@ export function ProjectPicker({
         ))}
       </select>
       {projectId && (
-        <button onClick={deleteProject} title="Delete this project">
-          Delete project
+        <button onClick={deleteProject} title={t("project.deleteTitle")}>
+          {t("project.delete")}
         </button>
       )}
-      <input placeholder="New project name" value={newName} onChange={(e) => setNewName(e.target.value)} style={{ width: 140 }} />
-      <button onClick={createProject}>+ New</button>
+      <input placeholder={t("project.newPlaceholder")} value={newName} onChange={(e) => setNewName(e.target.value)} style={{ width: 140 }} />
+      <button onClick={createProject}>{t("project.new")}</button>
     </div>
   );
 }

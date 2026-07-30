@@ -5,6 +5,7 @@ import type { Backend, Capability, DetectedField, NodeTemplate } from "../types"
 import { NodeTypeWizard } from "./NodeTypeWizard";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
 import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
+import { LANGS, tr, useLangStore, useT } from "../i18n";
 
 // Only one provider is actually wired up backend-side right now
 // (GeminiImageBackend, api_backend.py's PROVIDERS registry) -- a friendly
@@ -20,12 +21,37 @@ async function tryDelete(action: () => Promise<unknown>, reload: () => void): Pr
     await action();
     reload();
   } catch (err) {
-    alert(err instanceof Error ? err.message : "Delete failed.");
+    alert(err instanceof Error ? err.message : tr("settings.deleteFailed"));
   }
 }
 
 function describeError(err: unknown): string {
-  return err instanceof Error ? err.message : "Failed to load.";
+  return err instanceof Error ? err.message : tr("settings.loadFailed");
+}
+
+/** The one setting that isn't stored server-side: the interface language lives
+ * in localStorage (see i18n.ts) because it's a property of this browser, not
+ * of the single shared account every device signs in with. */
+function LanguageSection() {
+  const t = useT();
+  const lang = useLangStore((s) => s.lang);
+  const setLang = useLangStore((s) => s.setLang);
+
+  return (
+    <div className="settings-section">
+      <h2>{t("settings.language")}</h2>
+      <div className="inline-form">
+        <select value={lang} onChange={(e) => setLang(e.target.value as typeof lang)}>
+          {LANGS.map((l) => (
+            <option key={l.value} value={l.value}>
+              {t(l.labelKey)}
+            </option>
+          ))}
+        </select>
+        <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("settings.languageHint")}</span>
+      </div>
+    </div>
+  );
 }
 
 /** The "fetch a list, clear/set the load error, stash the result" shape
@@ -48,6 +74,7 @@ function makeReloader<T>(fetcher: () => Promise<T>, setItems: (v: T) => void, se
  * (a second Gemini account, say)? Add a second api_provider backend, don't
  * grant the same key twice. */
 function BackendsSection({ items, reload }: { items: Backend[]; reload: () => void }) {
+  const t = useT();
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [kind, setKind] = useState<"comfyui" | "api_provider">("comfyui");
@@ -75,16 +102,16 @@ function BackendsSection({ items, reload }: { items: Backend[]; reload: () => vo
 
   return (
     <div className="settings-section">
-      <h2>Backends</h2>
+      <h2>{t("backends.title")}</h2>
       <table>
         <thead>
           <tr>
-            <th>Name</th>
-            <th>Kind</th>
-            <th>URL / provider</th>
-            <th>Active</th>
-            <th>Daily limit</th>
-            <th>Used (24h)</th>
+            <th>{t("backends.colName")}</th>
+            <th>{t("backends.colKind")}</th>
+            <th>{t("backends.colUrl")}</th>
+            <th>{t("backends.colActive")}</th>
+            <th>{t("backends.colDailyLimit")}</th>
+            <th>{t("backends.colUsed")}</th>
             <th></th>
           </tr>
         </thead>
@@ -96,9 +123,9 @@ function BackendsSection({ items, reload }: { items: Backend[]; reload: () => vo
               <td>
                 {b.kind === "api_provider" ? (
                   <>
-                    {KNOWN_PROVIDERS.find((p) => p.value === b.provider)?.label ?? b.provider ?? "(no provider)"}
+                    {KNOWN_PROVIDERS.find((p) => p.value === b.provider)?.label ?? b.provider ?? t("backends.noProvider")}
                     {" — "}
-                    {b.has_api_key ? "key set" : <span className="error-text">no key</span>}
+                    {b.has_api_key ? t("backends.keySet") : <span className="error-text">{t("backends.noKey")}</span>}
                   </>
                 ) : (
                   b.base_url
@@ -134,7 +161,7 @@ function BackendsSection({ items, reload }: { items: Backend[]; reload: () => vo
                 {b.kind === "api_provider" ? `${b.used_today}${b.daily_limit != null ? ` / ${b.daily_limit}` : ""}` : ""}
               </td>
               <td>
-                <button onClick={() => tryDelete(() => backendsApi.remove(b.id), reload)}>delete</button>
+                <button onClick={() => tryDelete(() => backendsApi.remove(b.id), reload)}>{t("common.deleteLower")}</button>
               </td>
             </tr>
           ))}
@@ -145,7 +172,7 @@ function BackendsSection({ items, reload }: { items: Backend[]; reload: () => vo
           <option value="comfyui">comfyui</option>
           <option value="api_provider">api_provider</option>
         </select>
-        <input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
+        <input placeholder={t("backends.namePlaceholder")} value={name} onChange={(e) => setName(e.target.value)} />
         {kind === "comfyui" ? (
           <input placeholder="http://host:8188" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} style={{ width: 220 }} />
         ) : (
@@ -157,12 +184,23 @@ function BackendsSection({ items, reload }: { items: Backend[]; reload: () => vo
                 </option>
               ))}
             </select>
-            <input placeholder="API key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} style={{ width: 220 }} />
-            <input placeholder="daily limit (blank = ∞)" style={{ width: 130 }} value={dailyLimit} onChange={(e) => setDailyLimit(e.target.value)} />
+            <input
+              placeholder={t("backends.apiKeyPlaceholder")}
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              style={{ width: 220 }}
+            />
+            <input
+              placeholder={t("backends.dailyLimitPlaceholder")}
+              style={{ width: 130 }}
+              value={dailyLimit}
+              onChange={(e) => setDailyLimit(e.target.value)}
+            />
           </>
         )}
         <button className="primary" onClick={create}>
-          + Add backend
+          {t("backends.add")}
         </button>
       </div>
     </div>
@@ -186,6 +224,7 @@ function CapabilityTextFieldsModal({
   readOnly?: boolean;
   leaderName?: string;
 }) {
+  const t = useT();
   const [fields, setFields] = useState<DetectedField[] | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [savingKey, setSavingKey] = useState<string | null>(null);
@@ -243,23 +282,17 @@ function CapabilityTextFieldsModal({
         style={{ width: 860, maxWidth: "92vw", maxHeight: "85vh", overflowY: "auto", display: "flex", flexDirection: "column" }}
       >
         <div className="node-cell-header">
-          <span>Prompt fields{readOnly ? " (linked, read-only)" : ""}</span>
-          <button className="image-modal-close" onClick={onClose} title="Close">
+          <span>{readOnly ? t("caps.promptFieldsLinked") : t("caps.promptFields")}</span>
+          <button className="image-modal-close" onClick={onClose} title={t("common.close")}>
             ×
           </button>
         </div>
         {readOnly && (
-          <div className="node-cell-hint">
-            These prompts follow “{leaderName ?? "the leader instance"}”. Edit them there; unlink to make this instance independent.
-          </div>
+          <div className="node-cell-hint">{t("caps.leaderHint", { name: leaderName ?? t("caps.leaderFallback") })}</div>
         )}
         {loadError && <div className="error-text">{loadError}</div>}
-        {fields === null && !loadError && <div style={{ fontSize: 12, color: "var(--text-dim)" }}>Loading…</div>}
-        {fields?.length === 0 && (
-          <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-            No baked-in text fields found — this workflow's prompts are all already exposed as regular params, or it has none.
-          </div>
-        )}
+        {fields === null && !loadError && <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("common.loading")}</div>}
+        {fields?.length === 0 && <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("caps.noTextFields")}</div>}
         {fields?.map((f) => (
           <div key={f.key} style={{ marginTop: 12 }}>
             <label style={{ display: "block", fontSize: 12, marginBottom: 4, color: "var(--text-dim)" }}>{f.label}</label>
@@ -285,9 +318,9 @@ function CapabilityTextFieldsModal({
             {!readOnly && (
               <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
                 <button disabled={savingKey === f.key} onClick={() => save(f)}>
-                  {savingKey === f.key ? "Saving…" : "Save"}
+                  {savingKey === f.key ? t("common.saving") : t("common.save")}
                 </button>
-                {savedKey === f.key && <span style={{ fontSize: 11, color: "var(--text-dim)" }}>saved</span>}
+                {savedKey === f.key && <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("common.saved")}</span>}
               </div>
             )}
           </div>
@@ -312,14 +345,15 @@ function PromptLinkControl({
   backendName: (id: string) => string;
   reload: () => void;
 }) {
+  const t = useT();
   const leaderId = (capability.config.prompt_leader_id as string | undefined) ?? "";
   const comfy = siblings.filter((s) => s.execution_type === "comfyui_workflow");
   const followers = comfy.filter((s) => s.config.prompt_leader_id === capability.id);
 
   if (followers.length > 0) {
     return (
-      <span className="node-cell-hint" style={{ marginLeft: 6 }} title="Other instances follow this one's prompts">
-        leads {followers.length}
+      <span className="node-cell-hint" style={{ marginLeft: 6 }} title={t("caps.leadsTitle")}>
+        {t("caps.leads", { n: followers.length })}
       </span>
     );
   }
@@ -331,20 +365,20 @@ function PromptLinkControl({
   return (
     <select
       value={leaderId}
-      title="Follow another instance's prompts (leader → this one)"
+      title={t("caps.followTitle")}
       style={{ marginLeft: 6, maxWidth: 160 }}
       onChange={async (e) => {
         await capabilitiesApi.setPromptLink(capability.id, e.target.value || null);
         reload();
       }}
     >
-      <option value="">independent prompts</option>
+      <option value="">{t("caps.independent")}</option>
       {leaders.map((l) => (
         <option key={l.id} value={l.id}>
-          follow: {backendName(l.backend_id)}
+          {t("caps.follow", { name: backendName(l.backend_id) })}
         </option>
       ))}
-      {leaderId && !hasLeaderOption && <option value={leaderId}>follow: (linked)</option>}
+      {leaderId && !hasLeaderOption && <option value={leaderId}>{t("caps.followLinked")}</option>}
     </select>
   );
 }
@@ -392,6 +426,7 @@ function AddApiInstanceForm({
   onSaved: () => void;
   onCancel: () => void;
 }) {
+  const t = useT();
   const [modelId, setModelId] = useState(KNOWN_GEMINI_MODELS[0].value);
   const [customModel, setCustomModel] = useState(false);
   const [masterPrompt, setMasterPrompt] = useState("");
@@ -476,7 +511,7 @@ function AddApiInstanceForm({
         {backend.name} ({KNOWN_PROVIDERS.find((p) => p.value === backend.provider)?.label ?? backend.provider})
       </div>
       {customModel ? (
-        <input placeholder="model id" value={modelId} onChange={(e) => setModelId(e.target.value)} />
+        <input placeholder={t("api.modelIdPlaceholder")} value={modelId} onChange={(e) => setModelId(e.target.value)} />
       ) : (
         <select
           value={modelId}
@@ -494,13 +529,13 @@ function AddApiInstanceForm({
               {m.label}
             </option>
           ))}
-          <option value={CUSTOM_MODEL_OPTION}>Other (type manually)…</option>
+          <option value={CUSTOM_MODEL_OPTION}>{t("api.otherModel")}</option>
         </select>
       )}
       {existingTextFields.length > 0 && (
         <select value={promptMode} onChange={(e) => setPromptMode(e.target.value as "master" | "match")}>
-          <option value="master">Write a master prompt (baked default)</option>
-          <option value="match">Map to an existing field (free user prompt)</option>
+          <option value="master">{t("api.promptModeMaster")}</option>
+          <option value="match">{t("api.promptModeMatch")}</option>
         </select>
       )}
       {promptMode === "match" && existingTextFields.length > 0 ? (
@@ -513,7 +548,7 @@ function AddApiInstanceForm({
         </select>
       ) : (
         <textarea
-          placeholder="Master prompt — the baked default instruction sent to the model (e.g. 'Generate the back view of this exact character…'). Editable per node afterward."
+          placeholder={t("api.masterPromptPlaceholder")}
           rows={3}
           value={masterPrompt}
           onChange={(e) => setMasterPrompt(e.target.value)}
@@ -525,9 +560,9 @@ function AddApiInstanceForm({
           disabled={saving || (promptMode === "master" ? !masterPrompt.trim() : !matchedField)}
           onClick={save}
         >
-          {saving ? "Saving…" : "Save API instance"}
+          {saving ? t("common.saving") : t("api.saveInstance")}
         </button>
-        <button onClick={onCancel}>Cancel</button>
+        <button onClick={onCancel}>{t("common.cancel")}</button>
       </div>
     </div>
   );
@@ -554,6 +589,7 @@ function NodeTypeCard({
   reloadCapabilities: () => void;
   reloadTemplates: () => void;
 }) {
+  const t = useT();
   const backendName = (id: string) => backends.find((b) => b.id === id)?.name ?? id;
   const [promptsFor, setPromptsFor] = useState<Capability | null>(null);
   // Single "+ Add instance" entry point: pick any not-yet-attached backend
@@ -620,7 +656,7 @@ function NodeTypeCard({
         <span className="status-pill">{template.node_type_slug}</span>
       </div>
       <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
-        {(template.param_schema.fields ?? []).map((f) => `${f.name}: ${f.type}`).join(", ") || "(no fields)"}
+        {(template.param_schema.fields ?? []).map((f) => `${f.name}: ${f.type}`).join(", ") || t("nodetype.noFields")}
       </div>
 
       <NodeTypeDescription template={template} onChanged={reloadTemplates} />
@@ -628,9 +664,9 @@ function NodeTypeCard({
       <table>
         <thead>
           <tr>
-            <th>Backend</th>
-            <th>Execution</th>
-            <th>Enabled</th>
+            <th>{t("nodetype.colBackend")}</th>
+            <th>{t("nodetype.colExecution")}</th>
+            <th>{t("nodetype.colEnabled")}</th>
             <th></th>
           </tr>
         </thead>
@@ -657,14 +693,14 @@ function NodeTypeCard({
                   <>
                     <button
                       onClick={() => setPromptsFor(c)}
-                      title={c.config.prompt_leader_id ? "View linked prompts (read-only)" : "Edit prompt text baked directly into this workflow"}
+                      title={c.config.prompt_leader_id ? t("nodetype.promptsViewTitle") : t("nodetype.promptsEditTitle")}
                     >
-                      {c.config.prompt_leader_id ? "prompts 🔗" : "prompts"}
+                      {c.config.prompt_leader_id ? t("nodetype.promptsLinked") : t("nodetype.prompts")}
                     </button>
                     <PromptLinkControl capability={c} siblings={capabilities} backendName={backendName} reload={reloadCapabilities} />
                   </>
                 )}
-                <button onClick={() => tryDelete(() => capabilitiesApi.remove(c.id), reloadCapabilities)}>delete</button>
+                <button onClick={() => tryDelete(() => capabilitiesApi.remove(c.id), reloadCapabilities)}>{t("common.deleteLower")}</button>
               </td>
             </tr>
           ))}
@@ -689,7 +725,7 @@ function NodeTypeCard({
         <div className="inline-form">
           <select defaultValue="" onChange={(e) => e.target.value && pickBackend(e.target.value)}>
             <option value="" disabled>
-              which backend?
+              {t("nodetype.whichBackend")}
             </option>
             {pickableBackends.map((b) => (
               <option key={b.id} value={b.id}>
@@ -697,11 +733,9 @@ function NodeTypeCard({
               </option>
             ))}
           </select>
-          <button onClick={closeAll}>Cancel</button>
+          <button onClick={closeAll}>{t("common.cancel")}</button>
           {pickableBackends.length === 0 && (
-            <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
-              No unattached backends — add one in Backends above first.
-            </span>
+            <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("nodetype.noUnattached")}</span>
           )}
         </div>
       )}
@@ -711,13 +745,13 @@ function NodeTypeCard({
           identical) workflow.json. */}
       {comfyBackendId && !wizardOpen && copyableSources.length > 0 && (
         <div className="inline-form">
-          <span style={{ fontSize: 12 }}>Configure “{backendName(comfyBackendId)}”:</span>
+          <span style={{ fontSize: 12 }}>{t("nodetype.configure", { name: backendName(comfyBackendId) })}</span>
           <button className="primary" onClick={() => onOpenWizard()}>
-            Upload workflow…
+            {t("nodetype.uploadWorkflow")}
           </button>
-          <span style={{ fontSize: 12, color: "var(--text-dim)" }}>or copy workflow from</span>
+          <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("nodetype.orCopyFrom")}</span>
           <select value={copySourceId} onChange={(e) => setCopySourceId(e.target.value)}>
-            <option value="">choose instance…</option>
+            <option value="">{t("nodetype.chooseInstance")}</option>
             {copyableSources.map((c) => (
               <option key={c.id} value={c.id}>
                 {backendName(c.backend_id)}
@@ -725,9 +759,9 @@ function NodeTypeCard({
             ))}
           </select>
           <button disabled={!copySourceId} onClick={() => doCopy(copySourceId)}>
-            Copy
+            {t("common.copy")}
           </button>
-          <button onClick={closeAll}>Cancel</button>
+          <button onClick={closeAll}>{t("common.cancel")}</button>
         </div>
       )}
 
@@ -773,14 +807,14 @@ function NodeTypeCard({
       {!anyFormOpen && (
         <div className="node-actions">
           <button className="primary" onClick={() => setPickerOpen(true)}>
-            + Add instance
+            {t("nodetype.addInstance")}
           </button>
           <button
             onClick={() => tryDelete(() => nodeTemplatesApi.remove(template.id), reloadTemplates)}
             disabled={capabilities.length > 0}
-            title={capabilities.length > 0 ? "Remove all instances before deleting this node type" : "Delete this node type"}
+            title={capabilities.length > 0 ? t("nodetype.deleteBlocked") : t("nodetype.deleteTitle")}
           >
-            delete node type
+            {t("nodetype.delete")}
           </button>
         </div>
       )}
@@ -801,6 +835,7 @@ function NodeTypesSection({
   reloadTemplates: () => void;
   reloadCapabilities: () => void;
 }) {
+  const t = useT();
   const [wizard, setWizard] = useState<{ kind: "create" } | { kind: "add-instance"; templateId: string } | null>(null);
 
   const closeWizard = () => setWizard(null);
@@ -824,7 +859,7 @@ function NodeTypesSection({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <h2 style={{ margin: 0 }}>Node types</h2>
+      <h2 style={{ margin: 0 }}>{t("nodetype.sectionTitle")}</h2>
       {editableTemplates.map((t) => (
         <NodeTypeCard
           key={t.id}
@@ -844,7 +879,7 @@ function NodeTypesSection({
         <NodeTypeWizard backends={backends} mode={{ kind: "create" }} onCancel={closeWizard} onSaved={saved} />
       ) : (
         <button className="primary" style={{ alignSelf: "flex-start" }} onClick={() => setWizard({ kind: "create" })}>
-          + New node type
+          {t("nodetype.new")}
         </button>
       )}
     </div>
@@ -873,6 +908,7 @@ export function Settings() {
   return (
     <div className="settings-panel">
       {loadError && <div className="error-text">{loadError}</div>}
+      <LanguageSection />
       <BackendsSection items={backends} reload={reloadBackends} />
       <NodeTypesSection
         templates={templates}

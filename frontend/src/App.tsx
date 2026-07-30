@@ -7,6 +7,7 @@ import { Grid } from "./components/Grid";
 import { Logs } from "./components/Logs";
 import { ProjectPicker } from "./components/ProjectPicker";
 import { Settings } from "./components/Settings";
+import { useT } from "./i18n";
 import { cx } from "./utils";
 
 type View = "grid" | "board" | "settings" | "logs";
@@ -29,6 +30,7 @@ const storedView = (): View => {
 };
 
 export default function App() {
+  const t = useT();
   const [projectId, setProjectId] = useState<string | null>(() => localStorage.getItem(LAST_PROJECT_KEY));
   const [view, setView] = useState<View>(storedView);
   // On phones the whole topbar (project picker + nav + connection) collapses
@@ -71,7 +73,7 @@ export default function App() {
         <div className="main-area" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14, alignItems: "center" }}>
             <h1 style={{ margin: 0 }}>ComfyUI Orchestrator</h1>
-            {authStatus === "checking" ? <span style={{ color: "var(--text-dim)" }}>Connecting…</span> : <ConnectionBar forceOpen />}
+            {authStatus === "checking" ? <span style={{ color: "var(--text-dim)" }}>{t("app.connecting")}</span> : <ConnectionBar forceOpen />}
           </div>
         </div>
       </div>
@@ -85,7 +87,7 @@ export default function App() {
         <button
           className="topbar-burger"
           onClick={() => setMenuOpen((o) => !o)}
-          aria-label="Menu"
+          aria-label={t("app.menu")}
           aria-expanded={menuOpen}
         >
           {menuOpen ? "✕" : "☰"}
@@ -93,18 +95,18 @@ export default function App() {
         <div className={cx("topbar-menu", menuOpen && "open")}>
           <ProjectPicker projectId={projectId} onSelect={selectProject} />
           <div className="topbar-spacer" />
-          {view !== "grid" && <button onClick={() => goTo("grid")}>Back to grid</button>}
+          {view !== "grid" && <button onClick={() => goTo("grid")}>{t("app.backToGrid")}</button>}
           {/* Pre-production lives here: idea, references, divergence. The grid
               is convergent by construction and can't hold any of it -- see
               roadmap.md §1. */}
           <button onClick={() => goTo(view === "board" ? "grid" : "board")} className={view === "board" ? "active" : ""}>
-            Board
+            {t("app.board")}
           </button>
           <button onClick={() => goTo(view === "logs" ? "grid" : "logs")} className={view === "logs" ? "active" : ""}>
-            Logs
+            {t("app.logs")}
           </button>
           <button onClick={() => goTo(view === "settings" ? "grid" : "settings")} className={view === "settings" ? "active" : ""}>
-            Settings
+            {t("app.settings")}
           </button>
           <ConnectionBar />
         </div>
@@ -122,14 +124,14 @@ export default function App() {
           <Board projectId={projectId} />
         ) : (
           <div className="main-area" style={{ padding: 24, color: "var(--text-dim)" }}>
-            Select a project to open its idea board.
+            {t("app.pickProjectForBoard")}
           </div>
         )
       ) : projectId ? (
         <Grid projectId={projectId} />
       ) : (
         <div className="main-area" style={{ padding: 24, color: "var(--text-dim)" }}>
-          Select or create a project to get started.
+          {t("app.pickProjectForGrid")}
         </div>
       )}
     </div>

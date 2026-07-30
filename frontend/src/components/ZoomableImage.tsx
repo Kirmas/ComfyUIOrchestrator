@@ -1,4 +1,5 @@
 import { type CSSProperties, useEffect, useRef } from "react";
+import { useT } from "../i18n";
 import { MIN_ZOOM, usePinchPan } from "../usePinchPan";
 
 /** Full-size image view with zoom + pan, for inspecting fine detail rather
@@ -16,6 +17,7 @@ export function ZoomableImage({
   maxWidth?: string;
   maxHeight?: string;
 }) {
+  const t = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const { view, grabbing, reset, zoomBy, handlers } = usePinchPan(containerRef);
 
@@ -48,13 +50,13 @@ export function ZoomableImage({
         }}
       />
       <div className="zoom-controls" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
-        <button type="button" onClick={() => zoomBy(1 / 1.4)} title="Zoom out">
+        <button type="button" onClick={() => zoomBy(1 / 1.4)} title={t("zoom.out")}>
           −
         </button>
-        <button type="button" onClick={reset} title="Reset zoom">
+        <button type="button" onClick={reset} title={t("zoom.reset")}>
           {Math.round(view.zoom * 100)}%
         </button>
-        <button type="button" onClick={() => zoomBy(1.4)} title="Zoom in">
+        <button type="button" onClick={() => zoomBy(1.4)} title={t("zoom.in")}>
           +
         </button>
       </div>

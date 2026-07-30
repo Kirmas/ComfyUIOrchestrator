@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useT, type TKey } from "../i18n";
 
 export interface CropBox {
   x: number;
@@ -10,11 +11,13 @@ export interface CropBox {
 type DragMode = "move" | "nw" | "ne" | "sw" | "se";
 type AspectPreset = "free" | "1:1" | "16:9" | "custom";
 
-const ASPECT_PRESETS: { key: AspectPreset; label: string }[] = [
-  { key: "free", label: "Free" },
+// A ratio ("1:1") reads the same in every language, so only the two named
+// presets carry a translation key.
+const ASPECT_PRESETS: { key: AspectPreset; label?: string; labelKey?: TKey }[] = [
+  { key: "free", labelKey: "crop.free" },
   { key: "1:1", label: "1:1" },
   { key: "16:9", label: "16:9" },
-  { key: "custom", label: "Custom…" },
+  { key: "custom", labelKey: "crop.custom" },
 ];
 
 /** Interactive crop-box overlay: drag the body to move it, drag a corner to
@@ -28,6 +31,7 @@ const ASPECT_PRESETS: { key: AspectPreset; label: string }[] = [
  * resize. It's local interaction state, not sent anywhere: the backend only
  * ever sees the resulting x/y/width/height, same as free-form dragging. */
 export function CropPreview({ imageUrl, box, onCommit }: { imageUrl: string; box: CropBox; onCommit: (box: CropBox) => void }) {
+  const t = useT();
   const imgRef = useRef<HTMLImageElement>(null);
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
   const [liveBox, setLiveBox] = useState<CropBox>(box);
@@ -182,7 +186,7 @@ export function CropPreview({ imageUrl, box, onCommit }: { imageUrl: string; box
               else applyRatio(customRatio.w / customRatio.h);
             }}
           >
-            {preset.label}
+            {preset.labelKey ? t(preset.labelKey) : preset.label}
           </button>
         ))}
         {aspectPreset === "custom" && (
@@ -216,9 +220,9 @@ export function CropPreview({ imageUrl, box, onCommit }: { imageUrl: string; box
           className={pointMode ? "active" : ""}
           style={{ fontSize: 10, padding: "1px 6px" }}
           onClick={() => setPointMode((v) => !v)}
-          title="Click a point in the image (e.g. an ear lobe), then adjust the crop until the mirrored point -- reflected across the crop box's own center -- lands on the matching feature on the other side"
+          title={t("crop.mirrorPointTitle")}
         >
-          ⊕ mirror point
+          {t("crop.mirrorPoint")}
         </button>
         {alignPoint && (
           <button
@@ -228,7 +232,7 @@ export function CropPreview({ imageUrl, box, onCommit }: { imageUrl: string; box
               setPointMode(false);
             }}
           >
-            clear point
+            {t("crop.clearPoint")}
           </button>
         )}
       </div>
@@ -291,7 +295,7 @@ export function CropPreview({ imageUrl, box, onCommit }: { imageUrl: string; box
               setAlignPoint({ x, y });
             }}
             style={{ position: "absolute", inset: 0, cursor: "crosshair", touchAction: "none" }}
-            title="Click to place the alignment point"
+            title={t("crop.clickToPlacePoint")}
           />
         )}
         {alignPoint && natural && (
@@ -310,7 +314,7 @@ export function CropPreview({ imageUrl, box, onCommit }: { imageUrl: string; box
                 border: "2px solid white",
                 pointerEvents: "none",
               }}
-              title="Alignment point"
+              title={t("crop.alignPoint")}
             />
             <div
               style={{
@@ -326,7 +330,7 @@ export function CropPreview({ imageUrl, box, onCommit }: { imageUrl: string; box
                 border: "2px solid var(--warning)",
                 pointerEvents: "none",
               }}
-              title="Mirrored point (reflected across the crop box's own center)"
+              title={t("crop.mirroredPoint")}
             />
           </>
         )}

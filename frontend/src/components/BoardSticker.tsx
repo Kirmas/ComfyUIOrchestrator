@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { resolveAssetUrl } from "../api/client";
+import { useT } from "../i18n";
 import { renderMarkdown } from "../markdown";
 import type { BoardItem } from "../types";
 import { cx } from "../utils";
@@ -67,6 +68,7 @@ export function BoardSticker({
   onSetAssetTags,
   onRemove,
 }: Props) {
+  const t = useT();
   const [editing, setEditing] = useState(autoEdit);
   const [draft, setDraft] = useState(item.text);
   const [showMeta, setShowMeta] = useState(false);
@@ -153,7 +155,7 @@ export function BoardSticker({
       onPointerMove={onResize}
       onPointerUp={endResize}
       onPointerCancel={endResize}
-      title="Потягни, щоб змінити розмір"
+      title={t("sticker.resizeTitle")}
     />
   ) : null;
 
@@ -180,7 +182,7 @@ export function BoardSticker({
           onPointerDown={startDrag}
           onPointerMove={onDrag}
           onPointerUp={endDrag}
-          title="Потягни, щоб пересунути. Видаляється гумкою"
+          title={t("sticker.moveMarkTitle")}
         />
         {resizeHandle}
       </div>
@@ -205,21 +207,21 @@ export function BoardSticker({
       {/* The header is the drag handle. Everything below it belongs to the
           content -- a note's body is a text field, and a field you might drag
           by is a field you can't reliably click into. */}
-      <div className="board-sticker-bar" title="Потягни за шапку, щоб пересунути">
+      <div className="board-sticker-bar" title={t("sticker.dragBarTitle")}>
         <span className="board-drag-dots" aria-hidden="true">
           ⠿
         </span>
-        {item.tag && <span className="board-tag" title="Доступний у промті як {tag}">{`{${item.tag}}`}</span>}
+        {item.tag && <span className="board-tag" title={t("sticker.tagTitle")}>{`{${item.tag}}`}</span>}
         {isMedia && item.asset_tags.length > 0 && (
-          <span className="board-asset-tags" title="За цими мітками фільтрує пікер референсів у гріді">
+          <span className="board-asset-tags" title={t("sticker.assetTagsTitle")}>
             {item.asset_tags.join(" · ")}
           </span>
         )}
         <span className="board-sticker-actions">
-          <button onClick={() => setShowMeta((v) => !v)} title="Колір і мітки">
+          <button onClick={() => setShowMeta((v) => !v)} title={t("sticker.metaTitle")}>
             ⋯
           </button>
-          <button onClick={() => void onRemove(item.id)} title="Видалити стікер">
+          <button onClick={() => void onRemove(item.id)} title={t("sticker.removeTitle")}>
             ×
           </button>
         </span>
@@ -234,11 +236,11 @@ export function BoardSticker({
           </div>
           {item.kind === "text" && (
             <label className="board-tag-field">
-              tag
+              {t("sticker.tagLabel")}
               <input
                 defaultValue={item.tag ?? ""}
-                placeholder="head"
-                title="Хендл для макросу {tag} у промті. Унікальний у межах проєкту."
+                placeholder={t("sticker.tagPlaceholder")}
+                title={t("sticker.tagFieldTitle")}
                 onBlur={(e) => {
                   const next = e.target.value.trim();
                   if (next !== (item.tag ?? "")) void onPatch(item.id, { tag: next });
@@ -253,12 +255,12 @@ export function BoardSticker({
               that one is a single unique prompt-macro handle. */}
           {isMedia && (
             <label className="board-tag-field board-tag-field-wide">
-              теги
+              {t("sticker.tagsLabel")}
               <input
                 key={item.asset_tags.join(",")}
                 defaultValue={item.asset_tags.join(", ")}
-                placeholder="обличчя, костюм"
-                title="Мітки для фільтра в пікері референсів. Через кому."
+                placeholder={t("sticker.tagsPlaceholder")}
+                title={t("sticker.tagsFieldTitle")}
                 onBlur={(e) => {
                   const next = e.target.value
                     .split(",")
@@ -283,17 +285,17 @@ export function BoardSticker({
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onBlur={saveText}
-            placeholder="Введіть будь-який вміст, який потрібно запам'ятати"
+            placeholder={t("sticker.notePlaceholder")}
           />
         ) : (
           <div
             className="board-sticker-text"
             onClick={() => setEditing(true)}
-            title="Клікни, щоб писати"
+            title={t("sticker.clickToWrite")}
             // renderMarkdown escapes before it formats, so nothing in a sticker
             // (including one an agent wrote) can turn into live markup.
             dangerouslySetInnerHTML={{
-              __html: renderMarkdown(item.text) || "<p class='board-empty'>Клікни, щоб писати…</p>",
+              __html: renderMarkdown(item.text) || `<p class='board-empty'>${t("sticker.clickToWriteEmpty")}</p>`,
             }}
           />
         ))}
@@ -310,12 +312,12 @@ export function BoardSticker({
             <div key={c.id} className={cx("board-comment", c.source === "agent" && "from-agent")}>
               <textarea
                 defaultValue={c.text}
-                placeholder="коментар"
+                placeholder={t("sticker.commentPlaceholder")}
                 onBlur={(e) => {
                   if (e.target.value !== c.text) void onPatch(c.id, { text: e.target.value });
                 }}
               />
-              <button onClick={() => void onRemove(c.id)} title="Видалити коментар">
+              <button onClick={() => void onRemove(c.id)} title={t("sticker.removeCommentTitle")}>
                 ×
               </button>
             </div>

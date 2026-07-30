@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { resolveAssetUrl } from "../api/client";
 import { boardApi } from "../api/endpoints";
+import { useT } from "../i18n";
 import type { Asset } from "../types";
 import { cx } from "../utils";
 
@@ -25,6 +26,7 @@ interface Props {
 }
 
 export function ReferencePicker({ projectId, onPick, onClose }: Props) {
+  const t = useT();
   const [assets, setAssets] = useState<Asset[]>([]);
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -46,12 +48,12 @@ export function ReferencePicker({ projectId, onPick, onClose }: Props) {
     // dialog hundreds of pixels off-screen (2026-07-21 incident).
     <div className="image-modal-backdrop" onClick={onClose}>
       <div className="params-modal-content reference-picker" onClick={(e) => e.stopPropagation()}>
-        <h3>З референсів</h3>
+        <h3>{t("refpicker.title")}</h3>
 
         {tags.length > 0 && (
           <div className="reference-tags">
             <button className={cx(!activeTag && "active")} onClick={() => setActiveTag(null)}>
-              всі
+              {t("refpicker.all")}
             </button>
             {tags.map((tag) => (
               <button key={tag} className={cx(activeTag === tag && "active")} onClick={() => setActiveTag(tag)}>
@@ -62,11 +64,9 @@ export function ReferencePicker({ projectId, onPick, onClose }: Props) {
         )}
 
         {loading ? (
-          <p style={{ color: "var(--text-dim)" }}>Завантаження…</p>
+          <p style={{ color: "var(--text-dim)" }}>{t("common.loading")}</p>
         ) : shown.length === 0 ? (
-          <p style={{ color: "var(--text-dim)" }}>
-            У бібліотеці проєкту порожньо. Завантажте зображення на дошку ідей (вкладка Board).
-          </p>
+          <p style={{ color: "var(--text-dim)" }}>{t("refpicker.empty")}</p>
         ) : (
           <div className="reference-grid">
             {shown.map((asset) => (
@@ -78,7 +78,7 @@ export function ReferencePicker({ projectId, onPick, onClose }: Props) {
         )}
 
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
-          <button onClick={onClose}>Скасувати</button>
+          <button onClick={onClose}>{t("common.cancel")}</button>
         </div>
       </div>
     </div>,

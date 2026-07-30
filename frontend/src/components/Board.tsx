@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { assetsApi, boardApi } from "../api/endpoints";
 import { inkTransform, pathBounds, withInkBoxes } from "../boardGeometry";
 import type { Board as BoardType, BoardItem, BoardItemKind } from "../types";
+import { useT } from "../i18n";
 import { usePinchPan } from "../usePinchPan";
 import { cx } from "../utils";
 import { BoardSticker } from "./BoardSticker";
@@ -15,7 +16,7 @@ import { BoardSticker } from "./BoardSticker";
  *
  * Two bridges keep this from being a whiteboard bolted on the side: the grid
  * can reference this board's media (asset.refasset, one-way), and a node's
- * prompt can pull a text sticker's words in (the "з ідей" picker).
+ * prompt can pull a text sticker's words in (the "from ideas" picker).
  */
 
 export const STICKER_COLORS = ["#f6d36b", "#8fd6a0", "#8fc4f0", "#e39ad4", "#f0a37a", "#c9c9c9"];
@@ -34,6 +35,7 @@ interface Props {
 }
 
 export function Board({ projectId }: Props) {
+  const t = useT();
   const [board, setBoard] = useState<BoardType | null>(null);
   const [items, setItems] = useState<BoardItem[]>([]);
   const [tool, setTool] = useState<Tool>("select");
@@ -325,21 +327,21 @@ export function Board({ projectId }: Props) {
   return (
     <div className="main-area board-area">
       <div className="board-toolbar">
-        <button className={cx(tool === "select" && "active")} onClick={() => setTool("select")} title="Пересувати й редагувати">
-          ✋ select
+        <button className={cx(tool === "select" && "active")} onClick={() => setTool("select")} title={t("board.selectTitle")}>
+          ✋ {t("board.select")}
         </button>
 
         {/* One drawing tool with two shapes plus its eraser -- a circle is a
             ready-made stroke, not a different kind of object, so it belongs in
             this group rather than standing on its own. */}
         <span className="board-tool-group">
-          <button className={cx(tool === "pen" && "active")} onClick={() => setTool("pen")} title="Малювати від руки">
+          <button className={cx(tool === "pen" && "active")} onClick={() => setTool("pen")} title={t("board.penTitle")}>
             ✎
           </button>
-          <button className={cx(tool === "circle" && "active")} onClick={() => setTool("circle")} title="Розтягнути готове коло">
+          <button className={cx(tool === "circle" && "active")} onClick={() => setTool("circle")} title={t("board.circleTitle")}>
             ◯
           </button>
-          <button className={cx(tool === "erase" && "active")} onClick={() => setTool("erase")} title="Гумка: стерти лінію або коло цілком">
+          <button className={cx(tool === "erase" && "active")} onClick={() => setTool("erase")} title={t("board.eraseTitle")}>
             ⌫
           </button>
         </span>
@@ -351,15 +353,15 @@ export function Board({ projectId }: Props) {
               className={cx("board-color", inkColor === c && "active")}
               style={{ background: c }}
               onClick={() => setInkColor(c)}
-              title="Колір для нових ліній, кіл і стікерів"
+              title={t("board.colorTitle")}
             />
           ))}
         </span>
 
         <span className="board-toolbar-sep" />
 
-        <button onClick={() => create({ kind: "text", ...freeSpot(), color: inkColor, text: "" })}>+ note</button>
-        <button onClick={() => fileInputRef.current?.click()}>+ media</button>
+        <button onClick={() => create({ kind: "text", ...freeSpot(), color: inkColor, text: "" })}>{t("board.addNote")}</button>
+        <button onClick={() => fileInputRef.current?.click()}>{t("board.addMedia")}</button>
         <input
           ref={fileInputRef}
           type="file"
@@ -371,19 +373,19 @@ export function Board({ projectId }: Props) {
             e.target.value = "";
           }}
         />
-        {selectedIds.length === 2 && <button onClick={connectSelected}>→ connect</button>}
-        {selectedIds.length === 1 && <button onClick={commentOnSelected}>💬 comment</button>}
-        {selectedIds.length > 0 && <button onClick={() => setSelectedIds([])}>clear ({selectedIds.length})</button>}
+        {selectedIds.length === 2 && <button onClick={connectSelected}>{t("board.connect")}</button>}
+        {selectedIds.length === 1 && <button onClick={commentOnSelected}>{t("board.comment")}</button>}
+        {selectedIds.length > 0 && <button onClick={() => setSelectedIds([])}>{t("board.clearSelection", { n: selectedIds.length })}</button>}
 
         <span className="board-toolbar-sep" />
         <span className="board-zoom">
           {Math.round(view.zoom * 100)}%
           <button onClick={() => zoomBy(1 / 1.2)}>−</button>
           <button onClick={() => zoomBy(1.2)}>+</button>
-          <button onClick={reset}>reset</button>
+          <button onClick={reset}>{t("common.reset")}</button>
         </span>
         {error && (
-          <span className="board-error" onClick={() => setError(null)} title="Click to dismiss">
+          <span className="board-error" onClick={() => setError(null)} title={t("board.dismissError")}>
             {error}
           </span>
         )}

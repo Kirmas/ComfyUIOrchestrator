@@ -8,6 +8,7 @@ import {
   upsertAnglePhrase,
   type AngleSelection,
 } from "../multiAngleLora";
+import { useT } from "../i18n";
 
 /** Structured constructor for the Multiple-Angles LoRA's prompt grammar
  *  (`<sks> <azimuth> <elevation> <distance>`). Composes the exact token string
@@ -16,6 +17,7 @@ import {
  *  LoRA (see capabilityUsesMultiAngleLora). Collapsed by default so it doesn't
  *  crowd the prompt editor. */
 export function MultiAngleBuilder({ value, onChange }: { value: string; onChange: (next: string) => void }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   // Pre-fill from whatever the field already holds (e.g. `<sks> back view`), so
   // the controls reflect the current prompt rather than a generic default.
@@ -34,7 +36,7 @@ export function MultiAngleBuilder({ value, onChange }: { value: string; onChange
   return (
     <div className="angle-builder">
       <button type="button" className="angle-builder-toggle" onClick={() => setOpen((o) => !o)}>
-        {open ? "▾" : "▸"} Multiple-Angles builder
+        {open ? "▾" : "▸"} {t("angle.builder")}
       </button>
       {open && (
         <div className="angle-builder-body">
@@ -44,7 +46,7 @@ export function MultiAngleBuilder({ value, onChange }: { value: string; onChange
               checked={sel.trigger}
               onChange={(e) => setSel((s) => ({ ...s, trigger: e.target.checked }))}
             />
-            <code>&lt;sks&gt;</code> trigger
+            <code>&lt;sks&gt;</code> {t("angle.trigger")}
           </label>
 
           <div className="angle-azimuths">
@@ -56,7 +58,7 @@ export function MultiAngleBuilder({ value, onChange }: { value: string; onChange
                   checked={sel.azimuth === a.value}
                   onChange={() => setSel((s) => ({ ...s, azimuth: a.value }))}
                 />
-                {a.label}
+                {t(a.labelKey)}
               </label>
             ))}
           </div>
@@ -65,18 +67,18 @@ export function MultiAngleBuilder({ value, onChange }: { value: string; onChange
             {/* value="" == omit this slot from the composed phrase (composeAnglePrompt
                 filters out empties); the regex treats both as optional too. */}
             <select value={sel.elevation} onChange={(e) => setSel((s) => ({ ...s, elevation: e.target.value }))}>
-              <option value="">— no elevation —</option>
+              <option value="">{t("angle.noElevation")}</option>
               {ELEVATIONS.map((o) => (
                 <option key={o.value} value={o.value}>
-                  {o.label}
+                  {t(o.labelKey)}
                 </option>
               ))}
             </select>
             <select value={sel.distance} onChange={(e) => setSel((s) => ({ ...s, distance: e.target.value }))}>
-              <option value="">— no distance —</option>
+              <option value="">{t("angle.noDistance")}</option>
               {DISTANCES.map((o) => (
                 <option key={o.value} value={o.value}>
-                  {o.label}
+                  {t(o.labelKey)}
                 </option>
               ))}
             </select>
@@ -88,9 +90,9 @@ export function MultiAngleBuilder({ value, onChange }: { value: string; onChange
             <button
               type="button"
               onClick={() => onChange(upsertAnglePhrase(value, phrase))}
-              title="Insert this phrase — replaces an existing angle phrase in the text, otherwise appends it"
+              title={t("angle.insertTitle")}
             >
-              Insert
+              {t("angle.insert")}
             </button>
           </div>
         </div>
