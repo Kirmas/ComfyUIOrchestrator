@@ -5,6 +5,7 @@ import { useProjectStore } from "../state/projectStore";
 import { resolveSlotAsset } from "../slotResolution";
 import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project, Track } from "../types";
 import { cx } from "../utils";
+import { isFileDrag } from "../dragUtils";
 import { AnnotationFrame } from "./AnnotationFrame";
 import { ReferencePicker } from "./ReferencePicker";
 import { ArrowsOverlay, type Edge } from "./ArrowsOverlay";
@@ -62,7 +63,7 @@ function isPickable(node: NodeItem, outputs: Asset[]): boolean {
 }
 
 export function Grid({ projectId }: { projectId: string }) {
-  const { tracks, nodesById, outputsByNode, spans, blockedCells, annotations, loadProject, reloadTracks, reloadAnnotations, applyProgressEvent, addNode, removeTrack, refreshNodeOutputs } =
+  const { tracks, nodesById, outputsByNode, spans, blockedCells, annotations, loadProject, reloadTracks, reloadAnnotations, applyProgressEvent, addNode, setNode, removeTrack, refreshNodeOutputs } =
     useProjectStore();
   // Nodes ticked for grouping into a comment block. Shift/Ctrl/Cmd-click on a
   // cell toggles membership; a plain click is left alone so it keeps meaning
@@ -91,6 +92,18 @@ export function Grid({ projectId }: { projectId: string }) {
   // clicking any reachable empty cell, which creates a RefAsset there instead
   // of relocating the original.
   const [refFor, setRefFor] = useState<{ nodeId: string } | null>(null);
+  // "⧉" click-to-complete gesture, the workflow-node counterpart of refFor:
+  // armed by a workflow card's own button, completed by clicking any empty
+  // workflow-parity cell, which creates a real second node there carrying every
+  // one of this one's local settings (nodesApi.duplicate). Separate state from
+  // refFor on purpose -- a workflow copy and an asset reference target different
+  // cells and mean different things (see duplicate_node's docstring).
+  const [copyFor, setCopyFor] = useState<{ nodeId: string } | null>(null);
+  // True while an OS file drag (isFileDrag) is over the canvas -- switches on
+  // the drop targets over every empty asset cell (see fileDropCells below).
+  // Files can also be dropped straight onto an existing empty asset cell, which
+  // NodeCell handles itself.
+  const [fileDragActive, setFileDragActive] = useState(false);
   // Which empty cell the "з референсів" picker is filling, if open.
   const [pickRefAt, setPickRefAt] = useState<{ row: number; step: number } | null>(null);
   // How many leading columns an as-yet-empty track should skip before its
@@ -810,45 +823,69 @@ export function Grid({ projectId }: { projectId: string }) {
   // already-occupied cell (an existing workflow's wrapper div) is handled
   // separately and can still push/insert to make room; this set is only the
   // cells that need no pushing at all.
+  // Also the placement targets for the "⧉" copy gesture (copyFor) -- an empty
+  // workflow cell is an empty workflow cell whether a node is being dragged
+  // into it or copied into it, so the same list serves both rather than a
+  // second near-identical memo.
   const emptyWorkflowCells = useMemo(() => {
-    if (!draggingWorkflowId || !project?.start_kind) return [];
+    if ((!draggingWorkflowId && !copyFor) || !project?.start_kind) return [];
     const cells: { row: number; step: number }[] = [];
     for (const row of tracks.map((t) => t.row_index)) {
       for (let step = 0; step <= maxButtonStep; step++) {
         if (kindForStep(project.start_kind, step) !== "workflow") continue;
         if (nodesByRowStep.has(`${row}:${step}`)) continue;
+        // A cell some other workflow's spanning card already covers holds no
+        // node of its own, so the check above passes -- but dropping (or
+        // copying) a card there just puts two cards on top of each other, since
+        // blockedCells is exactly "covered by a span in that span's own
+        // column" (core/grid_layout.py) and a workflow's own column is what
+        // both gestures land in.
+        if (blockedCells.has(`${row}:${step}`)) continue;
         cells.push({ row, step });
       }
     }
     return cells;
-  }, [draggingWorkflowId, project, tracks, maxButtonStep, nodesByRowStep]);
+  }, [draggingWorkflowId, copyFor, project, tracks, maxButtonStep, nodesByRowStep, blockedCells]);
 
-  // Same idea as emptyWorkflowCells, but for an asset drag: every currently-
-  // empty, asset-parity cell across the WHOLE grid, not just the ones
-  // reachable from some workflow's own span (emptyReachableCells, which
-  // keeps rendering its own "+ asset" button there regardless of a drag, so
-  // it's excluded here to avoid stacking two drop targets on the same
-  // cell). A manually-placed asset isn't tied to any one workflow's
-  // territory -- moveAssetTo/isWorkflowOutput decide what a cell means
-  // purely from where it ends up, not from where it started -- so dragging
-  // one to an unrelated empty cell elsewhere on the board has to actually
-  // be reachable to drop on (2026-07-18: dragging an asset out to a cell no
-  // workflow's span reached did nothing at all -- no drop target was even
-  // rendered there).
-  const emptyAssetDropCells = useMemo(() => {
-    if (!draggingAssetId || !project?.start_kind) return [];
-    const reachable = new Set(emptyReachableCells.map(({ row, step }) => `${row}:${step}`));
+  // Same idea as emptyWorkflowCells, but for the asset half of the grid: every
+  // currently-empty asset-parity cell, regardless of any drag -- the raw set
+  // both asset drop-target layers below are cut from.
+  const emptyAssetCells = useMemo(() => {
+    if (!project?.start_kind) return [];
     const cells: { row: number; step: number }[] = [];
     for (const row of tracks.map((t) => t.row_index)) {
       for (let step = 0; step <= maxButtonStep; step++) {
         if (kindForStep(project.start_kind, step) !== "asset") continue;
         if (nodesByRowStep.has(`${row}:${step}`)) continue;
-        if (reachable.has(`${row}:${step}`)) continue;
         cells.push({ row, step });
       }
     }
     return cells;
-  }, [draggingAssetId, project, tracks, maxButtonStep, nodesByRowStep, emptyReachableCells]);
+  }, [project, tracks, maxButtonStep, nodesByRowStep]);
+
+  // Drop targets for an internal asset-node drag: all of the above except the
+  // cells reachable from some workflow's own span (emptyReachableCells, which
+  // keeps rendering its own "+ asset" button there regardless of a drag, so
+  // it's excluded to avoid stacking two drop targets on the same cell). A
+  // manually-placed asset isn't tied to any one workflow's territory --
+  // moveAssetTo/isWorkflowOutput decide what a cell means purely from where it
+  // ends up, not from where it started -- so dragging one to an unrelated empty
+  // cell elsewhere on the board has to actually be reachable to drop on
+  // (2026-07-18: dragging an asset out to a cell no workflow's span reached did
+  // nothing at all -- no drop target was even rendered there).
+  const emptyAssetDropCells = useMemo(() => {
+    if (!draggingAssetId) return [];
+    const reachable = new Set(emptyReachableCells.map(({ row, step }) => `${row}:${step}`));
+    return emptyAssetCells.filter(({ row, step }) => !reachable.has(`${row}:${step}`));
+  }, [draggingAssetId, emptyAssetCells, emptyReachableCells]);
+
+  // Drop targets for a file dragged in from the desktop. Unlike
+  // emptyAssetDropCells this does NOT exclude emptyReachableCells: those render
+  // their own "+ asset" button, which is a click affordance, not a drop one --
+  // dropping a photo into a workflow's waiting input slot is the main thing
+  // this feature is for. The layer renders after them in the DOM so it wins
+  // hit-testing while the drag is in progress (grid items paint in DOM order).
+  const fileDropCells = fileDragActive ? emptyAssetCells : [];
 
   // Places a RefAsset node (a lightweight pointer, not a copy) at (row, step),
   // referencing sourceNode's currently resolved output -- used both by the
@@ -901,6 +938,53 @@ export function Grid({ projectId }: { projectId: string }) {
     setRefFor(null);
     if (!sourceNode) return;
     await createRefAssetAt(sourceNode, row, step);
+  };
+
+  const onStartCopy = (node: NodeItem) => setCopyFor({ nodeId: node.id });
+
+  // Completes the "⧉" gesture: pure intent, like every other placement now --
+  // the backend copies the fields, validates the cell and materializes the
+  // copy's own input-slot rows (duplicate_node), and we re-fetch the
+  // authoritative layout. A rejected placement comes back as a 409 shown as-is.
+  const completeCopyAt = async (row: number, step: number) => {
+    if (!copyFor) return;
+    const sourceId = copyFor.nodeId;
+    setCopyFor(null);
+    try {
+      await nodesApi.duplicate(sourceId, { target_row: row, target_step: step });
+      await loadProject(projectId);
+      // A copy carrying a template can grow rows for its input slots
+      // (ensure_span_rows), same as choosing a template on a fresh cell does.
+      await reloadTracks(projectId);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Couldn't copy this node.");
+    }
+  };
+
+  /** Fills a still-empty grid cell straight from an OS file drop: creates the
+   * asset node there first (nothing exists to upload into yet -- the same
+   * nodesApi.create the cell's own "+ asset" button runs), then uploads every
+   * dropped file into it. A file dropped on an already-existing empty asset
+   * cell skips all this and is handled by NodeCell itself. */
+  const dropFilesAt = async (row: number, step: number, files: File[]) => {
+    const targetTrack = trackByRowIndex.get(row);
+    if (!targetTrack || files.length === 0) return;
+    try {
+      const created = await nodesApi.create({ track_id: targetTrack.id, step_index: step, kind: "asset" });
+      addNode(created);
+      for (const file of files) {
+        await nodesApi.uploadAsset(created.id, file);
+      }
+      await refreshNodeOutputs(created.id);
+      // The upload flips the node's status to done server-side -- re-fetch so
+      // the cell doesn't keep rendering as an empty draft. (No reloadProject
+      // for start_kind here, unlike addStep: a file drop can only ever land on
+      // a cell fileDropCells offered, which requires start_kind to be set
+      // already.)
+      setNode(await nodesApi.get(created.id));
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Couldn't load the dropped file here.");
+    }
   };
 
   // (The reactive auto-expand useEffect that used to grow a workflow's rows
@@ -993,6 +1077,22 @@ export function Grid({ projectId }: { projectId: string }) {
       onPointerMove={onBackgroundPointerMove}
       onPointerUp={onBackgroundPointerUp}
       onPointerCancel={onBackgroundPointerUp}
+      // Arming the file-drop layer here, on the whole canvas, rather than on
+      // each target cell: dataTransfer.files is unreadable until the drop
+      // itself, so a target that only appeared once the pointer was already
+      // over it could never be aimed at. This just detects "a file drag is
+      // happening" (isFileDrag reads .types, which IS available) and lights
+      // every empty asset cell up. No preventDefault here -- the target cells
+      // do that themselves, so dropping on the empty canvas stays a non-drop.
+      onDragOver={(e) => {
+        if (isFileDrag(e.dataTransfer)) setFileDragActive(true);
+      }}
+      onDragLeave={(e) => {
+        // Fires for every child boundary crossed too, so only a leave that
+        // actually exits the container counts.
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFileDragActive(false);
+      }}
+      onDrop={() => setFileDragActive(false)}
     >
       {/* A sibling of the scaled sizer/grid-wrapper below, not a descendant --
           transform: scale() on an ancestor would otherwise hijack this as
@@ -1164,10 +1264,12 @@ export function Grid({ projectId }: { projectId: string }) {
                     isComparingSource={compareFor?.nodeId === node.id}
                     isManualPlacement={isDraggableAsset && node.step_index > 0 && !isWorkflowOutput(node)}
                     isRefSource={refFor?.nodeId === node.id}
+                    isCopySource={copyFor?.nodeId === node.id}
                     registerRef={registerRef}
                     onCellClicked={onCellClicked}
                     onStartCompare={onStartCompare}
                     onStartRef={onStartRef}
+                    onStartCopy={onStartCopy}
                     onShrinkToFit={shrinkWorkflowToFit}
                     collapseInfo={collapseInfoByNode.get(node.id)}
                   />
@@ -1245,6 +1347,9 @@ export function Grid({ projectId }: { projectId: string }) {
                 border: "2px dashed var(--accent)",
                 borderRadius: 8,
                 opacity: 0.5,
+                display: copyFor ? "flex" : undefined,
+                alignItems: "center",
+                justifyContent: "center",
               }}
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
@@ -1253,7 +1358,14 @@ export function Grid({ projectId }: { projectId: string }) {
                 setDraggingWorkflowId(null);
                 if (dragged) dropWorkflowAt(dragged, row, step);
               }}
-            />
+              onClick={() => copyFor && completeCopyAt(row, step)}
+            >
+              {copyFor && (
+                <button style={{ fontSize: 10, padding: "1px 4px" }} title="Place the copy here">
+                  place copy here
+                </button>
+              )}
+            </div>
           ))}
 
           {emptyAssetDropCells.map(({ row, step }) => (
@@ -1384,6 +1496,37 @@ export function Grid({ projectId }: { projectId: string }) {
             );
           })}
 
+          {/* Last of the overlay layers on purpose: overlapping grid items are
+              painted (and hit-tested) in DOM order, so while a file drag is in
+              progress this sits on top of the "+ asset"/"з референсів" buttons
+              in the same cell -- which are click affordances that would
+              otherwise swallow the drop. */}
+          {fileDropCells.map(({ row, step }) => (
+            <div
+              key={`file-drop-${row}-${step}`}
+              style={{
+                gridColumn: step + 2,
+                gridRow: row + 1,
+                border: "2px dashed var(--success)",
+                borderRadius: 8,
+                background: "color-mix(in srgb, var(--success) 12%, transparent)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 10,
+                color: "var(--text-dim)",
+              }}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                setFileDragActive(false);
+                dropFilesAt(row, step, Array.from(e.dataTransfer.files));
+              }}
+            >
+              drop here
+            </div>
+          ))}
+
           {assetNextStepCells.map(({ node, row, step }) => (
             <div
               key={`add-asset-${node.id}`}
@@ -1406,6 +1549,11 @@ export function Grid({ projectId }: { projectId: string }) {
           {refFor && (
             <button style={{ marginLeft: 8 }} onClick={() => setRefFor(null)}>
               Cancel reference
+            </button>
+          )}
+          {copyFor && (
+            <button style={{ marginLeft: 8 }} onClick={() => setCopyFor(null)}>
+              Cancel copy
             </button>
           )}
         </div>

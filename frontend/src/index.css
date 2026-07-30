@@ -208,6 +208,10 @@ input, select, textarea {
 .node-cell.status-discarded { opacity: 0.45; }
 .node-cell.picking-target { outline: 2px dashed var(--accent); cursor: crosshair; }
 .node-cell.picking-source { outline: 2px solid var(--accent); }
+/* An empty asset cell with an OS file drag hovering over it (NodeCell.tsx's
+   handleFileDragOver) -- same green as the grid's own file-drop targets for
+   still-empty cells (Grid.tsx's fileDropCells). */
+.node-cell.file-drag-over { outline: 2px dashed var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
 .node-cell-asset:focus,
 .node-cell-asset:focus-visible {
   outline: 2px solid var(--accent);

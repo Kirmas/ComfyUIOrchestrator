@@ -265,9 +265,18 @@ class NodeCreate(BaseModel):
 class PickCandidate(BaseModel):
     # "Keep this candidate asset out of the picker; move the rest to their own
     # line." The backend owns the whole fork (settle the kept one in place,
-    # relocate the leftover picker to a spawned/reused row, spawn the next
-    # workflow step) -- see api/routes/nodes.py's _pick_candidate.
+    # relocate the leftover picker to a spawned/reused row) -- see
+    # api/routes/nodes.py's _pick_candidate.
     kept_asset_id: uuid.UUID
+
+
+class NodeDuplicate(BaseModel):
+    # Intent only, same two fields and same meaning as NodeMove below: "put a
+    # real copy of this workflow node at grid (row, column)". target_row is a
+    # position in the project's track list order (core/track_order.py), not a
+    # stored number. See api/routes/nodes.py's duplicate_node.
+    target_row: int
+    target_step: int
 
 
 class NodeMove(BaseModel):

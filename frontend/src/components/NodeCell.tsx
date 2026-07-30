@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { resolveAssetUrl } from "../api/client";
 import { assetsApi, jobsApi, nodesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
+import { isFileDrag } from "../dragUtils";
 import { detectMaskGroups, resolveMaskImageField } from "../maskUtils";
 import { resolveSlotAsset } from "../slotResolution";
 import { useProjectStore } from "../state/projectStore";
@@ -48,10 +49,17 @@ export interface Props {
   // Armed via this node's own "+ ref elsewhere" button -- Grid.tsx is waiting
   // for a click on an empty cell to complete the RefAsset placement.
   isRefSource: boolean;
+  // Armed via this workflow node's own "⧉" button -- Grid.tsx is waiting for a
+  // click on an empty workflow cell to place a real copy of this node there
+  // (nodesApi.duplicate). Same click-to-complete shape as isRefSource above,
+  // deliberately a different gesture and a different result: a second
+  // independent node carrying all of this one's local settings, not a pointer.
+  isCopySource: boolean;
   registerRef: (nodeId: string, el: HTMLDivElement | null) => void;
   onCellClicked: (node: NodeItem) => void;
   onStartCompare: (node: NodeItem, asset: Asset) => void;
   onStartRef: (node: NodeItem) => void;
+  onStartCopy: (node: NodeItem) => void;
   // Manual, one-shot recompute of a workflow node's own row-span, removing
   // any trailing EMPTY rows it doesn't actually need down to the minimum
   // (its input slot count, or further if one of its own outputs still
@@ -320,6 +328,29 @@ function BaseAssetNodeView({
     setNode(updated);
   };
 
+  // Drop straight from the OS file manager -- the pointer equivalent of
+  // handlePaste below, gated on the same "this cell is still empty" condition
+  // (isFileDrag lives in dragUtils.ts, shared with Grid.tsx's own file-drop
+  // targets for empty cells). stopPropagation matters here: the cell's wrapper
+  // div in Grid.tsx has its own onDragOver/onDrop for the internal
+  // asset-move drag, and without this the two gestures see each other's events.
+  const acceptsFileDrop = outputs.length === 0 && !isCandidatesGrid;
+  const [fileDragOver, setFileDragOver] = useState(false);
+  const handleFileDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!acceptsFileDrop || !isFileDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setFileDragOver(true);
+  };
+  const handleFileDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!acceptsFileDrop || !isFileDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setFileDragOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) uploadFiles(files);
+  };
+
   // Lets an empty asset cell accept Ctrl+V straight from the OS clipboard --
   // no "Upload..." dialog needed for the common case of a screenshot or a
   // copied image sitting in the clipboard already. Only wired up while the
@@ -405,6 +436,7 @@ function BaseAssetNodeView({
     `status-${node.status}`,
     compareActive && "picking-target",
     isComparingSource && "picking-source",
+    fileDragOver && "file-drag-over",
   );
 
   return (
@@ -413,6 +445,15 @@ function BaseAssetNodeView({
       className={cls}
       tabIndex={outputs.length === 0 && !isCandidatesGrid ? 0 : undefined}
       onPaste={handlePaste}
+      onDragOver={handleFileDragOver}
+      // Same containment check Grid.tsx's own canvas-level dragleave uses:
+      // dragleave also fires for every inner element boundary the pointer
+      // crosses, which would flicker the highlight off and on across the cell's
+      // own contents.
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFileDragOver(false);
+      }}
+      onDrop={handleFileDrop}
       onClick={() => compareActive && onCellClicked(node)}
     >
       <div className="node-cell-header">
@@ -488,7 +529,7 @@ function BaseAssetNodeView({
       {node.error && <div className="error-text">{node.error}</div>}
 
       {outputs.length === 0 && !isCandidatesGrid && (
-        <div style={{ fontSize: 10, color: "var(--text-dim)" }}>click, then Ctrl+V to paste an image</div>
+        <div style={{ fontSize: 10, color: "var(--text-dim)" }}>drop a file here, or click then Ctrl+V to paste</div>
       )}
 
       {isCandidatesGrid ? (
@@ -529,7 +570,7 @@ function BaseAssetNodeView({
   );
 }
 
-function BaseWorkflowNodeView({ node, templates, backends, capabilities, registerRef, onShrinkToFit, collapseInfo }: Props) {
+function BaseWorkflowNodeView({ node, templates, backends, capabilities, registerRef, onShrinkToFit, onStartCopy, isCopySource, collapseInfo }: Props) {
   const setNode = useProjectStore((s) => s.setNode);
   const tracks = useProjectStore((s) => s.tracks);
   const nodesById = useProjectStore((s) => s.nodesById);
@@ -763,7 +804,10 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     setJobs(list);
   };
 
-  const cls = cx("node-cell", `status-${node.status}`, isNative && "node-cell-native");
+  // picking-source is reused as-is (a solid accent outline) -- an armed copy is
+  // the same "this cell is the source, now click a target" state a compare or a
+  // ref is in, and it reads better as one visual language than a third one.
+  const cls = cx("node-cell", `status-${node.status}`, isNative && "node-cell-native", isCopySource && "picking-source");
 
   // Row-span paradigm: a slot's source is purely positional now (which row,
   // within this node's own span, feeds it -- see cell_index in types/index.ts
@@ -937,6 +981,24 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
             👁
           </button>
         )}
+        {!collapseInfo && template && (
+          // A real copy, not a reference: the asset world's "+ ref elsewhere"
+          // has no workflow equivalent, since two cells can share one picture
+          // but not one set of parameters. Needs a template to be worth
+          // offering -- there's nothing to carry over from a cell that hasn't
+          // picked one yet. Suppressed for a collapsed chain too: this card
+          // stands for 3 cells there, and copying just the one workflow node
+          // out of it isn't what "copy this card" would mean.
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onStartCopy(node);
+            }}
+            title="Copy this node with all of its settings -- then click an empty workflow cell to place the copy"
+          >
+            ⧉
+          </button>
+        )}
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -1079,6 +1141,8 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
       )}
 
       {node.error && <div className="error-text">{node.error}</div>}
+
+      {isCopySource && <div style={{ fontSize: 10, color: "var(--accent)" }}>click an empty workflow cell to place the copy…</div>}
 
       {template && collapseInfo && (
         <div className="node-actions" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>

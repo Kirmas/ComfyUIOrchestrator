@@ -1,3 +1,4 @@
+import copy
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
@@ -10,7 +11,7 @@ from app.core.track_order import ordered_tracks, splice_after
 from app.core.storage import build_asset_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Job, Node, NodeKind, NodeStatus, Project, Track
-from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeMove, NodeRead, NodeUpdate, PickCandidate
+from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeDuplicate, NodeMove, NodeRead, NodeUpdate, PickCandidate
 from app.worker.tasks import (
     _splice_after_would_split_a_span,
     enqueue_node_job,
@@ -342,14 +343,6 @@ async def _desired_span(db: AsyncSession, workflow_node: Node) -> int:
     return max(slot_count, 1 + spawned.scalar_one(), 1)
 
 
-async def _ensure_next_workflow_step(db: AsyncSession, track_id, step: int) -> None:
-    """After a candidate settles, make sure the workflow cell that continues the
-    pipeline (this asset cell's step+1, always a workflow-parity column) exists."""
-    if await _node_at(db, track_id, step + 1) is None:
-        db.add(Node(track_id=track_id, step_index=step + 1, kind=NodeKind.workflow))
-        await db.flush()
-
-
 async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node | None:
     """The whole candidate fork, server-side (ports Grid.tsx's onSelectCandidate):
     settle `kept` in the picker's own cell as a fresh asset.single node, and
@@ -357,7 +350,16 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
     empty row inside the producing workflow's span, or a freshly spliced spawned
     track. Returns the relocated picker, or None if `kept` was the sole
     remaining candidate (then the picker is just settled in place). Does not
-    commit."""
+    commit.
+
+    Deliberately does NOT create the empty workflow cell that would continue the
+    pipeline at the settled asset's step+1 (an _ensure_next_workflow_step helper
+    used to, on both branches). Settling a candidate says nothing about whether
+    that line continues at all -- most of the time it doesn't, and the
+    template-less "(choose template)" cell it left behind just had to be deleted
+    by hand. Every asset cell whose next column is free already offers its own
+    "+ step" button (Grid.tsx's assetNextStepCells), so continuing a line is one
+    click whenever it's actually wanted."""
     result = await db.execute(select(Asset).where(Asset.node_id == picker.id))
     others = [a for a in result.scalars().all() if a.id != kept.id]
 
@@ -368,7 +370,6 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
         picker.node_type = "asset.single"
         picker.is_picker = False
         await db.flush()
-        await _ensure_next_workflow_step(db, original_track_id, original_step)
         return None
 
     home = await db.get(Track, original_track_id)
@@ -437,7 +438,6 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
     kept.node_id = settled.id
     await db.flush()
 
-    await _ensure_next_workflow_step(db, original_track_id, original_step)
     # Spawning this leftover picker grew the producing workflow's span (its
     # desired = 1 + spawned tracks) -- materialize the rows so its card
     # actually stretches to reach the new spawned track. This is the imperative
@@ -914,4 +914,76 @@ async def reroll_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     await db.refresh(new_node)
 
     await job_queue.enqueue(enqueue_node_job, str(new_node.id))
+    return new_node
+
+
+@router.post("/{node_id}/duplicate", response_model=NodeRead, status_code=201)
+async def duplicate_node(node_id: uuid.UUID, payload: NodeDuplicate, db: AsyncSession = Depends(get_db)):
+    """A genuine copy of a workflow node at the grid cell the client names: same
+    template plus every local setting (params, slot refs, variants, backend
+    mode/manual backend, use_api), sharing nothing with the original afterwards.
+    Deliberately NOT the asset world's "+ ref elsewhere" (asset.refasset, a
+    pointer to one asset placed in two cells) -- this is a second independent
+    node, so editing or generating either one leaves the other alone.
+
+    Nothing about the original's *results* comes along: status starts at draft,
+    with no jobs and no outputs, and created_by_node_id / collapse_target_id are
+    left NULL -- the copy is nobody's materialized output and isn't part of the
+    original's collapsed chain.
+
+    Placement is intent-only, like move_node: the client says which cell the user
+    picked and this either accepts it or 409s."""
+    old = await db.get(Node, node_id)
+    if not old:
+        raise HTTPException(404, "Node not found")
+    if old.kind != NodeKind.workflow:
+        raise HTTPException(
+            400,
+            "Only workflow-kind nodes can be duplicated -- an asset goes in a second cell as a reference instead (asset.refasset)",
+        )
+    home = await db.get(Track, old.track_id)
+    if home is None:
+        raise HTTPException(409, "Node has no track.")
+    ordered = await ordered_tracks(db, home.project_id)
+    if not (0 <= payload.target_row < len(ordered)) or payload.target_step < 0:
+        raise HTTPException(409, "Target cell is off the grid.")
+
+    # Column kind is a project-wide parity pattern, not a per-node choice (see
+    # create_node) -- a workflow copy only ever belongs in a workflow column.
+    project = await db.get(Project, home.project_id)
+    if project.start_kind is not None and _kind_for_step(project.start_kind, payload.target_step) != NodeKind.workflow:
+        raise HTTPException(409, "That column holds asset cells -- a workflow copy needs a workflow column.")
+
+    target_track = ordered[payload.target_row]
+    await _ensure_slot_free(db, target_track.id, payload.target_step)
+
+    new_node = Node(
+        track_id=target_track.id,
+        step_index=payload.target_step,
+        kind=NodeKind.workflow,
+        node_type=old.node_type,
+        template_id=old.template_id,
+        # deepcopy, not the same list/dict object: inputs/params are JSON columns
+        # held as plain Python structures, so handing both nodes the SAME object
+        # would make an in-place edit of one node's params (updateParam in
+        # NodeCell.tsx builds a new dict, but nothing guarantees every writer
+        # does) surface on the other too.
+        inputs=copy.deepcopy(old.inputs),
+        params=copy.deepcopy(old.params),
+        requested_variants=old.requested_variants,
+        backend_mode=old.backend_mode,
+        manual_backend_id=old.manual_backend_id,
+        use_api=old.use_api,
+    )
+    if new_node.node_type:
+        effective = await resolve_effective_template(db, new_node)
+        sync_legacy_fields(new_node, effective)
+    db.add(new_node)
+    await db.flush()
+    # Same as create_node: a workflow that already carries a template needs its
+    # input-slot rows materialized right below wherever it just landed.
+    if new_node.node_type:
+        await ensure_span_rows(db, new_node)
+    await db.commit()
+    await db.refresh(new_node)
     return new_node

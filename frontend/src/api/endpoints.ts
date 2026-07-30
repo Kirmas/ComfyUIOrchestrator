@@ -128,8 +128,13 @@ export const nodesApi = {
   // names the target grid cell and re-fetches the authoritative layout after.
   move: (id: string, data: { target_row: number; target_step: number }) =>
     api.post<NodeItem[]>(`/api/nodes/${id}/move`, data),
+  // Real copy of a workflow node (template + every local setting, none of its
+  // results) at the named cell -- same intent-only shape as move above. Not the
+  // asset world's reference: the copy is a second independent node.
+  duplicate: (id: string, data: { target_row: number; target_step: number }) =>
+    api.post<NodeItem>(`/api/nodes/${id}/duplicate`, data),
   // Candidate fork -- backend owns the whole reshuffle (settle one, relocate
-  // the leftover picker, spawn the next step). Client just names the kept asset.
+  // the leftover picker). Client just names the kept asset.
   pickCandidate: (id: string, keptAssetId: string) =>
     api.post<NodeItem>(`/api/nodes/${id}/pick-candidate`, { kept_asset_id: keptAssetId }),
   pickAllCandidates: (id: string) => api.post<void>(`/api/nodes/${id}/pick-all-candidates`, {}),
