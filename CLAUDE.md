@@ -127,7 +127,22 @@ This is a git repo (`main` branch, remote on GitHub) — use `git diff`/`git log
 
 `deploy/deploy.sh` scripts this (build frontend, sync backend + frontend
 into `/opt/comfy-orchestrator`, `pip install`, `alembic upgrade head`,
-restart the unit). `root-deploy.sh` syncs `backend/app/`, `backend/alembic/`
+restart the unit).
+
+**`deploy/deploy.sh backup` takes a snapshot** (pg_dump `-Fc` + media dir +
+prod `.env`) into `~/media/comfy-orchestrator-backups/<timestamp>/`, keeping
+the last `BACKUP_KEEP` (10), and writes a `RESTORE.txt` next to each. Run it
+before anything structural — a migration touching tracks/nodes, or a refactor
+of the track ordering: the finished charts in the DB and the generated media
+are not reproducible. It self-verifies (`pg_restore --list` must parse the
+archive; the media file count is compared against `assets` rows) and fails
+loudly rather than leaving a dump nobody checked. `~/media` is a separate
+466 GB disk (`/dev/sdb`) — deliberately *not* `/var/backups`, both because
+`/var` is its own ~8 GB LV that also holds `/var/lib/postgresql` (growing
+snapshots would fill it and take the database down) and because sdb is a
+different physical disk from the sda holding the live media and DB.
+
+`root-deploy.sh` syncs `backend/app/`, `backend/alembic/`
 (the whole directory, not just `versions/`), and `requirements.txt` — it used
 to skip `alembic/` entirely, so a new migration file only ever existed in the
 dev copy and `alembic upgrade head` on prod silently had nothing new to
