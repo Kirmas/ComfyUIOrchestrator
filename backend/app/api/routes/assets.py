@@ -1,6 +1,8 @@
+import os
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.storage import build_asset_url, get_storage
@@ -40,7 +42,7 @@ async def get_asset(asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{asset_id}/file")
-async def get_asset_file(asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_asset_file(request: Request, asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """Serves the raw bytes -- this is what <img src>/<model-viewer src> point at.
     Auth is the normal shared-token check, just via ?token= since browsers don't
     attach a custom Authorization header for these requests (see app/core/auth.py,
@@ -49,8 +51,34 @@ async def get_asset_file(asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)
     if not asset:
         raise HTTPException(404, "Asset not found")
     storage = get_storage()
-    data = storage.get_object(asset.storage_key)
-    return Response(content=data, media_type=asset.mime_type)
+    # FileResponse (not Response(content=...)): streams from disk through the
+    # threadpool and sets ETag/Last-Modified itself, so repeat loads get a 304
+    # instead of the full body.
+    #
+    # An asset URL is keyed on Asset.id and is genuinely immutable: storage keys
+    # are always a fresh uuid4 (storage.put_object) and a regenerate never
+    # rewrites an existing row -- native re-runs delete the old Asset rows and
+    # files outright (_clear_asset_node_outputs in worker/tasks.py) and insert
+    # new ones with new ids. So a given id serves the same bytes for its whole
+    # life, or 404s once deleted; it can never serve *different* bytes.
+    # "private" rather than "public" because the URL carries the shared token.
+    path = storage.path_of(asset.storage_key)
+    try:
+        stat_result = os.stat(path)
+    except OSError:
+        raise HTTPException(404, "Asset file missing")
+
+    cache_headers = {"Cache-Control": "private, max-age=31536000, immutable"}
+    response = FileResponse(path, media_type=asset.mime_type, headers=cache_headers, stat_result=stat_result)
+
+    # FileResponse sets ETag/Last-Modified but, unlike StaticFiles, never acts
+    # on If-None-Match itself -- without this a hard refresh still drags the
+    # whole multi-MB body back. Compare against the etag it just computed rather
+    # than deriving one here, so this can't drift from starlette's own scheme.
+    etag = response.headers.get("etag", "")
+    if etag and etag in {t.strip() for t in request.headers.get("if-none-match", "").split(",")}:
+        return Response(status_code=304, headers={**cache_headers, "ETag": etag})
+    return response
 
 
 @router.delete("/{asset_id}", status_code=204)

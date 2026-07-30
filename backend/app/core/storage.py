@@ -26,6 +26,14 @@ class Storage:
     def get_object(self, key: str) -> bytes:
         return self._safe_path(key).read_bytes()
 
+    def path_of(self, key: str) -> Path:
+        """On-disk path for a key, for handing to a streaming FileResponse
+        instead of reading the whole object into memory (GET /api/assets/{id}/file
+        serves 6-7 MB originals -- read_bytes() there both spiked RAM and blocked
+        the event loop, since nothing in this app offloads sync I/O to a thread).
+        Goes through the same _safe_path escape check as every other accessor."""
+        return self._safe_path(key)
+
     def delete_object(self, key: str) -> None:
         self._safe_path(key).unlink(missing_ok=True)
 

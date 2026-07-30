@@ -67,18 +67,44 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   loadProject: async (projectId: string) => {
     const tracks = withRowIndex(await projectsApi.tracks(projectId));
+
+    // One parallel batch, not a waterfall: the per-track node fetches don't
+    // depend on each other (nodesById is keyed by node id, so arrival order is
+    // irrelevant) and layout/annotations don't depend on them either. Awaiting
+    // them one at a time meant ~20 sequential round-trips on every single node
+    // add/move/delete -- the wait was all latency, since each call itself takes
+    // under 15 ms.
+    const [nodesPerTrack, layout, annotations] = await Promise.all([
+      Promise.all(tracks.map((track) => tracksApi.nodes(track.id))),
+      projectsApi.layout(projectId).catch(() => ({ spans: {}, blocked_cells: [] as [number, number][] })),
+      projectsApi.annotations(projectId).catch(() => [] as Annotation[]),
+    ]);
+
     const nodesById: Record<string, NodeItem> = {};
-    for (const track of tracks) {
-      const nodes = await tracksApi.nodes(track.id);
+    for (const nodes of nodesPerTrack) {
       for (const node of nodes) nodesById[node.id] = node;
     }
-    const layout = await projectsApi.layout(projectId).catch(() => ({ spans: {}, blocked_cells: [] as [number, number][] }));
-    const annotations = await projectsApi.annotations(projectId).catch(() => [] as Annotation[]);
+
+    // Carry the previous outputs over instead of clearing them. A bare
+    // `outputsByNode: {}` made every <img> in the grid unmount and immediately
+    // remount on each reload -- and since loadProject runs after every node
+    // add/move/delete, that re-fetched and re-decoded the project's full-size
+    // originals (300+ MB on humanChart) every single time, which is what made a
+    // move appear to hang for seconds. Entries whose node is gone -- including
+    // all of them when switching to a different project -- drop out here, and
+    // the refreshNodeOutputs pass below still overwrites whatever may have
+    // actually changed.
+    const prevOutputs = get().outputsByNode;
+    const carriedOutputs: Record<string, Asset[]> = {};
+    for (const id of Object.keys(nodesById)) {
+      if (prevOutputs[id]) carriedOutputs[id] = prevOutputs[id];
+    }
+
     set({
       projectId,
       tracks,
       nodesById,
-      outputsByNode: {},
+      outputsByNode: carriedOutputs,
       spans: layout.spans,
       blockedCells: new Set(layout.blocked_cells.map(([r, c]) => `${r}:${c}`)),
       annotations,

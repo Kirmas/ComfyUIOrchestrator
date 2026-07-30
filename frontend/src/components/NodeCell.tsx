@@ -127,6 +127,12 @@ function CandidatesGrid({
               <img
                 src={resolveAssetUrl(asset.url)}
                 alt="output"
+                // The grid renders every cell at once (no virtualization) and
+                // these are full-size originals, several MB each -- lazy so
+                // off-screen cells don't fetch, async-decoded so the ones that
+                // do can't block the main thread mid-interaction.
+                loading="lazy"
+                decoding="async"
                 onDoubleClick={() => onImageOpen(resolveAssetUrl(asset.url))}
                 onLoad={(e) => {
                   const img = e.currentTarget;
@@ -207,6 +213,8 @@ function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImage
             <img
               src={resolveAssetUrl(asset.url)}
               alt="output"
+              loading="lazy"
+              decoding="async"
               draggable={false}
               onDoubleClick={() => onImageOpen(resolveAssetUrl(asset.url))}
               onLoad={(e) => {
@@ -1340,7 +1348,13 @@ function ChainMemberView({ node, templates, outputs }: { node: NodeItem; templat
       </label>
       {node.kind === "asset" ? (
         outputs[0] ? (
-          <img src={resolveAssetUrl(outputs[0].url)} alt="" style={{ maxWidth: 200, borderRadius: 4 }} />
+          <img
+            src={resolveAssetUrl(outputs[0].url)}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            style={{ maxWidth: 200, borderRadius: 4 }}
+          />
         ) : (
           <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("cell.chainNoOutput")}</span>
         )
@@ -1409,6 +1423,8 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: P
               <img
                 src={resolveAssetUrl(resolved.url)}
                 alt="referenced output"
+                loading="lazy"
+                decoding="async"
                 onDoubleClick={() => setFullSizeUrl(resolveAssetUrl(resolved.url))}
                 title={t("cell.doubleClickFullSize")}
                 style={{ cursor: "zoom-in", opacity: 0.85 }}
