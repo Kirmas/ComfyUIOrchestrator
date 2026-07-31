@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { annotationsApi, backendsApi, capabilitiesApi, nodesApi, nodeTemplatesApi, projectsApi, tracksApi } from "../api/endpoints";
 import { useProjectWs } from "../api/useProjectWs";
+import { readClipboard, type CopiedAsset } from "../assetClipboard";
 import { useProjectStore } from "../state/projectStore";
 import { resolveSlotAsset } from "../slotResolution";
 import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project, Track } from "../types";
@@ -108,6 +109,18 @@ export function Grid({ projectId }: { projectId: string }) {
   const [fileDragActive, setFileDragActive] = useState(false);
   // Which empty cell the reference picker is filling, if open.
   const [pickRefAt, setPickRefAt] = useState<{ row: number; step: number } | null>(null);
+  // Re-read on every change (including from another tab) so "paste ref" shows
+  // up the moment something is copied, without a manual refresh.
+  const [clipboard, setClipboard] = useState<CopiedAsset | null>(() => readClipboard());
+  useEffect(() => {
+    const sync = () => setClipboard(readClipboard());
+    window.addEventListener("asset-clipboard-changed", sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener("asset-clipboard-changed", sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
   // How many leading columns an as-yet-empty track should skip before its
   // first real cell -- purely a UI notion (never sent to the backend on its
   // own): a track only gets a step_index once a node actually exists at it,
@@ -939,6 +952,25 @@ export function Grid({ projectId }: { projectId: string }) {
     addNode(refNode);
   };
 
+  /** Pastes whatever asset is on the clipboard as a reference in this cell.
+   *
+   * Reuses placeLibraryAssetAt: a clipboard entry and a board library asset are
+   * the same thing at this point -- an asset id with no owning node in this
+   * grid -- so both become an `explicit` refasset by the identical path. The
+   * clipboard is deliberately left loaded afterwards: pasting the same
+   * reference into two or three cells is the normal case, and the user said
+   * they would rather repeat the paste than manage a multi-slot buffer.
+   */
+  const pasteRefAt = async (row: number, step: number) => {
+    const entry = readClipboard();
+    if (!entry) return;
+    try {
+      await placeLibraryAssetAt({ id: entry.assetId } as Asset, row, step);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : t("grid.pasteRefFailed"));
+    }
+  };
+
   const onStartRef = (node: NodeItem) => setRefFor({ nodeId: node.id });
 
   const completeRefAt = async (row: number, step: number) => {
@@ -1365,6 +1397,15 @@ export function Grid({ projectId }: { projectId: string }) {
                   >
                     {t("grid.fromReferences")}
                   </button>
+                  {clipboard && (
+                    <button
+                      style={{ fontSize: 10, padding: "1px 4px", opacity: 0.6, marginLeft: 4 }}
+                      title={t("grid.pasteRefTitle", { label: clipboard.label })}
+                      onClick={() => void pasteRefAt(row, step)}
+                    >
+                      {t("grid.pasteRef")}
+                    </button>
+                  )}
                 </>
               )}
             </div>

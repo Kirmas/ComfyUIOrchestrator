@@ -474,4 +474,12 @@ export const uk: Record<TKey, string> = {
   "subgraph.mainGrid": "Головна сітка",
   "cell.confirmRemoveSubgraph": "Прибрати цей вказівник на субграф? Сам субграф видалиться, лише якщо це був останній шлях до нього і він порожній.",
   "subgraph.deleteTitle": "Видалити цей вказівник на субграф",
+  "cell.copyRef": "⧉ копіювати реф",
+  "cell.copyRefTitle": "Скопіювати цей ассет, щоб послатись на нього з іншого субграфа",
+  "grid.pasteRef": "вставити реф",
+  "grid.pasteRefTitle": "Поставити тут посилання на скопійований ассет ({label})",
+  "grid.pasteRefFailed": "Не вдалося поставити тут скопійоване посилання.",
+  "subgraph.takeOwnership": "зробити головним",
+  "subgraph.takeOwnershipTitle": "Зробити цей вказівник головним — саме він тримає субграф досяжним",
+  "subgraph.takeOwnershipFailed": "Не вдалося передати володіння цьому вказівнику.",
 };

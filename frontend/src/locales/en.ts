@@ -473,6 +473,14 @@ export const en = {
   "subgraph.mainGrid": "Main grid",
   "cell.confirmRemoveSubgraph": "Remove this subgraph pointer? The subgraph itself is only deleted if this was the last way in and it is empty.",
   "subgraph.deleteTitle": "Delete this subgraph pointer",
+  "cell.copyRef": "⧉ copy ref",
+  "cell.copyRefTitle": "Copy this asset so it can be referenced from another subgraph",
+  "grid.pasteRef": "paste ref",
+  "grid.pasteRefTitle": "Place a reference to the copied asset ({label}) here",
+  "grid.pasteRefFailed": "Could not place the copied reference here.",
+  "subgraph.takeOwnership": "make main",
+  "subgraph.takeOwnershipTitle": "Make this the subgraph's main pointer -- the one that keeps it reachable",
+  "subgraph.takeOwnershipFailed": "Could not move ownership to this pointer.",
 };
 
 export type TKey = keyof typeof en;

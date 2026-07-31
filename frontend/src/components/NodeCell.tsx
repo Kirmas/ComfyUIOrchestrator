@@ -5,6 +5,7 @@ import { assetsApi, dashboardsApi, jobsApi, nodesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
 import { isFileDrag } from "../dragUtils";
 import { detectMaskGroups, resolveMaskImageField } from "../maskUtils";
+import { copyAsset } from "../assetClipboard";
 import { resolveSlotAsset } from "../slotResolution";
 import { useProjectStore } from "../state/projectStore";
 import { defaultInputsForSchema, slotFields } from "../templateUtils";
@@ -537,6 +538,21 @@ function BaseAssetNodeView({
         {!isCandidatesGrid && outputs.length >= 1 && (
           <button onClick={() => onStartRef(node)} title={t("cell.refElsewhereTitle")}>
             {t("cell.refElsewhere")}
+          </button>
+        )}
+        {/* "+ ref elsewhere" is a click-to-complete gesture within one rendered
+            grid, so it can't reach into another dashboard -- the target cell
+            isn't on screen at the same time. Copying puts the asset id where
+            the other grid can pick it up. */}
+        {!isCandidatesGrid && outputs.length >= 1 && (
+          <button
+            onClick={() => {
+              const asset = outputs.find((o) => o.selected) ?? outputs[0];
+              copyAsset({ assetId: asset.id, label: node.node_type ?? t("cell.asset"), url: asset.url });
+            }}
+            title={t("cell.copyRefTitle")}
+          >
+            {t("cell.copyRef")}
           </button>
         )}
         {/* Only on a free cell: a workflow's own materialized output is bound to
@@ -1535,6 +1551,18 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked }: P
     if (node.subgraph_dashboard_id) void enterDashboard(node.subgraph_dashboard_id, info?.name || t("subgraph.untitled"));
   };
 
+  const takeOwnership = async () => {
+    if (!node.subgraph_dashboard_id || busy) return;
+    setBusy(true);
+    try {
+      setInfo(await dashboardsApi.transferOwnership(node.subgraph_dashboard_id, node.id));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : t("subgraph.takeOwnershipFailed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const rename = async () => {
     if (!node.subgraph_dashboard_id) return;
     const name = prompt(t("subgraph.renamePrompt"), info?.name ?? "");
@@ -1602,6 +1630,15 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked }: P
         <button className="primary" onClick={open} title={t("subgraph.openTitle")}>
           {t("subgraph.open")}
         </button>
+        {/* Only meaningful on an extra pointer: the owner is what guarantees the
+            subgraph stays reachable, so moving that role here is how you make
+            *this* the way in. Refused server-side if this pointer is only
+            reachable through the very dashboard it would then own. */}
+        {info && info.owner_node_id !== node.id && (
+          <button onClick={takeOwnership} disabled={busy} title={t("subgraph.takeOwnershipTitle")}>
+            {t("subgraph.takeOwnership")}
+          </button>
+        )}
         <button onClick={deleteCell} disabled={busy} title={t("subgraph.deleteTitle")}>
           {t("common.delete")}
         </button>
