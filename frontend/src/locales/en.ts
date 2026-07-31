@@ -481,6 +481,10 @@ export const en = {
   "subgraph.takeOwnership": "make main",
   "subgraph.takeOwnershipTitle": "Make this the subgraph's main pointer -- the one that keeps it reachable",
   "subgraph.takeOwnershipFailed": "Could not move ownership to this pointer.",
+  "grid.tracksSelected": "{n} track(s) selected",
+  "grid.noMoveDestinations": "No subgraph in this grid to move them into",
+  "grid.selectTrackTitle": "Tick to move this track into another grid",
+  "grid.moveTracksFailed": "Could not move those tracks.",
 };
 
 export type TKey = keyof typeof en;

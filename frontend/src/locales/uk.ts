@@ -482,4 +482,8 @@ export const uk: Record<TKey, string> = {
   "subgraph.takeOwnership": "зробити головним",
   "subgraph.takeOwnershipTitle": "Зробити цей вказівник головним — саме він тримає субграф досяжним",
   "subgraph.takeOwnershipFailed": "Не вдалося передати володіння цьому вказівнику.",
+  "grid.tracksSelected": "обрано доріжок: {n}",
+  "grid.noMoveDestinations": "У цій сітці немає субграфа, куди їх перенести",
+  "grid.selectTrackTitle": "Позначити, щоб перенести цю доріжку в іншу сітку",
+  "grid.moveTracksFailed": "Не вдалося перенести ці доріжки.",
 };

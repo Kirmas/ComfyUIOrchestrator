@@ -585,3 +585,10 @@ class DashboardRead(BaseModel):
     pointer_count: int = 0
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class TracksMove(BaseModel):
+    # A contiguous run of tracks, moved as one unit into another grid scope.
+    track_ids: list[uuid.UUID]
+    # Destination scope; None = the project's main grid.
+    dashboard_id: uuid.UUID | None = None

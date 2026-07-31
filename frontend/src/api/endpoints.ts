@@ -121,6 +121,12 @@ export const tracksApi = {
     spawned_from_output_id?: string | null;
   }) => api.post<Track>("/api/tracks", data),
   get: (id: string) => api.get<Track>(`/api/tracks/${id}`),
+  // Moves a contiguous run of tracks into another grid scope (null = the
+  // project's main grid). The backend validates that the selection is closed
+  // under row-spans, creator/output pairs and spawned tracks, and realigns
+  // column parity if the destination started on the other kind.
+  moveToDashboard: (trackIds: string[], dashboardId: string | null) =>
+    api.post<Track[]>("/api/tracks/move-to-dashboard", { track_ids: trackIds, dashboard_id: dashboardId }),
   nodes: (id: string) => api.get<NodeItem[]>(`/api/tracks/${id}/nodes`),
   remove: (id: string) => api.delete(`/api/tracks/${id}`),
 };

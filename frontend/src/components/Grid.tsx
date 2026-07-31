@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { annotationsApi, backendsApi, capabilitiesApi, nodesApi, nodeTemplatesApi, projectsApi, tracksApi } from "../api/endpoints";
+import { annotationsApi, backendsApi, capabilitiesApi, dashboardsApi, nodeTemplatesApi, nodesApi, projectsApi, tracksApi } from "../api/endpoints";
 import { useProjectWs } from "../api/useProjectWs";
 import { readClipboard, type CopiedAsset } from "../assetClipboard";
 import { useProjectStore } from "../state/projectStore";
@@ -109,6 +109,14 @@ export function Grid({ projectId }: { projectId: string }) {
   const [fileDragActive, setFileDragActive] = useState(false);
   // Which empty cell the reference picker is filling, if open.
   const [pickRefAt, setPickRefAt] = useState<{ row: number; step: number } | null>(null);
+  // Tracks ticked for moving into another grid. Migration is the reason this
+  // exists: an existing project is one big main grid, and this is the only way
+  // to carry finished work into a subgraph.
+  const [moveSelection, setMoveSelection] = useState<Set<string>>(new Set());
+  // Names of the subgraphs this grid points at, so the move bar can label its
+  // destinations. Fetched here rather than read off the node: the name lives on
+  // the dashboard, and a pointer only carries its id.
+  const [dashboardNames, setDashboardNames] = useState<Record<string, string>>({});
   // Re-read on every change (including from another tab) so "paste ref" shows
   // up the moment something is copied, without a manual refresh.
   const [clipboard, setClipboard] = useState<CopiedAsset | null>(() => readClipboard());
@@ -971,6 +979,55 @@ export function Grid({ projectId }: { projectId: string }) {
     }
   };
 
+  /** Where a track selection can go from here.
+   *
+   * Deliberately not a list of every dashboard in the project -- there isn't
+   * one by design. The destinations are the subgraph pointers you can actually
+   * see in this grid, plus the grid you came from, which is exactly how you
+   * navigate anyway.
+   */
+  const moveDestinations = useMemo(() => {
+    const out: { id: string | null; label: string }[] = [];
+    if (navStack.length > 1) {
+      const parent = navStack[navStack.length - 2];
+      out.push({ id: parent.dashboardId, label: parent.dashboardId === null ? t("subgraph.mainGrid") : parent.name });
+    }
+    for (const node of Object.values(nodesById)) {
+      const id = node.subgraph_dashboard_id;
+      if (id) out.push({ id, label: dashboardNames[id] || t("subgraph.untitled") });
+    }
+    return out;
+  }, [navStack, nodesById, dashboardNames, t]);
+
+  useEffect(() => {
+    const ids = Object.values(nodesById)
+      .map((n) => n.subgraph_dashboard_id)
+      .filter((id): id is string => !!id && !(id in dashboardNames));
+    if (!ids.length) return;
+    let cancelled = false;
+    Promise.all(ids.map((id) => dashboardsApi.get(id).catch(() => null))).then((list) => {
+      if (cancelled) return;
+      const named: Record<string, string> = {};
+      for (const d of list) if (d) named[d.id] = d.name;
+      if (Object.keys(named).length) setDashboardNames((prev) => ({ ...prev, ...named }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [nodesById, dashboardNames]);
+
+  const moveSelectedTracks = async (destination: string | null) => {
+    const ids = sortedTracks.filter((tr) => moveSelection.has(tr.id)).map((tr) => tr.id);
+    if (!ids.length) return;
+    try {
+      await tracksApi.moveToDashboard(ids, destination);
+      setMoveSelection(new Set());
+      await loadProject(projectId, dashboardId);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : t("grid.moveTracksFailed"));
+    }
+  };
+
   const onStartRef = (node: NodeItem) => setRefFor({ nodeId: node.id });
 
   const completeRefAt = async (row: number, step: number) => {
@@ -1167,6 +1224,18 @@ export function Grid({ projectId }: { projectId: string }) {
           ))}
         </div>
       )}
+      {moveSelection.size > 0 && (
+        <div className="track-move-bar">
+          <span>{t("grid.tracksSelected", { n: moveSelection.size })}</span>
+          {moveDestinations.length === 0 && <span className="hint">{t("grid.noMoveDestinations")}</span>}
+          {moveDestinations.map((d) => (
+            <button key={d.id ?? "root"} className="primary" onClick={() => void moveSelectedTracks(d.id)}>
+              → {d.label}
+            </button>
+          ))}
+          <button onClick={() => setMoveSelection(new Set())}>{t("common.cancel")}</button>
+        </div>
+      )}
       {selectedNodeIds.size > 0 && (
         // Same reasoning as .zoom-indicator above: a sibling of the scaled
         // wrapper, so its position: sticky isn't captured by the zoom
@@ -1226,7 +1295,21 @@ export function Grid({ projectId }: { projectId: string }) {
               // that only *appeared* to belong to some other row).
               style={{ gridColumn: 1, gridRow: track.row_index + 1, display: "flex", alignItems: "center", justifyContent: "space-between" }}
             >
-              {t("grid.track", { n: track.row_index })}
+              <label style={{ display: "flex", alignItems: "center", gap: 4 }} title={t("grid.selectTrackTitle")}>
+                <input
+                  type="checkbox"
+                  checked={moveSelection.has(track.id)}
+                  onChange={(e) =>
+                    setMoveSelection((prev) => {
+                      const next = new Set(prev);
+                      if (e.target.checked) next.add(track.id);
+                      else next.delete(track.id);
+                      return next;
+                    })
+                  }
+                />
+                {t("grid.track", { n: track.row_index })}
+              </label>
               <div style={{ display: "flex", gap: 4 }}>
                 <button
                   onClick={() => addTrackAbove(track.id)}

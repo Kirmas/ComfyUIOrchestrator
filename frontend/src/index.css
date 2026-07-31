@@ -1797,3 +1797,23 @@ th, td {
   border: 1px dashed var(--border);
   border-radius: 4px;
 }
+
+/* Sibling of the scaled grid wrapper, same reasoning as .zoom-indicator. */
+.track-move-bar {
+  position: sticky;
+  top: 8px;
+  left: 8px;
+  z-index: 31;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: 8px;
+  padding: 4px 8px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.track-move-bar .hint { color: var(--text-dim); }
