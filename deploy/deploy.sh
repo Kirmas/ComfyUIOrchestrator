@@ -30,10 +30,13 @@ esac
 echo "==> building frontend"
 cd "$DEV/frontend"
 npm ci
-# Cap node's heap. This box has ~2 GB total and runs Jellyfin/Plex alongside,
-# so an unbounded V8 heap gets the build OOM-killed partway through (exit 137/
-# 144) -- which had already happened more than once. A smaller ceiling just
-# makes it collect garbage sooner; the build itself takes about the same time.
+# Cap node's heap, as a guard rail. This box has ~2 GB total and runs
+# Jellyfin/Plex alongside, so an unbounded V8 heap had the build OOM-killed
+# partway through more than once. The actual cause was model-viewer/three.js
+# sitting in one 1.4 MB chunk that rollup had to minify whole; that now loads
+# on demand (Model3DThumb.tsx) and the main chunk is ~340 KB, so the build fits
+# easily either way. Kept because the ceiling costs nothing and the box is
+# still tight.
 NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=448}" npm run build
 
 echo "==> handing off to root-deploy.sh"

@@ -1788,3 +1788,12 @@ th, td {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Holds a mesh cell's shape while three.js is being fetched on demand
+   (see Model3DThumb.tsx -- it is no longer in the main bundle). */
+.model-thumb-loading {
+  aspect-ratio: 1;
+  background: var(--panel);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+}
