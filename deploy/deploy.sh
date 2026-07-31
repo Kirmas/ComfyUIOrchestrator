@@ -30,13 +30,18 @@ esac
 echo "==> building frontend"
 cd "$DEV/frontend"
 npm ci
-# Cap node's heap, as a guard rail. This box has ~2 GB total and runs
-# Jellyfin/Plex alongside, so an unbounded V8 heap had the build OOM-killed
-# partway through more than once. The actual cause was model-viewer/three.js
-# sitting in one 1.4 MB chunk that rollup had to minify whole; that now loads
-# on demand (Model3DThumb.tsx) and the main chunk is ~340 KB, so the build fits
-# easily either way. Kept because the ceiling costs nothing and the box is
-# still tight.
+# Cap node's heap -- this is what actually keeps the build from being
+# OOM-killed on this box. Measured peaks: tsc -b ~335 MB, vite build ~496 MB,
+# the two together ~515 MB, against 459 MB available (swap already full) the
+# time it died. The ceiling doesn't lower the work, it just makes V8 collect
+# sooner instead of growing into ground it hasn't got.
+#
+# Note it is NOT about output chunk size: splitting model-viewer/three.js into
+# its own lazy chunk measured 496 MB either way. The memory goes into parsing
+# and holding the module graph (three.js is thousands of modules, all turned
+# into ASTs for tree-shaking) -- chunking only decides where the result is
+# written, not how much gets processed. Making the bundle smaller is worth
+# doing for page load, but it is not a fix for this.
 NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=448}" npm run build
 
 echo "==> handing off to root-deploy.sh"
