@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { createPortal } from "react-dom";
 import { resolveAssetUrl } from "../api/client";
-import { assetsApi, jobsApi, nodesApi } from "../api/endpoints";
+import { assetsApi, dashboardsApi, jobsApi, nodesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
 import { isFileDrag } from "../dragUtils";
 import { detectMaskGroups, resolveMaskImageField } from "../maskUtils";
 import { resolveSlotAsset } from "../slotResolution";
 import { useProjectStore } from "../state/projectStore";
 import { defaultInputsForSchema, slotFields } from "../templateUtils";
-import type { Asset, Backend, Capability, InputRef, Job, NodeItem, NodeStatus, NodeTemplate } from "../types";
+import type { Asset, Backend, Capability, Dashboard, InputRef, Job, NodeItem, NodeStatus, NodeTemplate } from "../types";
 import { useT, type TFunc } from "../i18n";
 import { cx } from "../utils";
 import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
@@ -308,6 +308,22 @@ function BaseAssetNodeView({
   // result of the same generation the user didn't explicitly keep). Once
   // unbound, this asset is also free to move anywhere -- isPositionAllowedFor/
   // _ensure_output_binding only constrain nodes that still have a creator.
+  // Turns this free asset cell into a smart pointer on a brand-new, empty
+  // subgraph, and makes it that subgraph's main pointer. The node keeps its
+  // identity and position -- only node_type and subgraph_dashboard_id change --
+  // so nothing referencing this cell has to be rewired.
+  const makeSubgraph = async () => {
+    const name = prompt(t("subgraph.createPrompt"), "");
+    if (name === null) return;
+    try {
+      await dashboardsApi.create(node.id, name);
+      const updated = await nodesApi.get(node.id);
+      setNode(updated);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : t("subgraph.deleteFailed"));
+    }
+  };
+
   const detachFromWorkflow = async () => {
     const creatorId = node.created_by_node_id;
     if (!creatorId) return;
@@ -521,6 +537,14 @@ function BaseAssetNodeView({
         {!isCandidatesGrid && outputs.length >= 1 && (
           <button onClick={() => onStartRef(node)} title={t("cell.refElsewhereTitle")}>
             {t("cell.refElsewhere")}
+          </button>
+        )}
+        {/* Only on a free cell: a workflow's own materialized output is bound to
+            its creator's position, so it can't also be the way into a subgraph
+            (the backend rejects it too). */}
+        {!isCandidatesGrid && !node.created_by_node_id && !node.subgraph_dashboard_id && (
+          <button onClick={makeSubgraph} title={t("subgraph.createTitle")}>
+            {t("subgraph.create")}
           </button>
         )}
         {!isCandidatesGrid && node.created_by_node_id && (
@@ -1460,6 +1484,145 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: P
   );
 }
 
+/** A smart pointer: an asset cell that also opens a sub-dashboard.
+ *
+ * Its face is resolved exactly like a RefAsset's -- an "explicit" InputRef at
+ * slot 0 -- so picking which picture represents the subgraph reuses the
+ * reference machinery instead of inventing a second one. Deliberately renders
+ * as a normal asset (zoom, compare, drag) with one extra affordance: dive in.
+ *
+ * Deletion is guarded server-side, not here: the main pointer of a subgraph
+ * that still holds work is refused (409), and the alert surfaces that reason.
+ * That rule is what keeps a whole chart from being one click from gone.
+ */
+function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked }: Props) {
+  const t = useT();
+  const tracks = useProjectStore((s) => s.tracks);
+  const nodesById = useProjectStore((s) => s.nodesById);
+  const outputsByNode = useProjectStore((s) => s.outputsByNode);
+  const refreshNodeOutputs = useProjectStore((s) => s.refreshNodeOutputs);
+  const removeNode = useProjectStore((s) => s.removeNode);
+  const enterDashboard = useProjectStore((s) => s.enterDashboard);
+  const [resolved, setResolved] = useState<Asset | null>(null);
+  const [info, setInfo] = useState<Dashboard | null>(null);
+  const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    resolveSlotAsset(node, 0, tracks, nodesById, outputsByNode, refreshNodeOutputs).then((asset) => {
+      if (!cancelled) setResolved(asset);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node.inputs, outputsByNode]);
+
+  useEffect(() => {
+    if (!node.subgraph_dashboard_id) return;
+    let cancelled = false;
+    dashboardsApi
+      .get(node.subgraph_dashboard_id)
+      .then((d) => !cancelled && setInfo(d))
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [node.subgraph_dashboard_id]);
+
+  const open = () => {
+    if (node.subgraph_dashboard_id) void enterDashboard(node.subgraph_dashboard_id, info?.name || t("subgraph.untitled"));
+  };
+
+  const rename = async () => {
+    if (!node.subgraph_dashboard_id) return;
+    const name = prompt(t("subgraph.renamePrompt"), info?.name ?? "");
+    if (name === null) return;
+    setInfo(await dashboardsApi.rename(node.subgraph_dashboard_id, name));
+  };
+
+  const deleteCell = async () => {
+    if (busy) return;
+    if (!confirm(t("cell.confirmRemoveSubgraph"))) return;
+    setBusy(true);
+    try {
+      await nodesApi.remove(node.id);
+      removeNode(node.id);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : t("subgraph.deleteFailed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      ref={(el) => registerRef(node.id, el)}
+      className={cx("node-cell", "node-cell-asset", "node-cell-subgraph", `status-${node.status}`, compareActive && "picking-target")}
+      onClick={() => compareActive && onCellClicked(node)}
+    >
+      <div className="node-cell-header">
+        <span onDoubleClick={rename} title={t("subgraph.renameTitle")}>
+          {info?.name || t("subgraph.untitled")}
+        </span>
+        <span className="status-pill">{t("subgraph.pill")}</span>
+      </div>
+
+      {resolved ? (
+        <div className="output-grid">
+          <div className="output-item">
+            {resolved.kind === "mesh" ? (
+              <Model3DThumb url={resolveAssetUrl(resolved.url)} />
+            ) : (
+              <img
+                src={resolveAssetUrl(resolved.url)}
+                alt="subgraph result"
+                loading="lazy"
+                decoding="async"
+                onDoubleClick={() => setFullSizeUrl(resolveAssetUrl(resolved.url))}
+                title={t("cell.doubleClickFullSize")}
+                style={{ cursor: "zoom-in" }}
+              />
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="subgraph-empty">{t("subgraph.noFace")}</div>
+      )}
+
+      {info && (
+        <div className="subgraph-meta">
+          {t("subgraph.contents", { nodes: info.node_count })}
+          {info.pointer_count > 1 && ` · ${t("subgraph.pointers", { count: info.pointer_count })}`}
+        </div>
+      )}
+
+      <div className="node-actions">
+        <button className="primary" onClick={open} title={t("subgraph.openTitle")}>
+          {t("subgraph.open")}
+        </button>
+        <button onClick={deleteCell} disabled={busy} title={t("subgraph.deleteTitle")}>
+          {t("common.delete")}
+        </button>
+      </div>
+
+      {fullSizeUrl &&
+        createPortal(
+          <div className="image-modal-backdrop" onClick={() => setFullSizeUrl(null)}>
+            <div className="image-modal-content image-modal-fullscreen" onClick={(e) => e.stopPropagation()}>
+              <button type="button" className="image-modal-close" onClick={() => setFullSizeUrl(null)} title={t("cell.closeFullSize")}>
+                ×
+              </button>
+              <ZoomableImage src={fullSizeUrl} />
+            </div>
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+}
+
 export type NodeViewComponent = ComponentType<Props>;
 
 // Per-node_type override, checked before falling back to the base view for
@@ -1470,6 +1633,7 @@ export type NodeViewComponent = ComponentType<Props>;
 // risk regressing) to accommodate one outlier.
 export const NODE_VIEWS: Record<string, NodeViewComponent> = {
   "asset.refasset": RefAssetNodeView,
+  "asset.subgraph": SubgraphNodeView,
 };
 
 export function NodeCell(props: Props) {

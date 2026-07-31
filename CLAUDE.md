@@ -20,6 +20,41 @@ Product overview & architecture: [README.md](README.md) — the source of truth 
 - **Any modal opened from `NodeCell.tsx` must render via `createPortal(..., document.body)`**, never inline in the cell's own JSX. A cell sits inside Grid's pan/zoom CSS transform (`Grid.tsx`); per the CSS transform spec, any ancestor transform (even a no-op `scale(1)`) establishes a new containing block for `position: fixed` descendants, so an inline (non-portaled) `.image-modal-backdrop` silently stops being viewport-relative and can open hundreds of pixels off-screen — only reproduces once the modal's content is tall enough to need `.params-modal-content`'s own scroll area, which is why it went unnoticed until `native.mask`'s paint canvas hit it (2026-07-21 incident; the params-modal `paramsOpen` block was the one `.image-modal-backdrop` usage in the file that wasn't portaled, unlike the other three).
 - **Portaling a modal to `document.body` does *not* remove it from Grid's drag-to-pan event handling.** `onBackgroundPointerDown` (Grid.tsx) arms a `window`-level pan drag on any pointerdown that bubbles up to the grid container without matching its exclusion selector — and React's *synthetic* event bubbling follows the React tree, not the real DOM tree, so a portaled child (still a React descendant of Grid) bubbles a pointerdown up to it regardless of where it actually sits in the DOM. Interactive content inside any modal (e.g. `MaskPreview.tsx`'s paint canvas) must therefore be covered by the `.image-modal-backdrop` entry already in `onBackgroundPointerDown`'s `closest()` exclusion list, or a pointerdown inside the modal visibly pans/drags the grid underneath it (2026-07-21 incident, found right after the createPortal fix above while testing `native.mask`'s paint canvas).
 
+## Sub-dashboards & smart pointers (`backend/app/api/routes/dashboards.py`)
+
+A project is not one grid. A character is a dozen-plus separate pieces (the
+character chart, an armour chart, a weapon chart…), so a grid can contain a
+**smart pointer** — an `asset.subgraph` node — that opens its own separate
+grid. This is *organisational decomposition*, not a performance trick.
+
+- **A scope is (project, dashboard).** `Track.dashboard_id IS NULL` means the
+  project's main grid, which is why this shipped with **no data migration** —
+  every pre-existing track reads as "main" for free. `core/track_order.py`'s
+  linked list is unchanged; only the key it filters by moved (`scope_of(track)`
+  is how callers should derive it). Each scope has its own list head, its own
+  `start_kind` origin (`core/grid_scope.py`), and its own layout.
+- **A pointer is a reference, not containment.** Several pointers may open one
+  dashboard, and a loop (A→B→A) is legal — diving in is one click and you come
+  back through **navigation history** (`navStack`), not through structure. There
+  is deliberately no menu listing every dashboard.
+- **Reachability is structural, via ownership.** `Dashboard.owner_node_id` is
+  the *main* pointer. A subgraph node can never leave the dashboard it was
+  created in (`_ensure_same_scope`), and the main pointer can't be deleted while
+  its dashboard holds anything — so main pointers form a spanning tree rooted at
+  the main grid. Extra pointers are non-tree edges, hence always safe to delete.
+  Deleting the main pointer of an *empty* dashboard auto-promotes another
+  pointer, or deletes the dashboard if it was the last one.
+- **Ownership can be transferred**, guarded by `_owner_chain_reaches_root`:
+  walking the *ownership* chain (one FK per hop, not the pointer graph, which
+  may loop). It rejects only the genuine hazard — handing a dashboard's
+  ownership to a pointer reachable solely *through* that dashboard, which would
+  close the chain into a ring cut off from the main grid. Legitimate cross-links
+  are unaffected.
+- **Cross-scope single-node moves are rejected outright.** Positions only mean
+  something inside one grid, so relocating one node across scopes would strand
+  its creator/output binding. Moving finished work between dashboards is meant
+  to be a deliberate whole-track operation (not built yet).
+
 ## Idea board (`backend/app/api/routes/boards.py`, `frontend/src/components/Board.tsx`)
 
 Pre-production — the idea, the references, the divergence — lives on a separate

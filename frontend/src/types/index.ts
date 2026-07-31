@@ -108,6 +108,8 @@ export interface Annotation {
 export interface Track {
   id: string;
   project_id: string;
+  // Which grid scope this track belongs to; null = the project's main grid.
+  dashboard_id: string | null;
   // Ordering is a doubly-linked list on the backend (prev/next). row_index is
   // NOT sent by the API anymore -- it's derived client-side from a track's
   // position in list order (the store assigns it in setTracks) purely for
@@ -178,7 +180,23 @@ export interface NodeItem {
   // generate/reroll/discard) since collapsing is for finished history the
   // user doesn't intend to regenerate.
   collapse_target_id: string | null;
+  // Set on an `asset.subgraph` node -- the smart pointer -- naming the
+  // dashboard it opens. Read-only: written only by the /api/dashboards
+  // endpoints, never through a generic PATCH.
+  subgraph_dashboard_id: string | null;
   created_at: string;
+}
+
+export interface Dashboard {
+  id: string;
+  project_id: string;
+  name: string;
+  start_kind: NodeKind | null;
+  // The main pointer. Deleting it is refused while node_count > 0; if the
+  // dashboard is empty and other pointers remain, one is auto-promoted.
+  owner_node_id: string | null;
+  node_count: number;
+  pointer_count: number;
 }
 
 export interface Asset {

@@ -15,7 +15,7 @@ from app.core.track_order import ordered_tracks
 from app.db.models import Node, NodeKind, NodeStatus, Track
 
 
-async def compute_layout(db, project_id) -> dict:
+async def compute_layout(db, project_id, dashboard_id=None) -> dict:
     """Returns {spans, blocked_cells}:
 
     - spans: {node_id: {desired, achieved}} for every live workflow node.
@@ -31,13 +31,12 @@ async def compute_layout(db, project_id) -> dict:
     has from the ordered track list -- only the drift-prone derived numbers
     move here.
     """
-    ordered = await ordered_tracks(db, project_id)
+    ordered = await ordered_tracks(db, project_id, dashboard_id)
     pos = {t.id: i for i, t in enumerate(ordered)}
 
     result = await db.execute(
         select(Node)
-        .join(Track, Track.id == Node.track_id)
-        .where(Track.project_id == project_id, Node.status != NodeStatus.discarded)
+        .where(Node.track_id.in_([t.id for t in ordered]), Node.status != NodeStatus.discarded)
     )
     nodes = list(result.scalars().all())
 

@@ -457,6 +457,22 @@ export const en = {
   "zoom.out": "Zoom out",
   "zoom.reset": "Reset zoom",
   "zoom.in": "Zoom in",
+  "subgraph.pill": "SUBGRAPH",
+  "subgraph.untitled": "Untitled subgraph",
+  "subgraph.open": "↳ Open",
+  "subgraph.openTitle": "Open this subgraph's own grid",
+  "subgraph.noFace": "No result picked yet",
+  "subgraph.contents": "{nodes} node(s) inside",
+  "subgraph.pointers": "{count} pointers",
+  "subgraph.renamePrompt": "Name for this subgraph:",
+  "subgraph.renameTitle": "Double-click to rename",
+  "subgraph.deleteFailed": "Could not delete this subgraph pointer.",
+  "subgraph.create": "+ subgraph",
+  "subgraph.createTitle": "Turn this cell into a subgraph: it keeps its own grid inside",
+  "subgraph.createPrompt": "Name for the new subgraph:",
+  "subgraph.mainGrid": "Main grid",
+  "cell.confirmRemoveSubgraph": "Remove this subgraph pointer? The subgraph itself is only deleted if this was the last way in and it is empty.",
+  "subgraph.deleteTitle": "Delete this subgraph pointer",
 };
 
 export type TKey = keyof typeof en;

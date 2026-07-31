@@ -39,19 +39,26 @@ async def get_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 
 
 @router.get("/{project_id}/tracks", response_model=list[TrackRead])
-async def list_project_tracks(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def list_project_tracks(
+    project_id: uuid.UUID, dashboard_id: uuid.UUID | None = None, db: AsyncSession = Depends(get_db)
+):
     # Returned already in list order (head -> next -> ...) -- the frontend
     # derives each track's ephemeral row number from this position, so the
     # order the client renders is exactly the order established here.
-    return await ordered_tracks(db, project_id)
+    # dashboard_id omitted = the project's main grid; pass one to read a
+    # sub-dashboard's own scope instead.
+    return await ordered_tracks(db, project_id, dashboard_id)
 
 
 @router.get("/{project_id}/layout")
-async def project_layout(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def project_layout(
+    project_id: uuid.UUID, dashboard_id: uuid.UUID | None = None, db: AsyncSession = Depends(get_db)
+):
     """Backend-computed derived layout (workflow row-spans + blocked cells) --
     see core/grid_layout.py. The client renders from this instead of
-    recomputing the span formula itself."""
-    return await compute_layout(db, project_id)
+    recomputing the span formula itself. Scoped like /tracks: no dashboard_id
+    means the main grid."""
+    return await compute_layout(db, project_id, dashboard_id)
 
 
 @router.get("/{project_id}/recipe")

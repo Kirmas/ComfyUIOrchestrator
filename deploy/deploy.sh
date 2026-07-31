@@ -30,7 +30,11 @@ esac
 echo "==> building frontend"
 cd "$DEV/frontend"
 npm ci
-npm run build
+# Cap node's heap. This box has ~2 GB total and runs Jellyfin/Plex alongside,
+# so an unbounded V8 heap gets the build OOM-killed partway through (exit 137/
+# 144) -- which had already happened more than once. A smaller ceiling just
+# makes it collect garbage sooner; the build itself takes about the same time.
+NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=448}" npm run build
 
 echo "==> handing off to root-deploy.sh"
 sudo "$DEV/deploy/root-deploy.sh" deploy

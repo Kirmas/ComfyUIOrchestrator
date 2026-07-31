@@ -223,6 +223,63 @@ input, select, textarea {
   border-color: var(--warning);
 }
 
+/* A smart pointer -- an asset cell that also opens its own grid. Solid (it IS
+   a real cell holding a real picture) but tinted, so it reads as "there is
+   more behind this" rather than as a reference to something else. */
+.node-cell-subgraph {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.subgraph-empty {
+  padding: 12px 4px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+}
+
+.subgraph-meta {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* Sits alongside .zoom-indicator; same sticky-outside-the-zoom-transform
+   placement, see Grid.tsx. */
+.subgraph-breadcrumb {
+  position: sticky;
+  top: 8px;
+  left: 8px;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-left: 8px;
+  padding: 4px 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.subgraph-breadcrumb button {
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+.subgraph-breadcrumb button:disabled {
+  opacity: 1;
+  font-weight: 600;
+  cursor: default;
+}
+
+.subgraph-breadcrumb .crumb-sep {
+  color: var(--text-dim);
+}
+
 /* Native (code-registry, no DB template row) workflow node, vs. a
    template.<slug> node backed by an uploaded workflow.json -- otherwise
    identical UI, so this is the only visual cue distinguishing them.

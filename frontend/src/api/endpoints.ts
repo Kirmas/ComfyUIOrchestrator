@@ -7,6 +7,7 @@ import type {
   BoardItem,
   BoardItemKind,
   Capability,
+  Dashboard,
   DetectedField,
   GridLayout,
   IdeaText,
@@ -71,12 +72,31 @@ export const projectsApi = {
   list: () => api.get<Project[]>("/api/projects"),
   create: (name: string) => api.post<Project>("/api/projects", { name }),
   get: (id: string) => api.get<Project>(`/api/projects/${id}`),
-  tracks: (id: string) => api.get<Track[]>(`/api/projects/${id}/tracks`),
+  // dashboardId null/omitted = the project's main grid; pass one to read that
+  // sub-dashboard's own scope instead. Row order, spans and blocked cells only
+  // mean anything within a single scope, so tracks and layout must always be
+  // fetched for the same one.
+  tracks: (id: string, dashboardId?: string | null) =>
+    api.get<Track[]>(`/api/projects/${id}/tracks${dashboardId ? `?dashboard_id=${dashboardId}` : ""}`),
   // Backend-computed derived layout: workflow row-spans + blocked cells. The
   // client renders from this instead of recomputing the span formula.
-  layout: (id: string) => api.get<GridLayout>(`/api/projects/${id}/layout`),
+  layout: (id: string, dashboardId?: string | null) =>
+    api.get<GridLayout>(`/api/projects/${id}/layout${dashboardId ? `?dashboard_id=${dashboardId}` : ""}`),
   annotations: (id: string) => api.get<Annotation[]>(`/api/projects/${id}/annotations`),
   remove: (id: string) => api.delete(`/api/projects/${id}`),
+};
+
+export const dashboardsApi = {
+  get: (id: string) => api.get<Dashboard>(`/api/dashboards/${id}`),
+  // Turns an existing empty asset cell into a smart pointer on a brand-new
+  // dashboard, in one call -- a dashboard never exists without the pointer
+  // that keeps it reachable.
+  create: (nodeId: string, name: string) => api.post<Dashboard>("/api/dashboards", { node_id: nodeId, name }),
+  addPointer: (dashboardId: string, nodeId: string) =>
+    api.post<Dashboard>(`/api/dashboards/${dashboardId}/pointers`, { node_id: nodeId }),
+  rename: (id: string, name: string) => api.patch<Dashboard>(`/api/dashboards/${id}`, { name }),
+  transferOwnership: (id: string, nodeId: string) =>
+    api.post<Dashboard>(`/api/dashboards/${id}/transfer-ownership`, { node_id: nodeId }),
 };
 
 export const annotationsApi = {
@@ -92,6 +112,9 @@ export const tracksApi = {
   // else appended at the tail. No row_index -- see Track type / core/track_order.py.
   create: (data: {
     project_id: string;
+    // Which grid scope to join; null = the project's main grid. Ignored when
+    // after_track_id is given -- splicing into a list means joining its scope.
+    dashboard_id?: string | null;
     after_track_id?: string | null;
     place_at_head?: boolean;
     spawned_from_node_id?: string | null;

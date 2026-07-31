@@ -27,6 +27,18 @@ function scheduleLayoutRefresh() {
 
 interface ProjectState {
   projectId: string | null;
+  // Which grid scope is on screen: null = the project's main grid, otherwise a
+  // sub-dashboard id. Row order, spans and blocked cells are only meaningful
+  // within one scope, so every scoped fetch reads this rather than taking it
+  // as an argument -- that way tracks and layout can never come from two
+  // different grids.
+  dashboardId: string | null;
+  // The navigation trail, including where we are now: entry 0 is always the
+  // project's main grid, the last entry is the current scope. This is history,
+  // deliberately NOT a structural parent -- several smart pointers may open the
+  // same dashboard, so which one you came through is a fact about this session,
+  // not about the data.
+  navStack: { dashboardId: string | null; name: string }[];
   tracks: Track[];
   nodesById: Record<string, NodeItem>;
   outputsByNode: Record<string, Asset[]>;
@@ -40,7 +52,9 @@ interface ProjectState {
   // render time from where its member nodes currently are.
   annotations: Annotation[];
 
-  loadProject: (projectId: string) => Promise<void>;
+  loadProject: (projectId: string, dashboardId?: string | null) => Promise<void>;
+  enterDashboard: (dashboardId: string, name: string) => Promise<void>;
+  leaveDashboard: (toIndex: number) => Promise<void>;
   reloadTracks: (projectId: string) => Promise<void>;
   reloadLayout: (projectId: string) => Promise<void>;
   reloadAnnotations: (projectId: string) => Promise<void>;
@@ -58,6 +72,8 @@ interface ProjectState {
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
   projectId: null,
+  dashboardId: null,
+  navStack: [{ dashboardId: null, name: "" }],
   tracks: [],
   nodesById: {},
   outputsByNode: {},
@@ -65,8 +81,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   blockedCells: new Set(),
   annotations: [],
 
-  loadProject: async (projectId: string) => {
-    const tracks = withRowIndex(await projectsApi.tracks(projectId));
+  loadProject: async (projectId: string, dashboardId: string | null = null) => {
+    const tracks = withRowIndex(await projectsApi.tracks(projectId, dashboardId));
 
     // One parallel batch, not a waterfall: the per-track node fetches don't
     // depend on each other (nodesById is keyed by node id, so arrival order is
@@ -76,7 +92,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     // under 15 ms.
     const [nodesPerTrack, layout, annotations] = await Promise.all([
       Promise.all(tracks.map((track) => tracksApi.nodes(track.id))),
-      projectsApi.layout(projectId).catch(() => ({ spans: {}, blocked_cells: [] as [number, number][] })),
+      projectsApi.layout(projectId, dashboardId).catch(() => ({ spans: {}, blocked_cells: [] as [number, number][] })),
       projectsApi.annotations(projectId).catch(() => [] as Annotation[]),
     ]);
 
@@ -102,6 +118,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     set({
       projectId,
+      dashboardId,
+      // Loading the main grid is either a project switch or a climb all the way
+      // back out; either way the trail restarts at the root. enterDashboard and
+      // leaveDashboard set the trail themselves after this returns.
+      ...(dashboardId === null ? { navStack: [{ dashboardId: null, name: "" }] } : {}),
       tracks,
       nodesById,
       outputsByNode: carriedOutputs,
@@ -119,6 +140,29 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
+  // Dive into a sub-dashboard through a smart pointer. The scope we're leaving
+  // is pushed onto navStack, so "back" retraces the way this session actually
+  // came -- a dashboard has no single parent to walk up to (several pointers
+  // may open it), and its `owner_node_id` is about reachability, not about
+  // where the user happens to be standing.
+  enterDashboard: async (dashboardId: string, name: string) => {
+    const { projectId, navStack } = get();
+    if (!projectId) return;
+    await get().loadProject(projectId, dashboardId);
+    set({ navStack: [...navStack, { dashboardId, name }] });
+  },
+
+  // Jump back to an earlier entry in the trail. `toIndex` is that entry's own
+  // position, so the breadcrumb can climb several levels at once. Index 0 is
+  // always the project's main grid.
+  leaveDashboard: async (toIndex: number) => {
+    const { projectId, navStack } = get();
+    if (!projectId || toIndex < 0 || toIndex >= navStack.length) return;
+    const target = navStack[toIndex];
+    await get().loadProject(projectId, target.dashboardId);
+    set({ navStack: navStack.slice(0, toIndex + 1) });
+  },
+
   // Re-fetch just the ordered track list (nodes don't move -- their track_id
   // is stable) and re-derive row_index from the new order. This is what every
   // structural track op (create/delete/splice) calls instead of the old
@@ -126,13 +170,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   // nothing to leave half-applied. Span depends on track positions, so refresh
   // the layout too.
   reloadTracks: async (projectId: string) => {
-    const tracks = withRowIndex(await projectsApi.tracks(projectId));
+    const tracks = withRowIndex(await projectsApi.tracks(projectId, get().dashboardId));
     set({ tracks });
     await get().reloadLayout(projectId);
   },
 
   reloadLayout: async (projectId: string) => {
-    const layout = await projectsApi.layout(projectId);
+    const layout = await projectsApi.layout(projectId, get().dashboardId);
     set({ spans: layout.spans, blockedCells: new Set(layout.blocked_cells.map(([r, c]) => `${r}:${c}`)) });
   },
 

@@ -197,6 +197,10 @@ class ProjectRead(ORMModel):
 # "after this track", or "at the head", else append at the tail.
 class TrackCreate(BaseModel):
     project_id: uuid.UUID
+    # Which grid scope the track joins. None = the project's main grid; an id
+    # = that sub-dashboard. When after_track_id is given the anchor's own scope
+    # wins, so the client can't splice a track into a list it doesn't belong to.
+    dashboard_id: uuid.UUID | None = None
     # Insert the new track immediately after this one. None + place_at_head
     # False (the default) appends at the tail.
     after_track_id: uuid.UUID | None = None
@@ -208,6 +212,8 @@ class TrackCreate(BaseModel):
 class TrackRead(ORMModel):
     id: uuid.UUID
     project_id: uuid.UUID
+    # Which grid scope this track belongs to; None = the project's main grid.
+    dashboard_id: uuid.UUID | None
     prev_track_id: uuid.UUID | None
     next_track_id: uuid.UUID | None
     spawned_from_node_id: uuid.UUID | None
@@ -353,6 +359,9 @@ class NodeRead(ORMModel):
     # Never appears on NodeCreate/NodeUpdate; the only writers are
     # POST /api/nodes/{id}/collapse and .../expand.
     collapse_target_id: uuid.UUID | None
+    # Read-only -- the dashboard this smart pointer opens. Written only by
+    # api/routes/dashboards.py, never through a generic PATCH.
+    subgraph_dashboard_id: uuid.UUID | None
     created_at: datetime
 
 
@@ -543,3 +552,36 @@ class AddCapabilityRequest(BaseModel):
     backend_id: uuid.UUID
     workflow_json: dict[str, Any]
     param_mapping: dict[str, Any]
+
+
+class DashboardCreate(BaseModel):
+    # The asset cell that becomes this dashboard's main pointer.
+    node_id: uuid.UUID
+    name: str = ""
+
+
+class PointerCreate(BaseModel):
+    node_id: uuid.UUID
+
+
+class DashboardRename(BaseModel):
+    name: str
+
+
+class TransferOwnership(BaseModel):
+    node_id: uuid.UUID
+
+
+class DashboardRead(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    name: str
+    start_kind: NodeKind | None
+    owner_node_id: uuid.UUID | None
+    # Derived, not stored: node_count drives the "can't delete the main pointer
+    # while it still holds work" rule, pointer_count tells the UI whether this
+    # is the last way in.
+    node_count: int = 0
+    pointer_count: int = 0
+
+    model_config = ConfigDict(from_attributes=True)

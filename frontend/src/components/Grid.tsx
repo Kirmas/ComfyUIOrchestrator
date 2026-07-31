@@ -65,7 +65,7 @@ function isPickable(node: NodeItem, outputs: Asset[]): boolean {
 
 export function Grid({ projectId }: { projectId: string }) {
   const t = useT();
-  const { tracks, nodesById, outputsByNode, spans, blockedCells, annotations, loadProject, reloadTracks, reloadAnnotations, applyProgressEvent, addNode, setNode, removeTrack, refreshNodeOutputs } =
+  const { tracks, nodesById, outputsByNode, spans, blockedCells, annotations, dashboardId, navStack, loadProject, reloadTracks, reloadAnnotations, applyProgressEvent, addNode, setNode, removeTrack, refreshNodeOutputs, leaveDashboard } =
     useProjectStore();
   // Nodes ticked for grouping into a comment block. Shift/Ctrl/Cmd-click on a
   // cell toggles membership; a plain click is left alone so it keeps meaning
@@ -564,8 +564,11 @@ export function Grid({ projectId }: { projectId: string }) {
 
   const addTrackRow = async () => {
     // Tail append (no anchor, not head) -- backend splices it after the
-    // current last track; reloadTracks re-derives row numbers.
-    await tracksApi.create({ project_id: projectId });
+    // current last track; reloadTracks re-derives row numbers. dashboard_id
+    // matters here precisely because there's no anchor to infer the scope
+    // from: without it a row added inside a sub-dashboard would land on the
+    // project's main grid instead.
+    await tracksApi.create({ project_id: projectId, dashboard_id: dashboardId });
     await reloadTracks(projectId);
   };
 
@@ -654,6 +657,10 @@ export function Grid({ projectId }: { projectId: string }) {
     for (let i = 0; i < count; i++) {
       const track = await tracksApi.create({
         project_id: projectId,
+        // Ignored by the backend whenever after_track_id is given (the anchor's
+        // own scope wins), but load-bearing for the place_at_head case, which
+        // has no anchor to take a scope from.
+        dashboard_id: dashboardId,
         after_track_id: afterId ?? null,
         place_at_head: position === 0 && i === 0,
         ...extraFields,
@@ -1107,6 +1114,27 @@ export function Grid({ projectId }: { projectId: string }) {
           {t("common.reset")}
         </button>
       </div>
+      {/* Only shown once you're actually inside something. Sibling of the
+          scaled wrapper for the same containing-block reason as .zoom-indicator.
+          Each crumb jumps straight to that depth rather than stepping out one
+          level at a time. */}
+      {navStack.length > 1 && (
+        <div className="subgraph-breadcrumb">
+          {navStack.map((entry, i) => (
+            <Fragment key={`${entry.dashboardId ?? "root"}-${i}`}>
+              {i > 0 && <span className="crumb-sep">›</span>}
+              <button
+                type="button"
+                onClick={() => void leaveDashboard(i)}
+                disabled={i === navStack.length - 1}
+                title={t("subgraph.openTitle")}
+              >
+                {i === 0 ? t("subgraph.mainGrid") : entry.name || t("subgraph.untitled")}
+              </button>
+            </Fragment>
+          ))}
+        </div>
+      )}
       {selectedNodeIds.size > 0 && (
         // Same reasoning as .zoom-indicator above: a sibling of the scaled
         // wrapper, so its position: sticky isn't captured by the zoom

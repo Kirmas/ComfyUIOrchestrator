@@ -1,5 +1,12 @@
-"""Per-project track ordering as a doubly-linked list (Track.prev_track_id /
+"""Per-scope track ordering as a doubly-linked list (Track.prev_track_id /
 Track.next_track_id), replacing the old dense, reindexed row_index column.
+
+A "scope" is (project, dashboard): a project's main grid is
+`dashboard_id IS NULL`, and each sub-dashboard is its own independent list with
+its own head. Adding sub-dashboards did NOT change the list algorithm -- it only
+swapped the key the list is filtered by, which is why it needed no migration of
+existing rows. Always derive a scope from the track you already have, via
+scope_of(), rather than passing a bare project_id.
 
 The visible "track N" number is derived from a track's position in this order
 at render time and never persisted, so it can't gap or desync -- and a
@@ -20,8 +27,31 @@ from sqlalchemy import select
 from app.db.models import Track
 
 
-async def ordered_tracks(db, project_id) -> list[Track]:
-    """Every track of a project in list order (head -> next -> ...).
+def _scope_filter(project_id, dashboard_id):
+    """The WHERE terms that pin a query to one grid scope.
+
+    A scope is (project, dashboard). `dashboard_id=None` means the project's
+    *main* dashboard, which is stored as a literal NULL rather than as a row in
+    `dashboards` -- that is what let sub-dashboards ship without migrating any
+    existing track. Note `IS NULL` here, not `== None` as a value: every track
+    that predates sub-dashboards lands in the main scope for free.
+    """
+    if dashboard_id is None:
+        return [Track.project_id == project_id, Track.dashboard_id.is_(None)]
+    return [Track.dashboard_id == dashboard_id]
+
+
+def scope_of(track: Track) -> tuple:
+    """(project_id, dashboard_id) for the scope a track lives in -- the value
+    to hand ordered_tracks() when all you have is a node's own track. Callers
+    used to pass `track.project_id`, which silently meant "the main dashboard"
+    once sub-dashboards existed; going through here keeps that from regressing.
+    """
+    return (track.project_id, track.dashboard_id)
+
+
+async def ordered_tracks(db, project_id, dashboard_id=None) -> list[Track]:
+    """Every track of one scope in list order (head -> next -> ...).
 
     Defensive against a broken chain: it starts from the head (the track whose
     prev is None), guards against cycles with a visited set, and appends any
@@ -30,7 +60,7 @@ async def ordered_tracks(db, project_id) -> list[Track]:
     rows in an odd order", never "rows silently vanish" -- the opposite
     failure mode from the gapped row_index it replaces.
     """
-    result = await db.execute(select(Track).where(Track.project_id == project_id))
+    result = await db.execute(select(Track).where(*_scope_filter(project_id, dashboard_id)))
     tracks = list(result.scalars().all())
     if not tracks:
         return []
@@ -66,7 +96,9 @@ async def unlink_track(db, track: Track) -> None:
     track.next_track_id = None
 
 
-async def splice_after(db, project_id, track: Track, after: Track | None, *, at_head: bool = False) -> None:
+async def splice_after(
+    db, project_id, track: Track, after: Track | None, *, at_head: bool = False, dashboard_id=None
+) -> None:
     """Insert `track` into the chain. `track` must already be detached (a
     freshly created row, or one passed through unlink_track first).
 
@@ -84,7 +116,7 @@ async def splice_after(db, project_id, track: Track, after: Track | None, *, at_
             return
         result = await db.execute(
             select(Track).where(
-                Track.project_id == project_id,
+                *_scope_filter(project_id, dashboard_id),
                 Track.prev_track_id.is_(None),
                 Track.id != track.id,
             )

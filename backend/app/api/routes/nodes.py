@@ -6,11 +6,13 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.node_types import resolve_effective_template, sync_legacy_fields
+from app.api.routes.dashboards import enforce_pointer_deletion
+from app.core.grid_scope import scope_start_kind, set_scope_start_kind
 from app.core.queue import job_queue
-from app.core.track_order import ordered_tracks, splice_after
+from app.core.track_order import ordered_tracks, scope_of, splice_after
 from app.core.storage import build_asset_url, get_storage
 from app.db.base import get_db
-from app.db.models import Asset, AssetKind, Job, Node, NodeKind, NodeStatus, Project, Track
+from app.db.models import Asset, AssetKind, Job, Node, NodeKind, NodeStatus, Track
 from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeDuplicate, NodeMove, NodeRead, NodeUpdate, PickCandidate
 from app.worker.tasks import (
     _splice_after_would_split_a_span,
@@ -87,7 +89,7 @@ async def _ensure_output_binding(db: AsyncSession, node: Node, target_track_id, 
     creator_track = await db.get(Track, creator.track_id)
     if creator_track is None:
         return
-    ordered = await ordered_tracks(db, creator_track.project_id)
+    ordered = await ordered_tracks(db, *scope_of(creator_track))
     pos = {t.id: i for i, t in enumerate(ordered)}
     creator_pos = pos.get(creator_track.id)
     if creator_pos is None:
@@ -109,6 +111,35 @@ async def _ensure_output_binding(db: AsyncSession, node: Node, target_track_id, 
     target_pos = pos.get(target_track.id)
     if target_pos is None or target_pos < creator_pos:
         raise denied
+
+
+async def _ensure_same_scope(db: AsyncSession, node: Node, target_track_id) -> None:
+    """A node stays in the grid scope it already lives in.
+
+    Positions (row order, step_index, row-spans, output binding) only mean
+    anything within one dashboard, so relocating a single node across scopes
+    would silently strand its creator/output relationships in a coordinate
+    space they no longer share. Moving finished work between dashboards is
+    meant to be a deliberate whole-track operation, not a side effect of a
+    generic PATCH.
+
+    This is also what pins a smart pointer to the dashboard it was created in
+    -- rule 1 of the ownership tree in api/routes/dashboards.py, without which
+    a pointer could be carried somewhere unreachable and take its subgraph with
+    it. POST /api/nodes/{id}/move can't cross scopes at all (it indexes into
+    one scope's ordered track list), so this only has to guard PATCH.
+    """
+    if target_track_id == node.track_id:
+        return
+    current = await db.get(Track, node.track_id)
+    target = await db.get(Track, target_track_id)
+    if target is None:
+        raise HTTPException(404, "Track not found")
+    if current is not None and current.dashboard_id == target.dashboard_id:
+        return
+    if node.subgraph_dashboard_id is not None:
+        raise HTTPException(409, "A subgraph pointer can't leave the dashboard it was created in.")
+    raise HTTPException(409, "A node can't be moved into a different dashboard.")
 
 
 async def _is_locked(db: AsyncSession, node_id) -> bool:
@@ -197,11 +228,14 @@ async def ensure_span_rows(db: AsyncSession, workflow_node: Node) -> None:
     if home is None:
         return
     project_id = home.project_id
+    # A span grows inside the dashboard the workflow already lives in -- rows
+    # added here must join that same scope, never the project's main grid.
+    dashboard_id = home.dashboard_id
     step = workflow_node.step_index
 
     offset = 1
     while offset < desired:
-        ordered = await ordered_tracks(db, project_id)
+        ordered = await ordered_tracks(db, project_id, dashboard_id)
         pos = {t.id: i for i, t in enumerate(ordered)}
         start = pos.get(workflow_node.track_id)
         if start is None:
@@ -218,10 +252,10 @@ async def ensure_span_rows(db: AsyncSession, workflow_node: Node) -> None:
             if await _splice_after_would_split_a_span(db, project_id, target - 1, ordered, pos, exclude_node_id=workflow_node.id):
                 return
         anchor = ordered[target - 1] if 0 <= target - 1 < len(ordered) else ordered[-1]
-        new_track = Track(project_id=project_id)
+        new_track = Track(project_id=project_id, dashboard_id=dashboard_id)
         db.add(new_track)
         await db.flush()
-        await splice_after(db, project_id, new_track, anchor)
+        await splice_after(db, project_id, new_track, anchor, dashboard_id=dashboard_id)
         await db.flush()
         offset += 1
 
@@ -314,7 +348,7 @@ async def move_node(node_id: uuid.UUID, payload: NodeMove, db: AsyncSession = De
     home = await db.get(Track, node.track_id)
     if home is None:
         raise HTTPException(409, "Node has no track.")
-    ordered = await ordered_tracks(db, home.project_id)
+    ordered = await ordered_tracks(db, *scope_of(home))
     pos = {t.id: i for i, t in enumerate(ordered)}
     cur_row = pos.get(node.track_id)
     if cur_row is None:
@@ -374,7 +408,10 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
 
     home = await db.get(Track, original_track_id)
     project_id = home.project_id
-    ordered = await ordered_tracks(db, project_id)
+    # A spawned candidate line belongs to the same dashboard as the picker it
+    # branched off, never to the project's main grid.
+    dashboard_id = home.dashboard_id
+    ordered = await ordered_tracks(db, project_id, dashboard_id)
     pos = {t.id: i for i, t in enumerate(ordered)}
     original_row = pos.get(original_track_id, 0)
 
@@ -409,11 +446,16 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
                 if opos is not None and opos > insert_after:
                     insert_after = opos
 
-    new_track = Track(project_id=project_id, spawned_from_node_id=cause_node_id, spawned_from_output_id=kept.id)
+    new_track = Track(
+        project_id=project_id,
+        dashboard_id=dashboard_id,
+        spawned_from_node_id=cause_node_id,
+        spawned_from_output_id=kept.id,
+    )
     db.add(new_track)
     await db.flush()
     anchor = ordered[insert_after] if 0 <= insert_after < len(ordered) else (ordered[-1] if ordered else None)
-    await splice_after(db, project_id, new_track, anchor)
+    await splice_after(db, project_id, new_track, anchor, dashboard_id=dashboard_id)
     await db.flush()
     picker.track_id = new_track.id
     await db.flush()
@@ -492,21 +534,24 @@ async def pick_all_candidates(node_id: uuid.UUID, db: AsyncSession = Depends(get
 
 @router.post("", response_model=NodeRead, status_code=201)
 async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)):
-    """Column kind (asset/workflow) is a project-wide pattern, not a free choice
-    per node: only the very first node ever created in a project picks it (via
-    payload.kind); every node after that gets its kind computed from its
+    """Column kind (asset/workflow) is a per-scope pattern, not a free choice
+    per node: only the very first node created in a given grid scope picks it
+    (via payload.kind); every node after that gets its kind computed from its
     step_index's position in the alternating pattern, regardless of what the
-    client sent."""
+    client sent. "Scope" is the project's main grid or one sub-dashboard --
+    each has its own origin, so a sub-dashboard may start on a different kind
+    than the graph pointing at it."""
     track = await db.get(Track, payload.track_id)
     if not track:
         raise HTTPException(404, "Track not found")
-    project = await db.get(Project, track.project_id)
 
     await _ensure_slot_free(db, payload.track_id, payload.step_index)
 
-    if project.start_kind is None:
-        project.start_kind = payload.kind if payload.step_index % 2 == 0 else _opposite_kind(payload.kind)
-    resolved_kind = _kind_for_step(project.start_kind, payload.step_index)
+    start_kind = await scope_start_kind(db, track.project_id, track.dashboard_id)
+    if start_kind is None:
+        start_kind = payload.kind if payload.step_index % 2 == 0 else _opposite_kind(payload.kind)
+        await set_scope_start_kind(db, track.project_id, track.dashboard_id, start_kind)
+    resolved_kind = _kind_for_step(start_kind, payload.step_index)
 
     data = payload.model_dump(mode="json")
     data["kind"] = resolved_kind
@@ -544,6 +589,7 @@ async def update_node(node_id: uuid.UUID, payload: NodeUpdate, db: AsyncSession 
     if payload.track_id is not None or payload.step_index is not None:
         target_track_id = payload.track_id if payload.track_id is not None else node.track_id
         target_step = payload.step_index if payload.step_index is not None else node.step_index
+        await _ensure_same_scope(db, node, target_track_id)
         await _ensure_slot_free(db, target_track_id, target_step, exclude_node_id=node.id)
         await _ensure_output_binding(db, node, target_track_id, target_step, is_move=True)
 
@@ -596,6 +642,10 @@ async def delete_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     node = await db.get(Node, node_id)
     if not node:
         raise HTTPException(404, "Node not found")
+
+    # A smart pointer may be the only way back to a sub-dashboard -- refuse, or
+    # auto-promote another pointer, before anything is actually removed.
+    await enforce_pointer_deletion(db, node)
 
     nodes_to_delete = [node]
     if node.kind == NodeKind.workflow:
@@ -736,13 +786,13 @@ async def collapse_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     # a PATCH) -- that's fine, both nodes already count as locked the moment
     # collapse_target_id below is set, which is exactly the condition that
     # function itself now waives the position constraint for.
-    project = await db.get(Project, track.project_id)
+    start_kind = await scope_start_kind(db, track.project_id, track.dashboard_id)
     result = await db.execute(
         select(Node.step_index).where(Node.track_id == asset.track_id, Node.status != NodeStatus.discarded)
     )
     max_step = max((s for (s,) in result.all()), default=-1)
     park_asset_step = max_step + 1
-    if _kind_for_step(project.start_kind, park_asset_step) != NodeKind.asset:
+    if _kind_for_step(start_kind, park_asset_step) != NodeKind.asset:
         park_asset_step += 1
     park_target_step = park_asset_step + 1
 
@@ -944,14 +994,14 @@ async def duplicate_node(node_id: uuid.UUID, payload: NodeDuplicate, db: AsyncSe
     home = await db.get(Track, old.track_id)
     if home is None:
         raise HTTPException(409, "Node has no track.")
-    ordered = await ordered_tracks(db, home.project_id)
+    ordered = await ordered_tracks(db, *scope_of(home))
     if not (0 <= payload.target_row < len(ordered)) or payload.target_step < 0:
         raise HTTPException(409, "Target cell is off the grid.")
 
-    # Column kind is a project-wide parity pattern, not a per-node choice (see
+    # Column kind is a per-scope parity pattern, not a per-node choice (see
     # create_node) -- a workflow copy only ever belongs in a workflow column.
-    project = await db.get(Project, home.project_id)
-    if project.start_kind is not None and _kind_for_step(project.start_kind, payload.target_step) != NodeKind.workflow:
+    start_kind = await scope_start_kind(db, home.project_id, home.dashboard_id)
+    if start_kind is not None and _kind_for_step(start_kind, payload.target_step) != NodeKind.workflow:
         raise HTTPException(409, "That column holds asset cells -- a workflow copy needs a workflow column.")
 
     target_track = ordered[payload.target_row]

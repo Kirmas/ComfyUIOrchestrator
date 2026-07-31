@@ -16,7 +16,7 @@ from app.core.queue import job_queue
 from app.core.storage import get_storage
 from app.core.idea_macros import apply_macros, project_idea_texts
 from app.core.template_engine import validate_params
-from app.core.track_order import ordered_tracks, splice_after
+from app.core.track_order import ordered_tracks, scope_of, splice_after
 from app.core.ws_manager import ws_manager
 from app.db.base import async_session_maker
 from app.db.models import ApiUsageLog, Asset, Backend, ExecutionType, Job, JobStatusEnum, Node, NodeKind, NodeStatus, Track
@@ -90,7 +90,7 @@ async def _asset_at_cell_index(db, node: Node, index: int) -> Asset | None:
     home_track = await db.get(Track, node.track_id)
     if home_track is None:
         return None
-    ordered = await ordered_tracks(db, home_track.project_id)
+    ordered = await ordered_tracks(db, *scope_of(home_track))
     pos = {t.id: i for i, t in enumerate(ordered)}
     home_pos = pos.get(home_track.id)
     if home_pos is None or home_pos + index >= len(ordered):
@@ -170,11 +170,15 @@ async def _splice_after_would_split_a_span(db, project_id, after_pos: int, order
     exclude_node_id skips one workflow -- used when the splice is deliberately
     growing THAT node's own span (ensure_span_rows), where "splitting" it is
     the whole point, not a hazard."""
+    # Scoped to the tracks the caller already resolved (`pos` is exactly one
+    # dashboard's track set) rather than to the whole project: positions only
+    # mean anything within a single grid scope, and a workflow sitting in some
+    # other dashboard has no bearing on a splice here. Filtering on the project
+    # instead would drag those in and rely on `pos.get()` below returning None
+    # to skip them -- true today, but only by accident.
     result = await db.execute(
-        select(Node)
-        .join(Track, Node.track_id == Track.id)
-        .where(
-            Track.project_id == project_id,
+        select(Node).where(
+            Node.track_id.in_(list(pos.keys())),
             Node.kind == NodeKind.workflow,
             Node.status != NodeStatus.discarded,
         )
@@ -235,8 +239,10 @@ async def _locate_output_row(db, workflow_node: Node, *, materialize: bool) -> T
     home = await db.get(Track, workflow_node.track_id)
     output_step = workflow_node.step_index + 1
     project_id = home.project_id
+    # Output rows belong to the workflow's own dashboard, not the main grid.
+    dashboard_id = home.dashboard_id
 
-    ordered = await ordered_tracks(db, project_id)
+    ordered = await ordered_tracks(db, project_id, dashboard_id)
     pos = {t.id: i for i, t in enumerate(ordered)}
     i = pos.get(home.id)
     if i is None:
@@ -257,10 +263,10 @@ async def _locate_output_row(db, workflow_node: Node, *, materialize: bool) -> T
             # empty by construction, so it's the row to use.
             if not materialize:
                 return None
-            new_row = Track(project_id=project_id)
+            new_row = Track(project_id=project_id, dashboard_id=dashboard_id)
             db.add(new_row)
             await db.flush()
-            await splice_after(db, project_id, new_row, ordered[-1])
+            await splice_after(db, project_id, new_row, ordered[-1], dashboard_id=dashboard_id)
             await db.flush()
             return new_row
 
@@ -284,10 +290,10 @@ async def _locate_output_row(db, workflow_node: Node, *, materialize: bool) -> T
             )
         if not materialize:
             return None
-        new_row = Track(project_id=project_id)
+        new_row = Track(project_id=project_id, dashboard_id=dashboard_id)
         db.add(new_row)
         await db.flush()
-        await splice_after(db, project_id, new_row, row)
+        await splice_after(db, project_id, new_row, row, dashboard_id=dashboard_id)
         await db.flush()
         return new_row
 
@@ -449,7 +455,7 @@ async def resolve_node_inputs(db, node: Node, param_schema: dict[str, Any] | Non
         if ref_type == "self_prev":
             asset = await _prev_asset_node_output(db, node.track_id, node.step_index)
         elif ref_type == "track_below_prev":
-            ordered = await ordered_tracks(db, track.project_id)
+            ordered = await ordered_tracks(db, *scope_of(track))
             tpos = {t.id: i for i, t in enumerate(ordered)}
             ti = tpos.get(track.id)
             below = ordered[ti + 1] if ti is not None and ti + 1 < len(ordered) else None

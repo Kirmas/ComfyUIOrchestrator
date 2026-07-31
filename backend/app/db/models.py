@@ -124,12 +124,63 @@ class Project(Base):
     tracks: Mapped[list["Track"]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
 
+class Dashboard(Base):
+    """A grid scope: its own tracks, its own column-parity origin, its own
+    coordinate space. A project always has an implicit *main* dashboard --
+    represented by `Track.dashboard_id IS NULL`, NOT by a row here -- so
+    adding this table required no data migration and every pre-existing track
+    kept working untouched.
+
+    A sub-dashboard is reached through a **smart pointer**: an `asset.subgraph`
+    node whose `subgraph_dashboard_id` points here. Pointers are references,
+    not containment -- several may point at the same dashboard, and a pointer
+    cycle (A -> B -> A) is legal, since diving in is one deliberate step and
+    you navigate back through history, not through structure.
+
+    Reachability is instead guaranteed by ownership: `owner_node_id` is the
+    *main* pointer (the one whose creation made this dashboard). Because a
+    subgraph node can never be moved out of the dashboard it was created in,
+    and a main pointer can't be deleted while its dashboard still has content,
+    the main pointers form a spanning tree rooted at the project's main
+    dashboard -- so every non-empty dashboard stays reachable. Any additional
+    pointer is a non-tree edge and is therefore always safe to delete.
+    """
+
+    __tablename__ = "dashboards"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    # Same role as Project.start_kind, but for this scope: column 0's kind,
+    # fixed by the first node created here and alternating from there. Each
+    # dashboard gets its own origin, which is what lets a sub-dashboard start
+    # on a different kind than its parent (nodes moved in are re-aligned by
+    # shifting a column, never rejected).
+    start_kind: Mapped[NodeKind | None] = mapped_column(String(32), nullable=True)
+    # The main pointer. SET NULL rather than CASCADE: losing the owner must
+    # never silently destroy the dashboard's contents -- the delete/auto-promote
+    # rules in api/routes/dashboards.py decide what happens instead.
+    owner_node_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("nodes.id", ondelete="SET NULL", use_alter=True, name="fk_dashboards_owner_node"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Track(Base):
     __tablename__ = "tracks"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    # Per-project ordering is a doubly-linked list, NOT a dense row_index
+    # Which grid scope this track belongs to. NULL means the project's main
+    # dashboard -- deliberately nullable so that adding sub-dashboards needed
+    # no backfill: every track that existed before already reads as "main".
+    # The ordering linked list below is per *scope*, not per project: each
+    # dashboard has its own head (prev_track_id IS NULL within that scope).
+    dashboard_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("dashboards.id", ondelete="CASCADE"), nullable=True
+    )
+    # Per-scope ordering is a doubly-linked list, NOT a dense row_index
     # anymore (migration 0010). The visible "track N" number is derived from
     # position in this list at render time (frontend) and never stored, so it
     # can no longer gap or desync the way a reindexed integer column did --
@@ -235,6 +286,16 @@ class Node(Base):
     # is meant for finished history the user doesn't intend to regenerate.
     collapse_target_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True
+    )
+    # Set on an `asset.subgraph` node -- the *smart pointer* -- naming the
+    # dashboard it opens. A pointer is a reference, never containment: many
+    # nodes may point at one dashboard, and deleting a pointer never deletes
+    # the dashboard's contents (see api/routes/dashboards.py for the ownership
+    # and auto-promotion rules that keep every non-empty dashboard reachable).
+    # CASCADE only in the other direction -- if a dashboard is ever destroyed,
+    # pointers into it would be meaningless, so they go with it.
+    subgraph_dashboard_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("dashboards.id", ondelete="CASCADE"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
