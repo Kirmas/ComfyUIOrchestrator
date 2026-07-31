@@ -37,11 +37,20 @@ npm ci
 # sooner instead of growing into ground it hasn't got.
 #
 # Note it is NOT about output chunk size: splitting model-viewer/three.js into
-# its own lazy chunk measured 496 MB either way. The memory goes into parsing
-# and holding the module graph (three.js is thousands of modules, all turned
-# into ASTs for tree-shaking) -- chunking only decides where the result is
-# written, not how much gets processed. Making the bundle smaller is worth
-# doing for page load, but it is not a fix for this.
+# its own lazy chunk measured 496 MB either way. Where the 496 actually goes,
+# measured by building each case:
+#
+#   168 MB  vite/rollup/esbuild + node, building a 3-module hello-world
+#   +125 MB  this whole app (React, 172 modules, ~340 kB of output)
+#   +203 MB  three.js, which reaches us as ONE ~1.2 MB prebuilt ESM file
+#
+# So two thirds of it is the toolchain existing at all, plus one 3D engine --
+# not the size of what we emit. The big single module is the expensive part
+# (its AST and scope analysis dwarf the source), which is why chunking the
+# *output* changes nothing. If build memory ever needs to come down for real,
+# the lever is keeping three.js out of the module graph entirely (ship
+# model-viewer's prebuilt file from public/ and load it with a script tag),
+# not making our bundle smaller.
 NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=448}" npm run build
 
 echo "==> handing off to root-deploy.sh"
