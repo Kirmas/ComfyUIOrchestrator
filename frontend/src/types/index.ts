@@ -195,6 +195,10 @@ export interface Dashboard {
   // The main pointer. Deleting it is refused while node_count > 0; if the
   // dashboard is empty and other pointers remain, one is auto-promoted.
   owner_node_id: string | null;
+  // The asset inside this subgraph that stands for it -- the face every
+  // pointer shows. Lives on the dashboard so two pointers can't diverge.
+  result_asset_id: string | null;
+  result_asset_url: string | null;
   node_count: number;
   pointer_count: number;
 }

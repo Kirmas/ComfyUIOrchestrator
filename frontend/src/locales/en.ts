@@ -485,6 +485,10 @@ export const en = {
   "grid.noMoveDestinations": "No subgraph in this grid to move them into",
   "grid.selectTrackTitle": "Tick to move this track into another grid",
   "grid.moveTracksFailed": "Could not move those tracks.",
+  "subgraph.markResult": "★ result",
+  "subgraph.markResultTitle": "Show this image on the subgraph's cell in the outer grid",
+  "subgraph.resultSet": "Set as this subgraph's result.",
+  "subgraph.resultSetFailed": "Could not set this as the subgraph's result.",
 };
 
 export type TKey = keyof typeof en;

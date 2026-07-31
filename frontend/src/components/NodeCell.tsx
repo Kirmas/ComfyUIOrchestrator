@@ -272,6 +272,7 @@ function BaseAssetNodeView({
   const setNode = useProjectStore((s) => s.setNode);
   const refreshOutputs = useProjectStore((s) => s.refreshNodeOutputs);
   const removeNode = useProjectStore((s) => s.removeNode);
+  const insideSubgraph = useProjectStore((s) => s.dashboardId !== null);
   const tracks = useProjectStore((s) => s.tracks);
   const loadProject = useProjectStore((s) => s.loadProject);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -313,6 +314,26 @@ function BaseAssetNodeView({
   // subgraph, and makes it that subgraph's main pointer. The node keeps its
   // identity and position -- only node_type and subgraph_dashboard_id change --
   // so nothing referencing this cell has to be rewired.
+  /** Marks this asset as the face of the subgraph we're currently inside.
+   *
+   * Only offered while standing in a sub-dashboard: the result belongs to the
+   * subgraph, and the backend refuses an asset that lives in a different grid.
+   * Stored on the dashboard rather than on any one pointer, so every pointer
+   * into this subgraph shows the same picture.
+   */
+  const markAsResult = async () => {
+    const dashboardId = useProjectStore.getState().dashboardId;
+    if (!dashboardId) return;
+    const asset = outputs.find((o) => o.selected) ?? outputs[0];
+    if (!asset) return;
+    try {
+      await dashboardsApi.setResult(dashboardId, asset.id);
+      alert(t("subgraph.resultSet"));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : t("subgraph.resultSetFailed"));
+    }
+  };
+
   const makeSubgraph = async () => {
     const name = prompt(t("subgraph.createPrompt"), "");
     if (name === null) return;
@@ -561,6 +582,13 @@ function BaseAssetNodeView({
         {!isCandidatesGrid && !node.created_by_node_id && !node.subgraph_dashboard_id && (
           <button onClick={makeSubgraph} title={t("subgraph.createTitle")}>
             {t("subgraph.create")}
+          </button>
+        )}
+        {/* Only inside a subgraph -- that's the only place the question "what
+            does this subgraph look like from outside" even applies. */}
+        {!isCandidatesGrid && outputs.length >= 1 && insideSubgraph && (
+          <button onClick={markAsResult} title={t("subgraph.markResultTitle")}>
+            {t("subgraph.markResult")}
           </button>
         )}
         {!isCandidatesGrid && node.created_by_node_id && (
@@ -1513,27 +1541,14 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: P
  */
 function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked }: Props) {
   const t = useT();
-  const tracks = useProjectStore((s) => s.tracks);
-  const nodesById = useProjectStore((s) => s.nodesById);
-  const outputsByNode = useProjectStore((s) => s.outputsByNode);
-  const refreshNodeOutputs = useProjectStore((s) => s.refreshNodeOutputs);
   const removeNode = useProjectStore((s) => s.removeNode);
   const enterDashboard = useProjectStore((s) => s.enterDashboard);
-  const [resolved, setResolved] = useState<Asset | null>(null);
   const [info, setInfo] = useState<Dashboard | null>(null);
   const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    resolveSlotAsset(node, 0, tracks, nodesById, outputsByNode, refreshNodeOutputs).then((asset) => {
-      if (!cancelled) setResolved(asset);
-    });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [node.inputs, outputsByNode]);
+  // The face comes from the dashboard (its chosen result), not from this
+  // node's own inputs -- see Dashboard.result_asset_id.
+  const faceUrl = info?.result_asset_url ? resolveAssetUrl(info.result_asset_url) : null;
 
   useEffect(() => {
     if (!node.subgraph_dashboard_id) return;
@@ -1597,22 +1612,18 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked }: P
         <span className="status-pill">{t("subgraph.pill")}</span>
       </div>
 
-      {resolved ? (
+      {faceUrl ? (
         <div className="output-grid">
           <div className="output-item">
-            {resolved.kind === "mesh" ? (
-              <Model3DThumb url={resolveAssetUrl(resolved.url)} />
-            ) : (
-              <img
-                src={resolveAssetUrl(resolved.url)}
-                alt="subgraph result"
-                loading="lazy"
-                decoding="async"
-                onDoubleClick={() => setFullSizeUrl(resolveAssetUrl(resolved.url))}
-                title={t("cell.doubleClickFullSize")}
-                style={{ cursor: "zoom-in" }}
-              />
-            )}
+            <img
+              src={faceUrl}
+              alt="subgraph result"
+              loading="lazy"
+              decoding="async"
+              onDoubleClick={() => setFullSizeUrl(faceUrl)}
+              title={t("cell.doubleClickFullSize")}
+              style={{ cursor: "zoom-in" }}
+            />
           </div>
         </div>
       ) : (

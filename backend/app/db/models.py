@@ -164,6 +164,16 @@ class Dashboard(Base):
         ForeignKey("nodes.id", ondelete="SET NULL", use_alter=True, name="fk_dashboards_owner_node"),
         nullable=True,
     )
+    # Which asset inside this subgraph stands for it -- the face every smart
+    # pointer shows. Lives on the dashboard, not on the pointer, so several
+    # pointers into one subgraph can't drift to different pictures.
+    # SET NULL: if the asset is deleted the face simply goes blank and the user
+    # picks another, the same way a dangling refasset renders nothing rather
+    # than breaking the cell.
+    result_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assets.id", ondelete="SET NULL", use_alter=True, name="fk_dashboards_result_asset"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

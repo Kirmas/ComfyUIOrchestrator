@@ -95,6 +95,8 @@ export const dashboardsApi = {
   addPointer: (dashboardId: string, nodeId: string) =>
     api.post<Dashboard>(`/api/dashboards/${dashboardId}/pointers`, { node_id: nodeId }),
   rename: (id: string, name: string) => api.patch<Dashboard>(`/api/dashboards/${id}`, { name }),
+  setResult: (id: string, assetId: string | null) =>
+    api.post<Dashboard>(`/api/dashboards/${id}/result`, { asset_id: assetId }),
   transferOwnership: (id: string, nodeId: string) =>
     api.post<Dashboard>(`/api/dashboards/${id}/transfer-ownership`, { node_id: nodeId }),
 };

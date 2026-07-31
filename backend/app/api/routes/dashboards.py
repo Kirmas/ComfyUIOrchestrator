@@ -25,12 +25,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import get_db
-from app.db.models import Dashboard, Node, NodeKind, NodeStatus, Track
+from app.core.storage import build_asset_url
+from app.db.models import Asset, Dashboard, Node, NodeKind, NodeStatus, Track
 from app.schemas.schemas import (
     DashboardCreate,
     DashboardRead,
     DashboardRename,
     PointerCreate,
+    SetDashboardResult,
     TransferOwnership,
 )
 
@@ -103,6 +105,8 @@ def _read(dashboard: Dashboard, node_count: int, pointer_count: int) -> Dashboar
     item = DashboardRead.model_validate(dashboard)
     item.node_count = node_count
     item.pointer_count = pointer_count
+    if dashboard.result_asset_id is not None:
+        item.result_asset_url = build_asset_url(dashboard.result_asset_id)
     return item
 
 
@@ -181,6 +185,37 @@ async def rename_dashboard(dashboard_id: uuid.UUID, payload: DashboardRename, db
     if dashboard is None:
         raise HTTPException(404, "Dashboard not found")
     dashboard.name = payload.name
+    await db.commit()
+    await db.refresh(dashboard)
+    return _read(dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
+
+
+@router.post("/dashboards/{dashboard_id}/result", response_model=DashboardRead)
+async def set_dashboard_result(dashboard_id: uuid.UUID, payload: SetDashboardResult, db: AsyncSession = Depends(get_db)):
+    """Choose which asset inside this subgraph is its result -- the picture
+    every pointer into it shows.
+
+    Stored on the dashboard rather than on the pointer so two pointers can't
+    drift to different faces. The asset must actually live in this subgraph:
+    a face pointing at something in another grid would be a reference the user
+    never made and can't see the origin of from here.
+    """
+    dashboard = await db.get(Dashboard, dashboard_id)
+    if dashboard is None:
+        raise HTTPException(404, "Dashboard not found")
+
+    if payload.asset_id is None:
+        dashboard.result_asset_id = None
+    else:
+        asset = await db.get(Asset, payload.asset_id)
+        if asset is None:
+            raise HTTPException(404, "Asset not found")
+        owner = await db.get(Node, asset.node_id) if asset.node_id else None
+        track = await db.get(Track, owner.track_id) if owner else None
+        if track is None or track.dashboard_id != dashboard.id:
+            raise HTTPException(409, "Pick an asset that lives inside this subgraph.")
+        dashboard.result_asset_id = asset.id
+
     await db.commit()
     await db.refresh(dashboard)
     return _read(dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))

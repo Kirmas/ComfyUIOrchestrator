@@ -572,12 +572,20 @@ class TransferOwnership(BaseModel):
     node_id: uuid.UUID
 
 
+class SetDashboardResult(BaseModel):
+    # None clears the face.
+    asset_id: uuid.UUID | None = None
+
+
 class DashboardRead(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID
     name: str
     start_kind: NodeKind | None
     owner_node_id: uuid.UUID | None
+    result_asset_id: uuid.UUID | None = None
+    # Resolved here so a pointer can render the face without a second lookup.
+    result_asset_url: str | None = None
     # Derived, not stored: node_count drives the "can't delete the main pointer
     # while it still holds work" rule, pointer_count tells the UI whether this
     # is the last way in.

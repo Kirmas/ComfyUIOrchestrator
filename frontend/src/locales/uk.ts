@@ -486,4 +486,8 @@ export const uk: Record<TKey, string> = {
   "grid.noMoveDestinations": "У цій сітці немає субграфа, куди їх перенести",
   "grid.selectTrackTitle": "Позначити, щоб перенести цю доріжку в іншу сітку",
   "grid.moveTracksFailed": "Не вдалося перенести ці доріжки.",
+  "subgraph.markResult": "★ результат",
+  "subgraph.markResultTitle": "Показувати це зображення на клітинці субграфа в зовнішній сітці",
+  "subgraph.resultSet": "Обрано як результат цього субграфа.",
+  "subgraph.resultSetFailed": "Не вдалося обрати це як результат субграфа.",
 };
