@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useT, type TKey } from "../i18n";
+import { clampBox, resizeBox, type Box, type ResizeMode } from "../boxGeometry";
 
-export interface CropBox {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+/** The crop node's four x/y/width/height params, in source-image pixels. Same
+ * rectangle shape every box overlay uses -- the move/resize/clamp arithmetic
+ * lives in boxGeometry.ts and is shared with CaptionBoxEditor. */
+export type CropBox = Box;
 
-type DragMode = "move" | "nw" | "ne" | "sw" | "se";
+type DragMode = "move" | ResizeMode;
 type AspectPreset = "free" | "1:1" | "16:9" | "custom";
 
 // A ratio ("1:1") reads the same in every language, so only the two named
@@ -64,17 +63,12 @@ export function CropPreview({ imageUrl, box, onCommit }: { imageUrl: string; box
     return null;
   }, [aspectPreset, customRatio]);
 
-  // Deliberately axis-independent -- it does NOT preserve aspect ratio.
-  // Callers that need a ratio kept (applyRatio, and the fixed-ratio branch
-  // of onMove below) do their own ratio-aware fit *before* calling this, and
-  // rely on it only as the final "don't go outside the image" safety net.
-  const clamp = (b: CropBox, w: number, h: number): CropBox => {
-    const width = Math.max(4, Math.min(b.width, w));
-    const height = Math.max(4, Math.min(b.height, h));
-    const x = Math.max(0, Math.min(b.x, w - width));
-    const y = Math.max(0, Math.min(b.y, h - height));
-    return { x, y, width, height };
-  };
+  // 4px is the smallest crop worth having; the fit itself (and the fact that
+  // it deliberately does NOT preserve aspect ratio -- applyRatio and the
+  // fixed-ratio branch of onMove do their own ratio-aware fit first and rely
+  // on this only as the final "don't go outside the image" net) lives in
+  // boxGeometry.clampBox.
+  const clamp = (b: CropBox, w: number, h: number): CropBox => clampBox(b, w, h, 4);
 
   // Snaps the current box to a newly-picked ratio right away (centered on
   // its current middle), instead of waiting for the next drag -- picking
@@ -129,22 +123,7 @@ export function CropPreview({ imageUrl, box, onCommit }: { imageUrl: string; box
         const y = mode.includes("n") ? startBox.y + startBox.height - height : startBox.y;
         next = { x, y, width, height };
       } else {
-        let { x, y, width, height } = startBox;
-        if (mode.includes("n")) {
-          y = startBox.y + dy;
-          height = startBox.height - dy;
-        }
-        if (mode.includes("s")) {
-          height = startBox.height + dy;
-        }
-        if (mode.includes("w")) {
-          x = startBox.x + dx;
-          width = startBox.width - dx;
-        }
-        if (mode.includes("e")) {
-          width = startBox.width + dx;
-        }
-        next = { x, y, width, height };
+        next = resizeBox(startBox, mode, dx, dy);
       }
       setLiveBox(clamp(next, natural.w, natural.h));
     };

@@ -170,6 +170,9 @@ class DetectedFieldOut(BaseModel):
     node_id: str
     input_key: str
     default: Any = None
+    # Present only for a combo widget, and only when the analyze call named a
+    # backend to read /object_info from (see apply_combo_options).
+    options: list[str] | None = None
 
 
 class WorkflowAnalysisOut(BaseModel):

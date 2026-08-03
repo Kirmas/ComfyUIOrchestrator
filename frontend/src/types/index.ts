@@ -315,6 +315,10 @@ export interface DetectedField {
   node_id: string;
   input_key: string;
   default: unknown;
+  // Set only for a ComfyUI combo widget, read from the chosen backend's
+  // /object_info at analyze time -- a workflow.json records the picked value
+  // but never the list it came from. Present => type is "enum".
+  options?: string[] | null;
 }
 
 export interface WorkflowAnalysis {

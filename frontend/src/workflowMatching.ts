@@ -17,12 +17,27 @@ export function matchTypeFor(detectedType: string): ParamField["type"] {
         ? "float"
         : detectedType === "bool"
           ? "bool"
-          : "text";
+          : detectedType === "enum"
+            ? "enum"
+            : "text";
+}
+
+/** Whether a detected field can fill an existing template field's slot.
+ * Exact type equality, except that enum and text are interchangeable: both
+ * write a string into the same ComfyUI input, and whether a widget reads as a
+ * dropdown depends on whether the analyze call could reach a backend at all
+ * (see apply_combo_options). Without this, adding a second backend to a node
+ * type created before options existed would leave every combo field
+ * unresolved. */
+export function typesCompatible(a: ParamField["type"], b: ParamField["type"]): boolean {
+  if (a === b) return true;
+  const stringy = (t: ParamField["type"]) => t === "enum" || t === "text";
+  return stringy(a) && stringy(b);
 }
 
 export function autoMatchField(field: ParamField, analysis: WorkflowAnalysis): FieldResolution {
   const detected = analysis.detected_fields.find((f) => f.key === field.name);
-  if (detected && matchTypeFor(detected.type) === field.type) return { detectedKey: detected.key };
+  if (detected && typesCompatible(matchTypeFor(detected.type), field.type)) return { detectedKey: detected.key };
   return "unresolved";
 }
 

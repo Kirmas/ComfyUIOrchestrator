@@ -13,6 +13,8 @@ import type { Asset, Backend, Capability, Dashboard, InputRef, Job, NodeItem, No
 import { useT, type TFunc } from "../i18n";
 import { cx } from "../utils";
 import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
+import { capabilityUsesIdeogram4 } from "../ideogram4";
+import { CaptionBoxEditor, type CaptionBgOption } from "./CaptionBoxEditor";
 import { CropPreview, type CropBox } from "./CropPreview";
 import { MaskPreview } from "./MaskPreview";
 import { IdeaTextPicker, MacroPreview } from "./IdeaTextPicker";
@@ -702,6 +704,38 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     [template, capabilities],
   );
 
+  // An Ideogram 4 node's prompt isn't prose, it's a structured JSON caption
+  // (see ideogramCaption.ts), so its text fields get the box editor instead of
+  // being edited as raw JSON in a 2-row textarea. Same detection shape as the
+  // angle builder above.
+  const isIdeogram4 = useMemo(
+    () => Boolean(template && capabilities.some((c) => c.node_type_slug === template.node_type_slug && capabilityUsesIdeogram4(c))),
+    [template, capabilities],
+  );
+  const [captionField, setCaptionField] = useState<string | null>(null);
+
+  // Backgrounds to draw the layout over: this node's own generated images and
+  // nothing else. A text-to-image node has no input slots, and its outputs
+  // don't live on the node itself -- they're a separate asset node bound back
+  // to it by created_by_node_id (the same link Grid.tsx's isWorkflowOutput
+  // reads), which may hold several undecided candidates.
+  const captionBgOptions = useMemo<CaptionBgOption[]>(() => {
+    const options: CaptionBgOption[] = [];
+    for (const candidate of Object.values(nodesById)) {
+      if (candidate.created_by_node_id !== node.id) continue;
+      for (const asset of outputsByNode[candidate.id] ?? []) {
+        if (asset.kind !== "image" || !asset.url) continue;
+        options.push({
+          id: asset.id,
+          url: resolveAssetUrl(asset.url),
+          label: asset.selected ? t("ideogram.bgSelected") : `#${options.length + 1}`,
+        });
+      }
+    }
+    // Newest first, so the default background is the most recent generation.
+    return options.reverse();
+  }, [nodesById, outputsByNode, node.id, t]);
+
   useEffect(() => {
     if (!paramsOpen || !template || cropGroups.length === 0) {
       setCropImages({});
@@ -988,6 +1022,11 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                   value={(node.params[field.name] as string) ?? ""}
                   onChange={(v) => updateParam(field.name, v)}
                 />
+              )}
+              {isIdeogram4 && (
+                <button type="button" className="caption-open" onClick={() => setCaptionField(field.name)}>
+                  {t("ideogram.openEditor")}
+                </button>
               )}
             </>
           ) : field.type === "bool" ? (
@@ -1379,6 +1418,19 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
           </div>,
           document.body,
         )}
+
+      {/* Portals itself, so it renders as a sibling of the params modal rather
+          than inside it -- the layout editor is full-screen and shouldn't be
+          clipped by the modal's own scroll area. */}
+      {captionField && (
+        <CaptionBoxEditor
+          value={(node.params[captionField] as string) ?? ""}
+          aspectHint={node.params["aspect_ratio"]}
+          bgOptions={captionBgOptions}
+          onCommit={(next) => updateParam(captionField, next)}
+          onClose={() => setCaptionField(null)}
+        />
+      )}
 
       {viewChainOpen &&
         collapseInfo &&

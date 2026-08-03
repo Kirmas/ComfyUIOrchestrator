@@ -2,15 +2,16 @@ import json
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.comfyui_backend import ComfyUIBackend
 from app.core.node_descriptions import resolve_descriptions, upsert_description
 from app.core.node_types import NATIVE_NODE_TYPES
-from app.core.workflow_analyzer import analyze_workflow
+from app.core.workflow_analyzer import analyze_workflow, apply_combo_options
 from app.db.base import get_db
-from app.db.models import NodeTemplate
+from app.db.models import Backend, BackendKind, NodeTemplate
 from app.schemas.schemas import (
     AgentDescriptionWrite,
     ManualDescriptionWrite,
@@ -40,20 +41,46 @@ def _native_template_read(native) -> NodeTemplateRead:
 
 
 @router.post("/analyze-workflow", response_model=WorkflowAnalysisOut)
-async def analyze_workflow_endpoint(file: UploadFile):
+async def analyze_workflow_endpoint(
+    file: UploadFile,
+    backend_id: uuid.UUID | None = Form(None),
+    db: AsyncSession = Depends(get_db),
+):
     """Template creation wizard, step 2: parse an uploaded ComfyUI API-format
     workflow.json and detect input/output nodes + standard fields (seed,
     prompts, steps, cfg...) so the wizard can build param_schema/param_mapping
-    without the user hand-writing JSON."""
+    without the user hand-writing JSON.
+
+    backend_id is the ComfyUI instance this node type is being created for. It
+    is optional and only used to turn combo widgets into enum fields with their
+    real option lists (/object_info) -- a workflow.json carries the chosen
+    value but never the choices. It has to be that specific instance rather
+    than any reachable one, because a custom node can be installed on one
+    backend and absent from another.
+    """
     data = await file.read()
     try:
         workflow_json = json.loads(data)
     except json.JSONDecodeError as exc:
         raise HTTPException(400, f"not valid JSON: {exc}") from exc
     try:
-        return analyze_workflow(workflow_json)
+        analysis = analyze_workflow(workflow_json)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+    if backend_id is not None:
+        backend = await db.get(Backend, backend_id)
+        if backend is not None and backend.kind == BackendKind.comfyui and backend.base_url:
+            class_types = {
+                node.get("class_type")
+                for node in (workflow_json.get(f.node_id) for f in analysis.detected_fields)
+                if isinstance(node, dict) and node.get("class_type")
+            }
+            if class_types:
+                object_info = await ComfyUIBackend(backend.base_url).fetch_object_info(sorted(class_types))
+                apply_combo_options(analysis, workflow_json, object_info)
+
+    return analysis
 
 
 @router.get("", response_model=list[NodeTemplateRead])

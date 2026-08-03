@@ -10,12 +10,14 @@ Reference endpoints on a stock ComfyUI instance:
   POST /interrupt            stop whatever is currently executing
   POST /queue {"delete":[id]} remove a still-queued prompt without running it
   GET  /system_stats          heartbeat / liveness info
+  GET  /object_info/{class}   one node class's input definitions (combo options)
   WS   /ws?clientId=          progress + status events
 """
 import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Iterable
 from typing import Any
 
 import httpx
@@ -238,6 +240,39 @@ class ComfyUIBackend:
                 await client.post("/interrupt")
             else:
                 await client.post("/queue", json={"delete": [job_id]})
+
+    async def fetch_object_info(self, class_types: Iterable[str]) -> dict[str, dict]:
+        """class_type -> that node class's ComfyUI input definition, for the
+        classes asked about. Used by the template wizard to learn which widgets
+        are combos and what their options are -- a workflow.json records only
+        the *chosen* value ("4:5 (Artistic Frame)"), never the list it came
+        from, so this is the only place the options exist.
+
+        Asks per class rather than fetching the whole /object_info: the full
+        payload is megabytes of every installed node, and the wizard only cares
+        about a handful. A class the instance doesn't have installed answers
+        {} -- expected, not an error (a custom node can be present on one
+        backend and missing on another, which is exactly why this is asked of
+        the backend the capability is being created for). Failures are
+        swallowed: options are an enhancement, and the wizard stays usable
+        against an unreachable instance.
+        """
+        found: dict[str, dict] = {}
+        try:
+            async with httpx.AsyncClient(base_url=self.base_url, timeout=15) as client:
+                for class_type in dict.fromkeys(class_types):  # de-dupe, keep order
+                    try:
+                        resp = await client.get(f"/object_info/{class_type}")
+                        resp.raise_for_status()
+                        entry = resp.json().get(class_type)
+                    except Exception:
+                        logger.debug("object_info for %s failed on %s", class_type, self.base_url, exc_info=True)
+                        continue
+                    if isinstance(entry, dict):
+                        found[class_type] = entry
+        except Exception:
+            logger.warning("ComfyUI backend %s unreachable while reading object_info", self.base_url, exc_info=True)
+        return found
 
     async def heartbeat(self) -> dict:
         """Used by the worker's periodic heartbeat task. Returns raw /system_stats payload."""

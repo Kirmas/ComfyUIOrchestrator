@@ -61,9 +61,14 @@ export const nodeTemplatesApi = {
   setDescription: (slug: string, description: string) =>
     api.patch(`/api/node-templates/by-slug/${slug}/description`, { description }),
   resetDescription: (slug: string) => api.delete(`/api/node-templates/by-slug/${slug}/description`),
-  analyzeWorkflow: (file: File) => {
+  // backendId is the ComfyUI this node type is being created for: combo
+  // widgets only become enum fields with real options if the analyzer can ask
+  // that instance's /object_info, and a custom node present on one backend may
+  // be missing on another.
+  analyzeWorkflow: (file: File, backendId?: string) => {
     const form = new FormData();
     form.append("file", file);
+    if (backendId) form.append("backend_id", backendId);
     return api.postForm<WorkflowAnalysis>("/api/node-templates/analyze-workflow", form);
   },
 };

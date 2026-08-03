@@ -165,7 +165,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
 
     let result: WorkflowAnalysis;
     try {
-      result = await nodeTemplatesApi.analyzeWorkflow(file);
+      result = await nodeTemplatesApi.analyzeWorkflow(file, selectedBackendId);
     } catch (err) {
       setAnalyzeError(err instanceof Error ? err.message : t("wizard.analyzeFailed"));
       return;
@@ -297,7 +297,14 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
       const title = titleOf(f.node_id);
       if (!title) throw new Error(`The node backing "${fieldLabels[f.key] ?? f.label}" has no title in ComfyUI -- rename it and re-export.`);
       const fieldType = matchTypeFor(f.type);
-      paramFields.push({ name: f.key, type: fieldType, label: fieldLabels[f.key] ?? f.label, default: f.default });
+      paramFields.push({
+        name: f.key,
+        type: fieldType,
+        label: fieldLabels[f.key] ?? f.label,
+        default: f.default,
+        // Only enum fields carry options; NodeCell renders them as a <select>.
+        ...(fieldType === "enum" && f.options ? { options: f.options } : {}),
+      });
       paramMapping[f.key] = { node_id: f.node_id, title, input_key: f.input_key };
       defaults[f.key] = f.default;
     }

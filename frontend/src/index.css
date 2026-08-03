@@ -1817,3 +1817,442 @@ th, td {
 }
 
 .track-move-bar .hint { color: var(--text-dim); }
+
+/* --- Ideogram 4 caption layout editor (CaptionBoxEditor.tsx) -------------
+   Full-screen box editor for the structured JSON caption an Ideogram 4 node
+   takes as its prompt. Draws over a grey canvas, or over one of the node's
+   own generated images once there is one. */
+.caption-open {
+  margin-top: 6px;
+  font-size: 11px;
+  padding: 2px 8px;
+  color: var(--accent);
+  border-color: var(--border);
+  background: var(--panel);
+}
+
+.caption-editor {
+  gap: 10px;
+}
+
+.caption-editor-body {
+  display: flex;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+.caption-canvas-col {
+  flex: 1 1 60%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.caption-side {
+  flex: 1 1 40%;
+  min-width: 280px;
+  max-width: 480px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+
+.caption-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.caption-toolbar label {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.caption-toolbar select {
+  font-size: 11px;
+  padding: 1px 4px;
+}
+
+.caption-ratio input {
+  width: 56px;
+  font-size: 11px;
+  padding: 1px 4px;
+}
+
+.caption-opacity input[type="range"] {
+  width: 110px;
+}
+
+/* Sized in px by the editor's own ResizeObserver, not by CSS aspect-ratio --
+   see the comment on `fit` in CaptionBoxEditor.tsx. This wrapper is just the
+   area to fit into. */
+.caption-canvas-fit {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.caption-canvas {
+  position: relative;
+  background: #4a4f57;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  cursor: crosshair;
+  /* Pointer drags only -- without this a touch drag scrolls the modal
+     instead of drawing a box. */
+  touch-action: none;
+  user-select: none;
+}
+
+.caption-canvas-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+}
+
+.caption-canvas-hint,
+.caption-canvas-help {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.caption-canvas-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #cfd3d9;
+  pointer-events: none;
+}
+
+.caption-canvas-help {
+  text-align: center;
+}
+
+.caption-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid var(--accent);
+  background: rgba(59, 111, 224, 0.14);
+  cursor: move;
+  overflow: hidden;
+  touch-action: none;
+}
+
+.caption-box.is-text {
+  border-color: var(--warning);
+  background: rgba(197, 143, 0, 0.16);
+}
+
+.caption-box.selected {
+  border-width: 3px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.5);
+}
+
+.caption-box.draft {
+  border-style: dashed;
+  pointer-events: none;
+}
+
+.caption-box-num {
+  position: absolute;
+  top: 0;
+  left: 0;
+  min-width: 16px;
+  padding: 0 3px;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+  color: #fff;
+  background: var(--accent);
+}
+
+.caption-box.is-text .caption-box-num {
+  background: var(--warning);
+}
+
+.caption-box-label {
+  position: absolute;
+  inset: 15px 2px 2px 2px;
+  font-size: 10px;
+  line-height: 1.2;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.caption-handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  background: var(--accent);
+  border-radius: 2px;
+  touch-action: none;
+}
+
+.caption-handle.nw {
+  top: -7px;
+  left: -7px;
+}
+.caption-handle.ne {
+  top: -7px;
+  right: -7px;
+}
+.caption-handle.sw {
+  bottom: -7px;
+  left: -7px;
+}
+.caption-handle.se {
+  bottom: -7px;
+  right: -7px;
+}
+
+.caption-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.caption-field textarea,
+.caption-field input[type="text"],
+.caption-custom-medium {
+  width: 100%;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.caption-group {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.caption-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.caption-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.caption-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.caption-chip {
+  font-size: 10px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text-dim);
+}
+
+.caption-chip.active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.caption-element-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.caption-element-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.caption-element-row:hover {
+  background: var(--accent-dim);
+}
+
+.caption-element-row.selected {
+  background: var(--accent-dim);
+  outline: 1px solid var(--accent);
+}
+
+.caption-element-num {
+  min-width: 16px;
+  text-align: right;
+  color: var(--text-dim);
+}
+
+.caption-element-type {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.caption-element-type.text {
+  background: var(--warning);
+}
+
+.caption-element-desc {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.caption-element-del {
+  font-size: 11px;
+  padding: 0 5px;
+  color: var(--danger);
+  border-color: transparent;
+  background: transparent;
+}
+
+.caption-element-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.caption-type-switch {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.caption-type-switch label {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  color: var(--text-dim);
+}
+
+.caption-type-switch label.sel {
+  color: var(--text);
+}
+
+.caption-palette {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.caption-palette-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.caption-palette-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.caption-swatch {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0;
+}
+
+.caption-swatch-add {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  background: transparent;
+}
+
+.caption-unparsable {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 12px;
+}
+
+.caption-footer {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  justify-content: space-between;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.caption-issues {
+  flex: 1;
+  min-width: 0;
+  max-height: 84px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.caption-issue {
+  font-size: 11px;
+  color: var(--warning);
+}
+
+.caption-issue.raw {
+  color: var(--danger);
+}
+
+.caption-actions {
+  display: flex;
+  gap: 8px;
+}
+
+@media (max-width: 900px) {
+  .caption-editor-body {
+    flex-direction: column;
+  }
+
+  .caption-side {
+    max-width: none;
+    min-width: 0;
+  }
+
+  .caption-canvas-fit {
+    min-height: 45vh;
+  }
+}

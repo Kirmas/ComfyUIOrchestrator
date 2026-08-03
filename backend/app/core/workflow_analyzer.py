@@ -36,6 +36,11 @@ param_schema/param_mapping JSON:
   idea as the Primitive* case above, just for a one-off toggle nobody
   bothered breaking out into its own Primitive node.
 
+Everything above is derived from the uploaded file alone. One thing can't be:
+whether a detected widget is a dropdown and what its choices are, since a
+workflow.json stores only the chosen value. apply_combo_options() at the bottom
+folds that in from a live instance's /object_info when the caller has one.
+
 Field/node "keys" used in the result are ComfyUI node ids from the uploaded
 workflow; the caller resolves those to node titles when building param_mapping
 (app/core/template_engine.py maps by title, the settled resolution of the
@@ -48,7 +53,17 @@ from typing import Any
 
 INPUT_IMAGE_CLASS_TYPES = {"LoadImage"}
 OUTPUT_CLASS_TYPES = {"SaveImage", "PreviewImage"}
-SAMPLER_CLASS_TYPES = {"KSampler", "KSamplerAdvanced"}
+SAMPLER_CLASS_TYPES = {"KSampler", "KSamplerAdvanced", "SamplerCustomAdvanced"}
+# SamplerCustomAdvanced-style graphs (Flux2, Ideogram 4) carry no
+# positive/negative of their own -- conditioning reaches the sampler through a
+# guider node instead, so the prompt trace has to hop through it or it finds
+# nothing at all. class_type -> the (positive, negative) input keys on that
+# guider; BasicGuider has a single unnamed conditioning and no negative.
+GUIDER_CONDITIONING_KEYS: dict[str, tuple[str, str | None]] = {
+    "CFGGuider": ("positive", "negative"),
+    "DualModelGuider": ("positive", "negative"),
+    "BasicGuider": ("conditioning", None),
+}
 # Checkpoint/diffusion-model loaders -> the input key naming the model file.
 # Used only for describing a workflow ("what does this node type actually
 # run"), never for execution.
@@ -90,11 +105,28 @@ KNOWN_NODE_LITERAL_FIELDS: dict[str, list[tuple[tuple[str, ...], str, str]]] = {
         (("aspect_ratio",), "aspect_ratio", "text"),
         (("megapixels",), "megapixels", "float"),
     ],
+    # Same idea as ResolutionSelector: the latent size is computed from these
+    # rather than typed as width/height, so without them the output format is
+    # frozen into the capability's baked workflow_json and changing a poster
+    # from 4:5 to 1:1 means re-running the wizard. Both are "text" because
+    # ComfyUI stores them as combo strings ("4:5 (Artistic Frame)", "2.5") --
+    # writing a float back into megapixel would not match any combo option.
+    # The frontend also reads aspect_ratio to shape the Ideogram caption
+    # editor's canvas (parseAspectRatio in ideogram4.ts).
+    "FluxResolutionNode": [
+        (("aspect_ratio",), "aspect_ratio", "text"),
+        (("megapixel",), "megapixel", "text"),
+    ],
     # ComfyUI-Easy-Use's standalone seed widget -- common when a workflow
     # wants one seed feeding several samplers, which pulls "seed" off the
     # KSampler itself (turning it into a link SAMPLER_LITERAL_FIELDS can't
     # see) and onto this node instead.
     "easy seed": [(("seed",), "seed", "seed")],
+    # rgthree's equivalent, and the same reasoning: with the seed living on a
+    # separate node, RandomNoise/KSampler sees only a link and the schema ends
+    # up with no seed field at all -- which means the backend has nothing to
+    # randomize per variant and every variant of a batch comes back identical.
+    "Seed (rgthree)": [(("seed",), "seed", "seed")],
     "EmptySD3LatentImage": [
         (("width",), "width", "int"),
         (("height",), "height", "int"),
@@ -199,6 +231,9 @@ class DetectedField:
     node_id: str
     input_key: str
     default: Any = None
+    # Filled in by apply_combo_options() when the backend says this input is a
+    # combo widget; None for a free-form one. type becomes "enum" alongside it.
+    options: list[str] | None = None
 
 
 @dataclass
@@ -324,14 +359,41 @@ def analyze_workflow(workflow_json: dict) -> WorkflowAnalysis:
                     )
                     break
 
-        for input_key, field_key, label in (("positive", "prompt", "Prompt"), ("negative", "negative_prompt", "Negative prompt")):
-            link = inputs.get(input_key)
+        # Where the conditioning links actually hang: on the sampler itself for
+        # a KSampler, on its guider for SamplerCustomAdvanced.
+        cond_inputs = inputs
+        positive_key: str | None = "positive"
+        negative_key: str | None = "negative"
+        guider_link = inputs.get("guider")
+        if "positive" not in inputs and _is_link(guider_link):
+            guider = workflow_json.get(guider_link[0])
+            if isinstance(guider, dict):
+                keys = GUIDER_CONDITIONING_KEYS.get(guider.get("class_type"))
+                if keys is not None:
+                    cond_inputs = guider.get("inputs", {})
+                    positive_key, negative_key = keys
+
+        traced_positive: tuple[str, str, Any] | None = None
+        for input_key, field_key, label in ((positive_key, "prompt", "Prompt"), (negative_key, "negative_prompt", "Negative prompt")):
+            if input_key is None:
+                continue
+            link = cond_inputs.get(input_key)
             if not _is_link(link):
                 continue
             traced = _trace_prompt_node(workflow_json, link[0])
             if traced is None:
                 continue  # too indirect to auto-expose (e.g. a prompt-combiner with 2+ conditioning inputs)
             source_id, text_key, text_value = traced
+            if field_key == "prompt":
+                traced_positive = traced
+            elif traced_positive is not None and (source_id, text_key) == traced_positive[:2]:
+                # The negative is derived from the positive rather than being a
+                # prompt of its own -- ConditioningZeroOut(positive) is the
+                # standard way to say "no negative" in a Flux2/Ideogram graph,
+                # and it traces back to the very same text encode. Exposing it
+                # would put two fields on one input, where editing the
+                # "negative" silently overwrites the actual prompt.
+                continue
             detected_fields.append(
                 DetectedField(key=field_key, label=label, type="text", node_id=source_id, input_key=text_key, default=text_value)
             )
@@ -413,3 +475,54 @@ def analyze_workflow(workflow_json: dict) -> WorkflowAnalysis:
         models=models,
         loras=loras,
     )
+
+
+def _combo_options(entry: dict, input_key: str) -> list[str] | None:
+    """The option list of a ComfyUI combo widget, or None if that input isn't
+    a combo. In an /object_info payload every input is `[spec, {...opts}]`,
+    where spec is a type name ("INT", "STRING") for a scalar widget and the
+    literal list of choices for a combo -- so "is this a dropdown" is exactly
+    "is the spec a list". Non-string choices (a combo of ints) are skipped:
+    param_schema's enum fields are string-valued, and writing an int back as a
+    string would not match any option on the ComfyUI side."""
+    for section in ("required", "optional"):
+        spec = (entry.get("input", {}).get(section) or {}).get(input_key)
+        if not isinstance(spec, list) or not spec:
+            continue
+        choices = spec[0]
+        if isinstance(choices, list) and choices and all(isinstance(c, str) for c in choices):
+            return list(choices)
+    return None
+
+
+def apply_combo_options(analysis: WorkflowAnalysis, workflow_json: dict, object_info: dict[str, dict]) -> None:
+    """Upgrades detected fields whose ComfyUI widget is a combo from a free
+    text box to an enum with the real option list, in place.
+
+    A workflow.json records only the value that was chosen, so the list can
+    only come from a live instance (see ComfyUIBackend.fetch_object_info) --
+    and specifically from the instance this capability is being created for,
+    since a custom node may be installed on one backend and not another.
+    Anything not answered for stays exactly as detected, so an unreachable or
+    differently-equipped backend degrades to today's behaviour rather than
+    losing the field.
+
+    The current value is kept as an option even when the backend doesn't list
+    it: a workflow exported from an older version of a custom node can name a
+    choice that has since been renamed, and silently dropping it would rewrite
+    the user's setting on the next save.
+    """
+    for detected in analysis.detected_fields:
+        node = workflow_json.get(detected.node_id)
+        if not isinstance(node, dict):
+            continue
+        entry = object_info.get(node.get("class_type"))
+        if not isinstance(entry, dict):
+            continue
+        options = _combo_options(entry, detected.input_key)
+        if not options:
+            continue
+        if isinstance(detected.default, str) and detected.default not in options:
+            options = [detected.default, *options]
+        detected.type = "enum"
+        detected.options = options
