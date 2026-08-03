@@ -979,6 +979,28 @@ export function Grid({ projectId }: { projectId: string }) {
     }
   };
 
+  /** "from references" + "paste ref" buttons for an empty asset cell -- shared
+   * by emptyReachableCells (a gap inside an existing workflow's span) and the
+   * still-empty-track bootstrap buttons below. Those two callers create the
+   * cell itself very differently (a plain manual node vs addStep's start_kind
+   * bookkeeping), so they stay separate call sites; only this shared sub-piece
+   * -- placing a board-library asset -- is the same action in both. */
+  const refPlacementButtons = (row: number, step: number, small = false) => {
+    const style = small ? { fontSize: 10, padding: "1px 4px", opacity: 0.6, marginLeft: 4 } : undefined;
+    return (
+      <>
+        <button style={style} onClick={() => setPickRefAt({ row, step })} title={t("grid.fromReferencesTitle")}>
+          {t("grid.fromReferences")}
+        </button>
+        {clipboard && (
+          <button style={style} onClick={() => void pasteRefAt(row, step)} title={t("grid.pasteRefTitle", { label: clipboard.label })}>
+            {t("grid.pasteRef")}
+          </button>
+        )}
+      </>
+    );
+  };
+
   /** Where a track selection can go from here.
    *
    * Deliberately not a list of every dashboard in the project -- there isn't
@@ -1473,22 +1495,7 @@ export function Grid({ projectId }: { projectId: string }) {
                   >
                     {t("grid.addAsset")}
                   </button>
-                  <button
-                    style={{ fontSize: 10, padding: "1px 4px", opacity: 0.6, marginLeft: 4 }}
-                    title={t("grid.fromReferencesTitle")}
-                    onClick={() => setPickRefAt({ row, step })}
-                  >
-                    {t("grid.fromReferences")}
-                  </button>
-                  {clipboard && (
-                    <button
-                      style={{ fontSize: 10, padding: "1px 4px", opacity: 0.6, marginLeft: 4 }}
-                      title={t("grid.pasteRefTitle", { label: clipboard.label })}
-                      onClick={() => void pasteRefAt(row, step)}
-                    >
-                      {t("grid.pasteRef")}
-                    </button>
-                  )}
+                  {refPlacementButtons(row, step, true)}
                 </>
               )}
             </div>
@@ -1619,6 +1626,7 @@ export function Grid({ projectId }: { projectId: string }) {
                         <button onClick={() => addStep(track.id, "asset", buttonStep)} title={t("grid.addAssetHereTitle")}>
                           {t("grid.addAsset")}
                         </button>
+                        {refPlacementButtons(track.row_index, buttonStep)}
                         <button onClick={skipColumn} title={t("grid.emptyTitle")}>
                           {t("grid.empty")}
                         </button>
@@ -1638,9 +1646,12 @@ export function Grid({ projectId }: { projectId: string }) {
                 {!showStartChoice && secondAvailable && (
                   <div style={{ gridColumn: secondStep + 2, gridRow: rowIdx + 1, alignSelf: "center", display: "flex", gap: 4 }}>
                     {secondKind === "asset" ? (
-                      <button onClick={() => addStep(track.id, "asset", secondStep)} title={t("grid.addAssetHereTitle")}>
-                        {t("grid.addAsset")}
-                      </button>
+                      <>
+                        <button onClick={() => addStep(track.id, "asset", secondStep)} title={t("grid.addAssetHereTitle")}>
+                          {t("grid.addAsset")}
+                        </button>
+                        {refPlacementButtons(track.row_index, secondStep)}
+                      </>
                     ) : (
                       <button onClick={() => addStep(track.id, "workflow", secondStep)} title={t("grid.addStepNoAssetTitle")}>
                         {t("grid.addStep")}
