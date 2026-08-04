@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 import random
 from datetime import UTC, datetime
@@ -11,7 +12,7 @@ from app.config import get_settings
 from app.core import dispatcher
 from app.core.comfyui_backend import ComfyUIBackend, wait_with_timeout
 from app.core.job_backend import JobStatus as BackendJobStatus
-from app.core.node_types import resolve_effective_template, sync_legacy_fields
+from app.core.node_types import resolve_effective_template, slot_count, slot_fields, sync_legacy_fields
 from app.core.queue import job_queue
 from app.core.storage import get_storage
 from app.core.idea_macros import apply_macros, project_idea_texts
@@ -192,7 +193,7 @@ async def _splice_after_would_split_a_span(db, project_id, after_pos: int, order
         effective = await resolve_effective_template(db, node)
         if effective is None:
             continue
-        desired = len([f for f in (effective.param_schema or {}).get("fields", []) if f.get("type") in ("image", "file")])
+        desired = slot_count(effective.param_schema)
         span = await _actual_row_span(db, node, max(desired, 1), ordered, pos)
         if node_pos + span > after_pos + 1:
             return True
@@ -399,10 +400,12 @@ async def _get_or_create_output_asset_node(db, workflow_node: Node, is_native: b
     return await _claim_new_output_cell(db, workflow_node, is_native)
 
 
-async def resolve_node_inputs(db, node: Node, param_schema: dict[str, Any] | None) -> dict[str, Any]:
-    """Merge Node.inputs (InputRef list, matched positionally to image/file fields
-    in param_schema) with Node.params (direct values for the rest) into the flat
-    dict a JobBackend.submit() expects.
+async def resolve_node_inputs(
+    db, node: Node, param_schema: dict[str, Any] | None, defaults: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Merge Node.inputs (InputRef list, matched positionally to image/file
+    slot fields in param_schema) with Node.params (direct values for the
+    rest) into the flat dict a JobBackend.submit() expects.
 
     This runs once per variant job (see run_variant_job), so a field marked
     "seed" in param_schema gets a fresh random value on every call regardless
@@ -412,16 +415,32 @@ async def resolve_node_inputs(db, node: Node, param_schema: dict[str, Any] | Non
     from NodeCell's param form (frontend/src/components/NodeCell.tsx) since
     there's nothing meaningful for the user to set on it.
 
-    param_schema comes from resolve_effective_template's EffectiveTemplate --
-    works the same whether it's native (code registry) or template (DB) backed."""
+    param_schema/defaults come from resolve_effective_template's
+    EffectiveTemplate -- works the same whether it's native (code registry)
+    or template (DB) backed."""
     fields = (param_schema or {}).get("fields", [])
-    slot_fields = [f["name"] for f in fields if f.get("type") in ("image", "file")]
+    slot_field_names = [f["name"] for f in slot_fields(param_schema)]
+    fixed_image_field_names = [
+        f["name"] for f in fields if f.get("type") in ("image", "file") and f.get("fixed")
+    ]
     seed_fields = [f["name"] for f in fields if f.get("type") == "seed"]
     storage = get_storage()
 
     resolved: dict[str, Any] = dict(node.params or {})
     for field_name in seed_fields:
         resolved[field_name] = random.randint(0, MAX_SEED_VALUE)
+
+    # A "fixed" image field's value never comes from a grid cell (see
+    # core/node_types.is_slot_field) -- it's a constant baked onto the node
+    # type itself at wizard time, base64-encoded in NodeTemplate.defaults, so
+    # every instance and every run decodes the same bytes. Still goes through
+    # JobBackend.submit()'s normal bytes-upload path (ComfyUIBackend._upload_image)
+    # exactly like a slot's resolved asset would -- the only difference is
+    # where the bytes come from.
+    for field_name in fixed_image_field_names:
+        raw = (defaults or {}).get(field_name)
+        if isinstance(raw, str) and raw:
+            resolved[field_name] = base64.b64decode(raw)
 
     track = await db.get(Track, node.track_id)
 
@@ -446,7 +465,7 @@ async def resolve_node_inputs(db, node: Node, param_schema: dict[str, Any] | Non
                     ", ".join(f"{{{t}}}" for t in unresolved),
                 )
 
-    for i, field_name in enumerate(slot_fields):
+    for i, field_name in enumerate(slot_field_names):
         if i >= len(node.inputs or []):
             continue
         ref = node.inputs[i]
@@ -742,7 +761,7 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
         )
 
         try:
-            resolved_inputs = await resolve_node_inputs(db, node, effective.param_schema)
+            resolved_inputs = await resolve_node_inputs(db, node, effective.param_schema, effective.defaults)
             try:
                 external_job_id = await wait_with_timeout(
                     choice.instance.submit(choice.capability.config if choice.capability else {}, resolved_inputs),

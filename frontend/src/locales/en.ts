@@ -108,6 +108,7 @@ export const en = {
   "caps.leaderFallback": "the leader instance",
   "caps.noTextFields":
     "No baked-in text fields found — this workflow's prompts are all already exposed as regular params, or it has none.",
+  "caps.variableDefaultHint": "Already a param — this edits the default new cells start with, not any node currently on the grid.",
   "caps.leads": "leads {n}",
   "caps.leadsTitle": "Other instances follow this one's prompts",
   "caps.followTitle": "Follow another instance's prompts (leader → this one)",
@@ -183,6 +184,11 @@ export const en = {
   "wizard.cropOption": "{label} (crop)",
   "wizard.missingTitles": "Some assigned nodes have no title in ComfyUI -- rename them and re-upload before saving.",
   "wizard.approve": "Approve",
+  "wizard.fixed": "Fixed",
+  "wizard.fixedHint": "baked into the node type -- same picture every run, no grid row",
+  "wizard.fixedUpload": "Upload the fixed image",
+  "wizard.fixedUploaded": "{name} ({size} KB)",
+  "wizard.fixedMissing": "\"{label}\" is marked fixed but has no uploaded image.",
 
   // --- Node type description ------------------------------------------
   "desc.sourceAuto": "Derived from this node type's workflows. Updates by itself when they change.",

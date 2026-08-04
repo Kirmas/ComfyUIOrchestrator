@@ -257,7 +257,11 @@ function CapabilityTextFieldsModal({
     setSavingKey(f.key);
     setSavedKey(null);
     try {
-      await capabilitiesApi.updateTextField(capability.id, { node_id: f.node_id, input_key: f.input_key, value: values[f.key] ?? "" });
+      if (f.is_variable) {
+        await capabilitiesApi.updateVariableDefault(capability.id, { field_name: f.key, value: values[f.key] ?? "" });
+      } else {
+        await capabilitiesApi.updateTextField(capability.id, { node_id: f.node_id, input_key: f.input_key, value: values[f.key] ?? "" });
+      }
       setSavedKey(f.key);
     } catch (err) {
       alert(describeError(err));
@@ -296,6 +300,7 @@ function CapabilityTextFieldsModal({
         {fields?.map((f) => (
           <div key={f.key} style={{ marginTop: 12 }}>
             <label style={{ display: "block", fontSize: 12, marginBottom: 4, color: "var(--text-dim)" }}>{f.label}</label>
+            {f.is_variable && <div className="node-cell-hint" style={{ marginBottom: 4 }}>{t("caps.variableDefaultHint")}</div>}
             <textarea
               rows={14}
               readOnly={readOnly}

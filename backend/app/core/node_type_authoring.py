@@ -8,6 +8,7 @@ leaving a half-built node type nobody can correct.
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.node_types import image_field_count
 from app.core.workflow_analyzer import WorkflowAnalysis, analyze_workflow
 from app.db.models import Capability, ExecutionType, NodeTemplate
 
@@ -77,10 +78,6 @@ def build_param_schema(analysis: WorkflowAnalysis, param_mapping: dict) -> dict:
     return {"fields": fields}
 
 
-def slot_count(param_schema: dict) -> int:
-    return len([f for f in (param_schema or {}).get("fields", []) if f.get("type") in ("image", "file")])
-
-
 async def create_validated_node_type(
     db: AsyncSession,
     *,
@@ -134,9 +131,13 @@ async def add_validated_capability(
 
     Same validation as creating one, plus a check creating one can't need: the
     new workflow must take the same number of images as the node type already
-    declares. param_schema is shared by every backend and is what decides how
-    many rows a node's card covers, so a binding that wants a different number
-    would make the card's height wrong on whichever machine happens to run it.
+    declares -- image_field_count(), not slot_count(), since a fixed image
+    field (wizard-only today, see core/node_types.is_slot_field) still needs
+    its own LoadImage node and param_mapping entry on every backend even
+    though it doesn't occupy a row. param_schema is shared by every backend
+    and its slot_count() is what decides how many rows a node's card covers,
+    so a binding that wants a different *slot* count would make the card's
+    height wrong on whichever machine happens to run it.
     """
     try:
         analysis = analyze_workflow(workflow_json)
@@ -144,12 +145,12 @@ async def add_validated_capability(
         raise AuthoringError(str(exc)) from exc
     validate_param_mapping(analysis, param_mapping)
 
-    expected = slot_count(template.param_schema)
+    expected = image_field_count(template.param_schema)
     incoming = len(analysis.input_image_nodes)
     if incoming != expected:
         raise AuthoringError(
             f"This workflow takes {incoming} image input(s) but '{template.node_type_slug}' declares {expected}. "
-            "All backends of a node type must agree, since that count sets the node's row span."
+            "All backends of a node type must agree on the total number of image inputs."
         )
 
     existing = await db.execute(

@@ -47,6 +47,13 @@ export const capabilitiesApi = {
   textFields: (id: string) => api.get<DetectedField[]>(`/api/capabilities/${id}/text-fields`),
   updateTextField: (id: string, data: { node_id: string; input_key: string; value: string }) =>
     api.patch<Capability>(`/api/capabilities/${id}/text-fields`, data),
+  // For a field that's already a param_schema variable (DetectedField.is_variable):
+  // edits the field's default on the shared NodeTemplate instead of any one
+  // backend's baked workflow_json. Returns the updated NodeTemplate, not the
+  // Capability, hence the separate endpoint/method rather than overloading
+  // updateTextField.
+  updateVariableDefault: (id: string, data: { field_name: string; value: string }) =>
+    api.patch<NodeTemplate>(`/api/capabilities/${id}/variable-default`, data),
   setPromptLink: (id: string, leaderId: string | null) =>
     api.patch<Capability>(`/api/capabilities/${id}/prompt-link`, { leader_id: leaderId }),
 };

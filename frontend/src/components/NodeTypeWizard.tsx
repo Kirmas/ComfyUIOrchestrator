@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { capabilitiesApi, nodeTemplatesApi } from "../api/endpoints";
 import { detectCropGroups } from "../cropUtils";
-import { slotFields } from "../templateUtils";
 import {
   autoMatchField,
   defaultGroupLabel,
@@ -16,9 +15,33 @@ import { useT } from "../i18n";
 
 export type WizardMode = { kind: "create" } | { kind: "add-instance"; template: NodeTemplate; excludeBackendIds: string[] };
 
+interface FixedImagePayload {
+  fileName: string;
+  sizeBytes: number;
+  dataBase64: string;
+}
+
 interface InputSlot {
   label: string;
   nodeId: string;
+  // A slot marked fixed doesn't come from a grid cell each run -- its value
+  // is baked onto the node type itself (NodeTemplate.defaults, base64), so
+  // it needs an uploaded image right here in the wizard instead of a
+  // per-instance picker. See core/node_types.is_slot_field on the backend.
+  fixed: boolean;
+  fixedImage: FixedImagePayload | null;
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      resolve(result.slice(result.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
 }
 
 const ABSENT = "__absent__";
@@ -119,10 +142,21 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
     if (!slugTouched) setNodeTypeSlug(slugify(value));
   };
 
-  const addInputSlot = () => setInputSlots((s) => [...s, { label: `Image ${s.length + 1}`, nodeId: "" }]);
+  const addInputSlot = () => setInputSlots((s) => [...s, { label: `Image ${s.length + 1}`, nodeId: "", fixed: false, fixedImage: null }]);
   const removeInputSlot = (i: number) => setInputSlots((s) => s.filter((_, idx) => idx !== i));
+  const setFixedImageFile = async (i: number, file: File) => {
+    const dataBase64 = await readFileAsBase64(file);
+    setInputSlots((s) => s.map((x, idx) => (idx === i ? { ...x, fixedImage: { fileName: file.name, sizeBytes: file.size, dataBase64 } } : x)));
+  };
 
-  const templateImageFields = mode.kind === "add-instance" ? slotFields(mode.template.param_schema) : [];
+  // Every image/file field this template declares, fixed or not -- add-instance
+  // mode has to map each one to a LoadImage node in the newly uploaded
+  // workflow (a fixed field still needs its own param_mapping entry per
+  // backend, see node_type_authoring.add_validated_capability), it just
+  // doesn't need a fresh upload since the baked bytes already live in
+  // NodeTemplate.defaults and apply to every backend the same way.
+  const templateImageFields =
+    mode.kind === "add-instance" ? mode.template.param_schema.fields.filter((f) => f.type === "image" || f.type === "file") : [];
   const templateOtherFields = mode.kind === "add-instance" ? mode.template.param_schema.fields.filter((f) => f.type !== "image" && f.type !== "file") : [];
 
   // Same complaint as "create" mode's Detected fields, mirrored here: this
@@ -243,6 +277,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
 
   const hasUnresolvedField = mode.kind === "add-instance" && Object.values(fieldResolutions).some((r) => r === "unresolved");
   const missingTitlesCount = mode.kind === "create" ? missingTitlesCreate.length : missingTitlesAddInstance.length;
+  const missingFixedImages = mode.kind === "create" ? inputSlots.filter((s) => s.fixed && !s.fixedImage) : [];
 
   // analysis.duplicate_titles (from the backend) flags every title collision
   // among *all* detected fields, computed once at analyze time -- it has no
@@ -288,7 +323,13 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
       if (!node) throw new Error(`Input slot "${slot.label}" has no assigned node.`);
       if (!node.title) throw new Error(`The LoadImage node assigned to "${slot.label}" has no title in ComfyUI -- rename it and re-export.`);
       const fieldName = `image_${i + 1}`;
-      paramFields.push({ name: fieldName, type: "image", label: slot.label, required: true });
+      if (slot.fixed) {
+        if (!slot.fixedImage) throw new Error(`"${slot.label}" is marked fixed but has no uploaded image.`);
+        paramFields.push({ name: fieldName, type: "image", label: slot.label, fixed: true });
+        defaults[fieldName] = slot.fixedImage.dataBase64;
+      } else {
+        paramFields.push({ name: fieldName, type: "image", label: slot.label, required: true });
+      }
       paramMapping[fieldName] = { node_id: node.node_id, title: node.title, input_key: "image" };
     });
 
@@ -369,7 +410,8 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
     }
   };
 
-  const canApprove = analysis && !saving && missingTitlesCount === 0 && activeDuplicateTitles.length === 0 && !hasUnresolvedField;
+  const canApprove =
+    analysis && !saving && missingTitlesCount === 0 && activeDuplicateTitles.length === 0 && !hasUnresolvedField && missingFixedImages.length === 0;
 
   return (
     <div className="settings-section">
@@ -430,6 +472,16 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
                       value={slot.label}
                       onChange={(e) => setInputSlots((s) => s.map((x, idx) => (idx === i ? { ...x, label: e.target.value } : x)))}
                     />
+                    <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title={t("wizard.fixedHint")}>
+                      <input
+                        type="checkbox"
+                        checked={slot.fixed}
+                        onChange={(e) =>
+                          setInputSlots((s) => s.map((x, idx) => (idx === i ? { ...x, fixed: e.target.checked, fixedImage: e.target.checked ? x.fixedImage : null } : x)))
+                        }
+                      />
+                      {t("wizard.fixed")}
+                    </label>
                     <button onClick={() => removeInputSlot(i)}>{t("common.remove")}</button>
                   </div>
                 ))}
@@ -497,6 +549,23 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
                     </option>
                   ))}
                 </select>
+                {slot.fixed && (
+                  <div className="inline-form" style={{ marginTop: 0 }}>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) setFixedImageFile(i, file);
+                      }}
+                    />
+                    {slot.fixedImage && (
+                      <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                        {t("wizard.fixedUploaded", { name: slot.fixedImage.fileName, size: Math.ceil(slot.fixedImage.sizeBytes / 1024) })}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             ))}
 
@@ -664,6 +733,11 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
           {missingTitlesCount > 0 && (
             <div className="error-text">{t("wizard.missingTitles")}</div>
           )}
+          {missingFixedImages.map((slot) => (
+            <div key={slot.label} className="error-text">
+              {t("wizard.fixedMissing", { label: slot.label })}
+            </div>
+          ))}
           {saveError && <div className="error-text">{saveError}</div>}
 
           <div className="node-actions">

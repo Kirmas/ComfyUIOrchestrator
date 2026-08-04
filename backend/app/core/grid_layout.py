@@ -10,7 +10,7 @@ uses it (_ensure_output_binding, worker/_actual_row_span).
 """
 from sqlalchemy import select
 
-from app.core.node_types import resolve_effective_template
+from app.core.node_types import resolve_effective_template, slot_count
 from app.core.track_order import ordered_tracks
 from app.db.models import Node, NodeKind, NodeStatus, Track
 
@@ -76,8 +76,6 @@ async def compute_layout(db, project_id, dashboard_id=None) -> dict:
         if n.kind != NodeKind.workflow:
             continue
         effective = await resolve_effective_template(db, n)
-        fields = (effective.param_schema if effective else {}).get("fields", [])
-        slot_count = len([f for f in fields if f.get("type") in ("image", "file")])
         # desired = enough rows to reach every input slot AND the furthest
         # materialized output. NOT `1 + spawned tracks`: that counted candidate
         # tracks even after their output moved or was discarded, so an emptied
@@ -85,7 +83,7 @@ async def compute_layout(db, project_id, dashboard_id=None) -> dict:
         # then couldn't remove (they read as "in the span" -- 2026-07-23). The
         # actual outputs are already covered by max_output_offset, so an empty
         # spawned track no longer stretches the card.
-        desired = max(slot_count, max_output_offset.get(n.id, 0) + 1, 1)
+        desired = max(slot_count(effective.param_schema if effective else {}), max_output_offset.get(n.id, 0) + 1, 1)
 
         # Mirrors the OLD frontend rowSpanByNode exactly: grow toward desired,
         # stopping only at the first row below whose own column is already

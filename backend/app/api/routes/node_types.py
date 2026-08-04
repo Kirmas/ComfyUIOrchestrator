@@ -15,8 +15,8 @@ from app.core.node_type_authoring import (
     AuthoringError,
     add_validated_capability,
     create_validated_node_type,
-    slot_count,
 )
+from app.core.node_types import slot_count
 from app.db.base import get_db
 from app.db.models import Backend, Capability, NodeTemplate
 from app.schemas.schemas import AddCapabilityRequest, CreateNodeTypeRequest

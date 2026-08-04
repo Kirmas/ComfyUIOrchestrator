@@ -12,7 +12,11 @@ param_schema/param_mapping JSON:
   FluxKontextMultiReferenceLatentMethod, timestep-range nodes, ControlNet
   applies) before it reaches the actual encoder, so the trace follows
   through any chain of single-link pass-through nodes until it lands on one
-  of PROMPT_CLASS_TYPES (or gives up -- see _trace_prompt_node).
+  of PROMPT_CLASS_TYPES (or gives up -- see _trace_prompt_node). A titled
+  switch (SWITCH_BRANCH_INPUT_KEYS, e.g. ComfySwitchNode picking between
+  "use reference image or not") has two data-valued branches instead of one
+  link, so the trace tries each branch in turn rather than giving up on the
+  link-count check.
 - Known custom nodes with directly-useful literal widgets (e.g.
   ResolutionSelector.aspect_ratio/megapixels) -- same idea as the KSampler
   literals above, just keyed by class_type instead of assuming one sampler.
@@ -159,6 +163,16 @@ SWITCH_CLASS_TYPES: dict[str, str] = {
     "ComfySwitchNode": "switch",
 }
 
+# The same switch nodes' *data* branches -- keyed by class_type -> (on_true
+# input key, on_false input key). Used only by _trace_prompt_node: a switch
+# has two link-valued data inputs plus its gate, so it fails the generic
+# "exactly one link" pass-through test even though it very much is one for
+# tracing purposes (both branches commonly converge on the same encoder, as
+# in a "use reference image or not" toggle around one shared prompt).
+SWITCH_BRANCH_INPUT_KEYS: dict[str, tuple[str, str]] = {
+    "ComfySwitchNode": ("on_true", "on_false"),
+}
+
 # Well-known nodes whose widget bundles several scalars into one dict-valued
 # input, keyed by class_type -> [(input_key, field_key_prefix, label_prefix)].
 # Each key of the dict becomes its own DetectedField ("<prefix>_<subkey>"),
@@ -212,6 +226,14 @@ def _trace_prompt_node(workflow_json: dict, node_id: str, depth: int = 0) -> tup
         return None
     links = [v for v in inputs.values() if _is_link(v)]
     if len(links) != 1:
+        branch_keys = SWITCH_BRANCH_INPUT_KEYS.get(class_type)
+        if branch_keys is not None:
+            for branch_key in branch_keys:
+                branch_link = inputs.get(branch_key)
+                if _is_link(branch_link):
+                    traced = _trace_prompt_node(workflow_json, branch_link[0], depth + 1)
+                    if traced is not None:
+                        return traced
         return None
     return _trace_prompt_node(workflow_json, links[0][0], depth + 1)
 
@@ -234,6 +256,14 @@ class DetectedField:
     # Filled in by apply_combo_options() when the backend says this input is a
     # combo widget; None for a free-form one. type becomes "enum" alongside it.
     options: list[str] | None = None
+    # True for a field returned by variable_text_fields() rather than
+    # find_editable_text_fields(): it's already a param_schema variable
+    # (settable per node instance via Node.params), so editing it here changes
+    # the *default* a never-touched instance starts with, not a baked literal.
+    # node_id/input_key are still populated (from param_mapping) for display,
+    # but the write path is entirely different -- see
+    # update_variable_default vs update_capability_text_field.
+    is_variable: bool = False
 
 
 @dataclass
@@ -292,6 +322,36 @@ def find_editable_text_fields(workflow_json: dict, param_mapping: dict) -> list[
         title = (node.get("_meta") or {}).get("title") or class_type or node_id
         fields.append(
             DetectedField(key=_slugify(f"{title}_{node_id}"), label=title, type="text", node_id=node_id, input_key=text_key, default=value)
+        )
+    return fields
+
+
+def variable_text_fields(param_schema: dict | None, param_mapping: dict) -> list[DetectedField]:
+    """The complement of find_editable_text_fields(): text-type fields a node
+    type's param_schema already exposes as variables (settable per node
+    instance -- see core/node_types.py). A capability's baked workflow_json
+    has no per-instance concept, so once a prompt is a variable there's
+    nothing left there to edit; what's still worth editing is the *default*
+    a never-touched instance starts with (param_schema field's own "default"),
+    which is what update_variable_default writes. node_id/input_key are
+    carried along from param_mapping purely for display -- this never reads
+    or writes workflow_json."""
+    mapped = param_mapping or {}
+    fields: list[DetectedField] = []
+    for field in (param_schema or {}).get("fields", []):
+        if field.get("type") != "text":
+            continue
+        target = mapped.get(field["name"], {})
+        fields.append(
+            DetectedField(
+                key=field["name"],
+                label=field.get("label") or field["name"],
+                type="text",
+                node_id=str(target.get("node_id", "")),
+                input_key=str(target.get("input_key", "")),
+                default=field.get("default"),
+                is_variable=True,
+            )
         )
     return fields
 

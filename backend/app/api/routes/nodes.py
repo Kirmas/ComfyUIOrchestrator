@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.node_types import resolve_effective_template, sync_legacy_fields
+from app.core.node_types import resolve_effective_template, slot_count, sync_legacy_fields
 from app.api.routes.dashboards import enforce_pointer_deletion
 from app.core.grid_scope import scope_start_kind, set_scope_start_kind
 from app.core.queue import job_queue
@@ -184,11 +184,9 @@ async def _actual_span(db: AsyncSession, node: Node, ordered: list[Track], pos: 
     1 + spawned tracks), capped at the first row below whose own column is
     already taken. Same formula as worker/tasks.py's _actual_row_span."""
     effective = await resolve_effective_template(db, node)
-    fields = (effective.param_schema if effective else {}).get("fields", [])
-    slot_count = len([f for f in fields if f.get("type") in ("image", "file")])
     spawned_result = await db.execute(select(func.count()).select_from(Track).where(Track.spawned_from_node_id == node.id))
     spawned_count = spawned_result.scalar_one()
-    desired = max(slot_count, 1 + spawned_count, 1)
+    desired = max(slot_count(effective.param_schema if effective else {}), 1 + spawned_count, 1)
     start = pos.get(node.track_id)
     if start is None or desired <= 1:
         return 1
@@ -217,10 +215,8 @@ async def ensure_span_rows(db: AsyncSession, workflow_node: Node) -> None:
     effective = await resolve_effective_template(db, workflow_node)
     if effective is None:
         return
-    fields = (effective.param_schema or {}).get("fields", [])
-    slot_count = len([f for f in fields if f.get("type") in ("image", "file")])
     spawned = await db.execute(select(func.count()).select_from(Track).where(Track.spawned_from_node_id == workflow_node.id))
-    desired = max(slot_count, 1 + spawned.scalar_one(), 1)
+    desired = max(slot_count(effective.param_schema), 1 + spawned.scalar_one(), 1)
     if desired <= 1:
         return
 
@@ -371,10 +367,8 @@ async def _desired_span(db: AsyncSession, workflow_node: Node) -> int:
     """max(image/file input slots, 1 + spawned tracks) -- what the workflow's
     card wants to be tall. Shared by the growth / span-shift / pick helpers."""
     effective = await resolve_effective_template(db, workflow_node)
-    fields = (effective.param_schema if effective else {}).get("fields", [])
-    slot_count = len([f for f in fields if f.get("type") in ("image", "file")])
     spawned = await db.execute(select(func.count()).select_from(Track).where(Track.spawned_from_node_id == workflow_node.id))
-    return max(slot_count, 1 + spawned.scalar_one(), 1)
+    return max(slot_count(effective.param_schema if effective else {}), 1 + spawned.scalar_one(), 1)
 
 
 async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node | None:

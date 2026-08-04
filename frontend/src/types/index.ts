@@ -45,6 +45,11 @@ export interface ParamField {
   // a capability whose workflow doesn't wire it up just omits it from its
   // param_mapping, and the value is silently ignored for that backend.
   optional?: boolean;
+  // image/file only: this field's value is a constant baked onto the node
+  // type itself (NodeTemplate.defaults[name], base64) rather than something
+  // each grid cell picks -- see slotFields() in templateUtils.ts, which is
+  // what excludes it from row-span/per-cell resolution.
+  fixed?: boolean;
   default?: unknown;
   min?: number;
   max?: number;
@@ -319,6 +324,11 @@ export interface DetectedField {
   // /object_info at analyze time -- a workflow.json records the picked value
   // but never the list it came from. Present => type is "enum".
   options?: string[] | null;
+  // True => this is already a param_schema variable (settable per node
+  // instance), not a baked literal -- CapabilityTextFieldsModal edits its
+  // *default* via a different endpoint. See workflow_analyzer.py's
+  // variable_text_fields.
+  is_variable?: boolean;
 }
 
 export interface WorkflowAnalysis {
