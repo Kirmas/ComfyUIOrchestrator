@@ -20,7 +20,19 @@ from app.core.template_engine import validate_params
 from app.core.track_order import ordered_tracks, scope_of, splice_after
 from app.core.ws_manager import ws_manager
 from app.db.base import async_session_maker
-from app.db.models import ApiUsageLog, Asset, Backend, ExecutionType, Job, JobStatusEnum, Node, NodeKind, NodeStatus, Track
+from app.db.models import (
+    ApiUsageLog,
+    Asset,
+    Backend,
+    Dashboard,
+    ExecutionType,
+    Job,
+    JobStatusEnum,
+    Node,
+    NodeKind,
+    NodeStatus,
+    Track,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +62,26 @@ async def selected_or_latest_output(db, node: Node) -> Asset | None:
     needs to follow that pointer instead of querying Asset.node_id, which
     would come up empty and silently drop the slot (2026-07-18 incident:
     native.character_chart's compose KeyError'd on a missing head_1 because
-    that cell held a refasset)."""
+    that cell held a refasset).
+
+    asset.subgraph is the same situation for a different reason: a smart
+    pointer owns no Asset row either -- the picture it stands for is
+    whichever asset inside its sub-dashboard was chosen as the result
+    (Dashboard.result_asset_id, see api/routes/dashboards.py's
+    set_dashboard_result), not anything hung off the pointer node itself. A
+    position-based lookup landing on a subgraph cell (e.g. a workflow's image
+    slot pointed at it) needs to follow that instead, or it silently resolves
+    to no image -- same failure mode as the refasset case above."""
     if node.node_type == "asset.refasset":
         ref = (node.inputs or [{}])[0]
         return await _explicit_ref_asset(db, ref)
+    if node.node_type == "asset.subgraph":
+        if node.subgraph_dashboard_id is None:
+            return None
+        dashboard = await db.get(Dashboard, node.subgraph_dashboard_id)
+        if dashboard is None or dashboard.result_asset_id is None:
+            return None
+        return await db.get(Asset, dashboard.result_asset_id)
     result = await db.execute(select(Asset).where(Asset.node_id == node.id).order_by(Asset.created_at))
     assets = list(result.scalars().all())
     if not assets:

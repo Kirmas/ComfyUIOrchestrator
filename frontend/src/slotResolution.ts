@@ -1,4 +1,4 @@
-import { assetsApi } from "./api/endpoints";
+import { assetsApi, dashboardsApi } from "./api/endpoints";
 import { useProjectStore } from "./state/projectStore";
 import type { Asset, InputRef, NodeItem, Track } from "./types";
 
@@ -9,6 +9,23 @@ import type { Asset, InputRef, NodeItem, Track } from "./types";
 function selectedOrLatest(assets: Asset[]): Asset | null {
   if (assets.length === 0) return null;
   return assets.find((a) => a.selected) ?? assets[assets.length - 1];
+}
+
+/** Frontend mirror of selected_or_latest_output's asset.subgraph branch
+ * (worker/tasks.py): a smart pointer owns no Asset row of its own -- the
+ * picture it stands for is whichever asset its sub-dashboard chose as its
+ * result (Dashboard.result_asset_id). A position-based lookup that lands on
+ * a subgraph cell (e.g. an image slot pointed at it, as in the screenshot
+ * that prompted this) must follow that instead of querying outputs for the
+ * pointer node itself, which is always empty. */
+async function faceOf(node: NodeItem, outputsFor: (nodeId: string) => Promise<Asset[]>): Promise<Asset | null> {
+  if (node.node_type === "asset.subgraph") {
+    if (!node.subgraph_dashboard_id) return null;
+    const dashboard = await dashboardsApi.get(node.subgraph_dashboard_id).catch(() => null);
+    if (!dashboard?.result_asset_id) return null;
+    return assetsApi.get(dashboard.result_asset_id).catch(() => null);
+  }
+  return selectedOrLatest(await outputsFor(node.id));
 }
 
 function nearestAssetNodeBefore(nodes: NodeItem[], trackId: string, beforeStepIndex: number): NodeItem | null {
@@ -47,7 +64,7 @@ export async function resolveSlotAsset(
   if (ref.type === "self_prev") {
     const priorAssetNode = nearestAssetNodeBefore(Object.values(nodesById), node.track_id, node.step_index);
     if (!priorAssetNode) return null;
-    return selectedOrLatest(await outputsFor(priorAssetNode.id));
+    return faceOf(priorAssetNode, outputsFor);
   }
 
   if (ref.type === "track_below_prev") {
@@ -57,7 +74,7 @@ export async function resolveSlotAsset(
     if (!below) return null;
     const priorAssetNode = nearestAssetNodeBefore(Object.values(nodesById), below.id, node.step_index + 1);
     if (!priorAssetNode) return null;
-    return selectedOrLatest(await outputsFor(priorAssetNode.id));
+    return faceOf(priorAssetNode, outputsFor);
   }
 
   if (ref.type === "cell_index") {
@@ -76,7 +93,7 @@ export async function resolveSlotAsset(
       return tracks.find((t) => t.id === n.track_id)?.row_index === targetRow;
     });
     if (!assetNode) return null;
-    return selectedOrLatest(await outputsFor(assetNode.id));
+    return faceOf(assetNode, outputsFor);
   }
 
   return null; // "text" -- no image
