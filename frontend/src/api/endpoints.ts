@@ -1,4 +1,4 @@
-import { api } from "./client";
+import { api, getApiBaseUrl, getApiToken } from "./client";
 import type {
   Annotation,
   Asset,
@@ -9,16 +9,21 @@ import type {
   Capability,
   Dashboard,
   DetectedField,
+  DirBrowseResult,
   GridLayout,
   IdeaText,
   InputRef,
   Job,
   MacroResolveResult,
+  MigrationStatus,
   NodeItem,
   NodeKind,
   NodeTemplate,
+  OrphanScanResult,
   Project,
+  StorageInfo,
   Track,
+  UnownedAssetScanResult,
   WorkflowAnalysis,
 } from "../types";
 
@@ -209,6 +214,10 @@ export const assetsApi = {
   move: (id: string, nodeId: string) => api.post<Asset>(`/api/assets/${id}/move`, { node_id: nodeId }),
   setTags: (id: string, tags: string[]) => api.patch<Asset>(`/api/assets/${id}/tags`, { tags }),
   remove: (id: string) => api.delete(`/api/assets/${id}`),
+  // Same shape as build_asset_url server-side -- for a raw id with no
+  // pre-built AssetRead.url around (e.g. Settings' unowned-assets scan,
+  // which only returns bare ids/paths, not full asset reads).
+  fileUrl: (id: string) => `${getApiBaseUrl()}/api/assets/${id}/file?token=${encodeURIComponent(getApiToken())}`,
 };
 
 // The idea board and the project asset library it owns (roadmap.md §1). Note
@@ -247,4 +256,23 @@ export const jobsApi = {
 export const logsApi = {
   tail: (lines = 300) => api.get<{ lines: string[] }>(`/api/logs?lines=${lines}`),
   clear: () => api.delete("/api/logs"),
+};
+
+export const systemApi = {
+  storage: () => api.get<StorageInfo>("/api/system/storage"),
+  browse: (path?: string) => api.get<DirBrowseResult>(`/api/system/storage/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`),
+  mkdir: (path: string) => api.post<{ path: string }>("/api/system/storage/browse/mkdir", { path }),
+  migrate: (newPath: string) => api.post<MigrationStatus>("/api/system/storage/migrate", { new_path: newPath }),
+  migrationStatus: () => api.get<MigrationStatus>("/api/system/storage/migrate/status"),
+
+  orphans: () => api.get<OrphanScanResult>("/api/system/storage/orphans"),
+  orphanPreviewUrl: (path: string) =>
+    `${getApiBaseUrl()}/api/system/storage/orphans/preview?path=${encodeURIComponent(path)}&token=${encodeURIComponent(getApiToken())}`,
+  deleteOrphan: (path: string) => api.post<void>("/api/system/storage/orphans/delete", { path }),
+  adoptOrphan: (path: string, projectId: string) => api.post<Asset>("/api/system/storage/orphans/adopt", { path, project_id: projectId }),
+
+  unownedAssets: () => api.get<UnownedAssetScanResult>("/api/system/unowned-assets"),
+  deleteUnownedAsset: (assetId: string) => api.post<void>("/api/system/unowned-assets/delete", { asset_id: assetId }),
+  adoptUnownedAsset: (assetId: string, projectId: string) =>
+    api.post<Asset>("/api/system/unowned-assets/adopt", { asset_id: assetId, project_id: projectId }),
 };

@@ -350,3 +350,77 @@ export interface ParamMappingEntry {
   title: string | null;
   input_key: string;
 }
+
+// Settings' Storage section (backend/app/api/routes/system.py,
+// core/storage_migration.py) -- picking/migrating MEDIA_DIR from the UI.
+export interface StorageInfo {
+  media_dir: string;
+  disk: { total: number; used: number; free: number };
+  size_bytes: number;
+  file_count: number;
+  asset_count: number;
+}
+
+export interface DirEntry {
+  name: string;
+  path: string;
+  writable: boolean;
+}
+
+export interface DirBrowseResult {
+  path: string;
+  parent: string | null;
+  entries: DirEntry[];
+}
+
+export type MigrationStatusValue = "idle" | "copying" | "verifying" | "done" | "error";
+
+export interface MigrationStatus {
+  status: MigrationStatusValue;
+  new_path: string | null;
+  files_done: number;
+  files_total: number;
+  bytes_done: number;
+  bytes_total: number;
+  error: string | null;
+}
+
+// Settings' orphan-file scan (core/storage_gc.py) -- files under MEDIA_DIR
+// with no matching Asset.storage_key row, left behind by a cascade delete
+// (Project/Track) that cleaned up DB rows but never the files.
+export interface OrphanFile {
+  path: string;
+  size_bytes: number;
+  modified_at: number;
+  mime_type_guess: string;
+}
+
+export interface OrphanScanResult {
+  orphan_files: OrphanFile[];
+  missing_file_count: number;
+  // Non-empty means the scan is incomplete (e.g. couldn't stat a path) --
+  // "0 orphans" must never be read as "everything's clean" when this isn't
+  // empty (2026-08-07 incident: a symlinked subdirectory was silently
+  // invisible to every count until this was added).
+  scan_errors: string[];
+}
+
+// A real Asset row (real file, real DB row) with neither node_id nor
+// project_id set -- invisible to every UI surface (Board lists project_id
+// rows, Grid lists node_id rows). Distinct from OrphanFile: this one IS
+// tracked, it's just unreachable from anywhere.
+export interface UnownedAsset {
+  id: string;
+  storage_key: string;
+  mime_type: string;
+  size_bytes: number | null;
+  created_at: string;
+  // True if some asset.refasset node or dashboard result still points at
+  // this id despite the missing project_id -- delete is refused for these,
+  // only adopt is offered.
+  referenced: boolean;
+}
+
+export interface UnownedAssetScanResult {
+  unowned_assets: UnownedAsset[];
+}

@@ -80,6 +80,44 @@ export const uk: Record<TKey, string> = {
   "settings.langEn": "English",
   "settings.langUk": "Українська",
 
+  // --- Settings: storage location / migration --------------------------
+  "storage.title": "Сховище",
+  "storage.currentPath": "Поточне розташування",
+  "storage.diskUsageTitle": "Використання диска",
+  "storage.diskUsage": "{used} з {total} використано на цьому диску, {free} вільно",
+  "storage.mediaSize": "{size} у {files} файлах ({assets} асетів)",
+  "storage.changeLocation": "Змінити розташування…",
+  "storage.pathPlaceholder": "/шлях/до/папки",
+  "storage.go": "Перейти",
+  "storage.up": "вгору",
+  "storage.notWritable": "Немає прав на запис",
+  "storage.noSubfolders": "Тут немає підпапок",
+  "storage.folderNamePlaceholder": "Назва нової папки",
+  "storage.createFolder": "Створити папку",
+  "storage.useThisFolder": "Обрати цю папку",
+  "storage.confirmBody": "Скопіювати {files} файлів ({size}) з {old} у {target}, перевірити, що кожен файл збігається, і лише потім видалити стару копію. Після завершення це не можна скасувати. Продовжити?",
+  "storage.confirmButton": "Скопіювати і перемкнути",
+  "storage.phaseCopying": "Копіювання файлів…",
+  "storage.phaseVerifying": "Перевірка копії (звіряємо старе ⇄ нове)…",
+  "storage.progressCounts": "{filesDone} / {filesTotal} файлів — {bytesDone} / {bytesTotal}",
+  "storage.migrationDone": "Сховище перенесено в {path}.",
+  "storage.migrationError": "Перенесення не вдалося: {error}",
+  "storage.oldUntouched": "Нічого не видалено — оригінальні файли не зачеплені.",
+
+  // --- Settings: пошук потеряшок (файли без рядка асета + рядки асетів без
+  // власника -- два різні механізми під капотом, один спільний список, юзеру
+  // не треба знати про різницю) -------------------------------------------
+  "storage.scan": "Сканувати на потеряшки",
+  "storage.scanning": "Сканування…",
+  "storage.leftoverHint": "Файли чи рядки асетів, які лишаються після того, як щось не прибирає за собою до кінця (видалений проєкт/трек, старий невикористовуваний шлях завантаження). Усе тут запускається вручну, нічого не працює автоматично.",
+  "storage.leftoverSummary": "{count} потеряшок, {size}",
+  "storage.leftoverMissingCount": "{count} рядків асетів вказують на файли, яких уже немає на диску",
+  "storage.leftoverEmpty": "Нічого не знайдено.",
+  "storage.leftoverScanIncomplete": "Скан не зміг перевірити {count} шлях(и) — вважай цей результат неповним, а не чистим:",
+  "storage.adopt": "Додати в бібліотеку проєкту",
+  "storage.stillReferenced": "усе ще використовується в гріді — можна лише додати в проєкт, не видалити",
+  "storage.confirmDeleteLeftover": "Остаточно видалити {path}? Це неможливо скасувати.",
+
   // --- Settings: backends ---------------------------------------------
   "settings.deleteFailed": "Не вдалося видалити.",
   "settings.loadFailed": "Не вдалося завантажити.",

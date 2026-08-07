@@ -689,7 +689,10 @@ async def _materialize_job_result(db, job: Job, node: Node, effective, instance,
         backend_name = backend.name if backend else None
 
     for asset_ref in assets:
-        key = storage.put_object(asset_ref.data, asset_ref.mime_type, prefix=f"nodes/{asset_node.id}")
+        # projects/<project_id>/nodes/<node_id>/... -- see nodes.py's
+        # upload_asset_to_node for why (project_id is already a parameter
+        # here, no extra lookup needed).
+        key = storage.put_object(asset_ref.data, asset_ref.mime_type, prefix=f"projects/{project_id}/nodes/{asset_node.id}")
         meta = dict(asset_ref.meta or {})
         if backend_name:
             meta["backend_name"] = backend_name

@@ -170,10 +170,33 @@ async def update_board_item(item_id: uuid.UUID, payload: BoardItemUpdate, db: As
 @router.delete("/board-items/{item_id}", status_code=204)
 async def delete_board_item(item_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """Connectors and comments attached to this sticker go with it (both self-FKs
-    cascade) rather than being left pointing at coordinates that mean nothing."""
+    cascade) rather than being left pointing at coordinates that mean nothing.
+
+    An image/audio/video sticker OWNS its asset -- one sticker, one dedicated
+    Asset row, never shared (Board.tsx's uploadFiles always creates a fresh
+    Asset and exactly one sticker together in the same call; nothing ever
+    attaches a second sticker to an already-existing asset_id). So deleting
+    the sticker deletes its file and its Asset row too, the same as
+    delete_node already does for a grid cell's own outputs -- fixes the
+    2026-08-07 incident where board-item delete only removed the board_items
+    row, leaving the file and the (now unreachable-from-any-UI) Asset row
+    behind forever. This deliberately does NOT check whether some grid
+    asset.refasset elsewhere still points at this asset id: a dangling
+    refasset already renders nothing rather than erroring (see
+    Dashboard.result_asset_id's own docstring on the same graceful-degradation
+    behavior) -- the sticker is the owner here, a grid reference to it is not."""
     item = await db.get(BoardItem, item_id)
     if not item:
         raise HTTPException(404, "Board item not found")
+    if item.asset_id:
+        asset = await db.get(Asset, item.asset_id)
+        if asset:
+            get_storage().delete_object(asset.storage_key)
+            # Cascades to delete `item` too (assets.id -> board_items.asset_id
+            # is ON DELETE CASCADE) -- no separate db.delete(item) needed.
+            await db.delete(asset)
+            await db.commit()
+            return
     await db.delete(item)
     await db.commit()
 
