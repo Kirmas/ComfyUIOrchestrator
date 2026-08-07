@@ -83,6 +83,44 @@ export const en = {
   "settings.langEn": "English",
   "settings.langUk": "Українська",
 
+  // --- Settings: storage location / migration --------------------------
+  "storage.title": "Storage",
+  "storage.currentPath": "Current location",
+  "storage.diskUsageTitle": "Disk usage",
+  "storage.diskUsage": "{used} of {total} used on this disk, {free} free",
+  "storage.mediaSize": "{size} in {files} files ({assets} assets)",
+  "storage.changeLocation": "Change location…",
+  "storage.pathPlaceholder": "/path/to/folder",
+  "storage.go": "Go",
+  "storage.up": "up",
+  "storage.notWritable": "Not writable by the app",
+  "storage.noSubfolders": "No subfolders here",
+  "storage.folderNamePlaceholder": "New folder name",
+  "storage.createFolder": "Create folder",
+  "storage.useThisFolder": "Use this folder",
+  "storage.confirmBody": "Copy {files} files ({size}) from {old} to {target}, verify every file matches, then delete the old copy. This can't be undone once it finishes. Continue?",
+  "storage.confirmButton": "Copy and switch",
+  "storage.phaseCopying": "Copying files…",
+  "storage.phaseVerifying": "Verifying copy (comparing old ⇄ new)…",
+  "storage.progressCounts": "{filesDone} / {filesTotal} files — {bytesDone} / {bytesTotal}",
+  "storage.migrationDone": "Storage moved to {path}.",
+  "storage.migrationError": "Migration failed: {error}",
+  "storage.oldUntouched": "Nothing was deleted — the original files are untouched.",
+
+  // --- Settings: leftover scan (files with no asset row + asset rows with
+  // no owner -- two different backend mechanisms, one combined list, the
+  // user doesn't need to know which is which) ---------------------------
+  "storage.scan": "Scan for leftovers",
+  "storage.scanning": "Scanning…",
+  "storage.leftoverHint": "Files or asset rows left behind by things that don't clean up fully after themselves (a deleted project/track, an old unused upload path). Always reviewed by hand, nothing here runs automatically.",
+  "storage.leftoverSummary": "{count} leftover items, {size}",
+  "storage.leftoverMissingCount": "{count} asset rows point at files that no longer exist on disk",
+  "storage.leftoverEmpty": "Nothing found.",
+  "storage.leftoverScanIncomplete": "The scan couldn't check {count} path(s) — treat this result as incomplete, not clean:",
+  "storage.adopt": "Add to project library",
+  "storage.stillReferenced": "still referenced by a grid cell — can only be added to a project, not deleted",
+  "storage.confirmDeleteLeftover": "Permanently delete {path}? This can't be undone.",
+
   // --- Settings: backends ---------------------------------------------
   "settings.deleteFailed": "Delete failed.",
   "settings.loadFailed": "Failed to load.",

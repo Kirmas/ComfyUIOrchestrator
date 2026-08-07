@@ -699,7 +699,13 @@ async def upload_asset_to_node(node_id: uuid.UUID, file: UploadFile, db: AsyncSe
     mime_type = file.content_type or "application/octet-stream"
     kind = AssetKind.image if mime_type.startswith("image/") else AssetKind.other
     storage = get_storage()
-    key = storage.put_object(data, mime_type, prefix=f"nodes/{node.id}")
+    # projects/<project_id>/nodes/<node_id>/... -- nests under the owning
+    # project instead of a global nodes/ bucket, so a project's whole disk
+    # footprint (board library + every cell's outputs) lives under one
+    # projects/<id> subtree (2026-08-07, see core/node_path_migration.py for
+    # the one-off reorg of pre-existing rows).
+    track = await db.get(Track, node.track_id)
+    key = storage.put_object(data, mime_type, prefix=f"projects/{track.project_id}/nodes/{node.id}")
     asset = Asset(node_id=node.id, storage_key=key, mime_type=mime_type, kind=kind, selected=True, meta={})
     db.add(asset)
     node.status = NodeStatus.done

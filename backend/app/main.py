@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import annotations, assets, backends, boards, capabilities, dashboards, health, jobs, logs, node_templates, node_types, nodes, projects, tracks, ws
+from app.api.routes import annotations, assets, backends, boards, capabilities, dashboards, health, jobs, logs, node_templates, node_types, nodes, projects, system, tracks, ws
 from app.config import get_settings
 from app.core.auth import auth_middleware
 from app.core.heartbeat import heartbeat_loop
@@ -70,6 +70,7 @@ def create_app() -> FastAPI:
         boards.router,
         node_types.router,
         dashboards.router,
+        system.router,
     ):
         app.include_router(router)
 

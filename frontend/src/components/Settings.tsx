@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { backendsApi, capabilitiesApi, nodeTemplatesApi } from "../api/endpoints";
+import { assetsApi, backendsApi, capabilitiesApi, nodeTemplatesApi, projectsApi, systemApi } from "../api/endpoints";
 import { NodeTypeDescription } from "./NodeTypeDescription";
-import type { Backend, Capability, DetectedField, NodeTemplate } from "../types";
+import type {
+  Backend,
+  Capability,
+  DetectedField,
+  DirBrowseResult,
+  MigrationStatus,
+  NodeTemplate,
+  Project,
+  StorageInfo,
+} from "../types";
 import { NodeTypeWizard } from "./NodeTypeWizard";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
 import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
@@ -50,6 +59,441 @@ function LanguageSection() {
         </select>
         <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("settings.languageHint")}</span>
       </div>
+    </div>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(1)} ${units[i]}`;
+}
+
+const MIGRATION_ACTIVE: MigrationStatus["status"][] = ["copying", "verifying"];
+
+/** One combined "leftover" list, shown after a scan: files with no Asset row
+ * (core/storage_gc.py's scan_orphans) and Asset rows with no owner
+ * (scan_unowned_assets) are two different backend mechanisms, but the user
+ * doesn't care about that split -- both are just "stuff the app forgot to
+ * clean up", so they're merged into one list here instead of two sections. */
+type LeftoverItem =
+  | { key: string; kind: "file"; path: string; size_bytes: number; mime_type_guess: string }
+  | { key: string; kind: "asset"; id: string; storage_key: string; mime_type: string; size_bytes: number | null; referenced: boolean };
+
+/** One row of the combined leftover list -- owns its own busy/error state so
+ * acting on one row never blocks or hides the rest. */
+function LeftoverRow({ item, projects, onRemoved }: { item: LeftoverItem; projects: Project[]; onRemoved: (item: LeftoverItem) => void }) {
+  const t = useT();
+  const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const label = item.kind === "file" ? item.path : item.storage_key;
+  const mime = item.kind === "file" ? item.mime_type_guess : item.mime_type;
+  const isImage = mime.startsWith("image/");
+  const referenced = item.kind === "asset" && item.referenced;
+  const thumbSrc = item.kind === "file" ? systemApi.orphanPreviewUrl(item.path) : assetsApi.fileUrl(item.id);
+
+  const del = async () => {
+    if (!window.confirm(t("storage.confirmDeleteLeftover", { path: label }))) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (item.kind === "file") await systemApi.deleteOrphan(item.path);
+      else await systemApi.deleteUnownedAsset(item.id);
+      onRemoved(item);
+    } catch (err) {
+      setError(describeError(err));
+      setBusy(false);
+    }
+  };
+  const adopt = async () => {
+    if (!projectId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (item.kind === "file") await systemApi.adoptOrphan(item.path, projectId);
+      else await systemApi.adoptUnownedAsset(item.id, projectId);
+      onRemoved(item);
+    } catch (err) {
+      setError(describeError(err));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid var(--border)" }}>
+      {isImage ? (
+        <img src={thumbSrc} alt="" style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />
+      ) : (
+        <div
+          style={{
+            width: 48,
+            height: 48,
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 10,
+            color: "var(--text-dim)",
+            border: "1px solid var(--border)",
+            borderRadius: 4,
+          }}
+        >
+          {mime.split("/")[0] || "?"}
+        </div>
+      )}
+      <div style={{ flex: 1, fontSize: 11, minWidth: 0 }}>
+        <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={label}>
+          {label}
+        </div>
+        <div style={{ color: "var(--text-dim)" }}>
+          {item.size_bytes != null ? formatBytes(item.size_bytes) : "?"}
+          {referenced && <span style={{ color: "var(--danger)", marginLeft: 6 }}>{t("storage.stillReferenced")}</span>}
+        </div>
+        {error && <div className="error-text">{error}</div>}
+      </div>
+      <select value={projectId} onChange={(e) => setProjectId(e.target.value)} disabled={busy || projects.length === 0}>
+        {projects.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </select>
+      <button disabled={busy || !projectId} onClick={adopt}>
+        {t("storage.adopt")}
+      </button>
+      <button disabled={busy || referenced} title={referenced ? t("storage.stillReferenced") : undefined} onClick={del}>
+        {t("common.deleteLower")}
+      </button>
+    </div>
+  );
+}
+
+/** Where generated/uploaded files live on disk (MEDIA_DIR, backend/app/config.py),
+ * moving that location, and finding leftovers the app forgot to clean up.
+ *
+ * Moving: see core/storage_migration.py's docstring for the copy ->
+ * independent hash-diff -> commit -> delete-old sequencing this mirrors.
+ * Nothing here is "permanent" (old files deleted, config rewritten) until
+ * the backend has already verified the new copy matches byte-for-byte; a
+ * failed/interrupted run always leaves the original files exactly as they
+ * were.
+ *
+ * Scanning: combines core/storage_gc.py's two GC mechanisms (files with no
+ * Asset row, Asset rows with no owner) into one list -- see LeftoverItem
+ * above for why they're not two separate sections. */
+function StorageSection() {
+  const t = useT();
+  const [storage, setStorage] = useState<StorageInfo | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [migration, setMigration] = useState<MigrationStatus | null>(null);
+  const pollRef = useRef<number | null>(null);
+
+  const [browsing, setBrowsing] = useState(false);
+  const [browse, setBrowse] = useState<DirBrowseResult | null>(null);
+  const [browseError, setBrowseError] = useState<string | null>(null);
+  const [manualPath, setManualPath] = useState("");
+  const [newFolderName, setNewFolderName] = useState("");
+  const [target, setTarget] = useState<string | null>(null);
+  const [migrateError, setMigrateError] = useState<string | null>(null);
+
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [leftovers, setLeftovers] = useState<{ items: LeftoverItem[]; missingFileCount: number; scanErrors: string[] } | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+
+  useEffect(() => {
+    projectsApi.list().then(setProjects).catch(() => {});
+  }, []);
+
+  const runScan = async () => {
+    setScanning(true);
+    setScanError(null);
+    try {
+      const [orphans, unowned] = await Promise.all([systemApi.orphans(), systemApi.unownedAssets()]);
+      const items: LeftoverItem[] = [
+        ...orphans.orphan_files.map((f) => ({ key: `file:${f.path}`, kind: "file" as const, ...f })),
+        ...unowned.unowned_assets.map((a) => ({ key: `asset:${a.id}`, kind: "asset" as const, ...a })),
+      ];
+      setLeftovers({ items, missingFileCount: orphans.missing_file_count, scanErrors: orphans.scan_errors });
+    } catch (err) {
+      setScanError(describeError(err));
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const removeLeftover = (item: LeftoverItem) => {
+    setLeftovers((s) => (s ? { ...s, items: s.items.filter((it) => it.key !== item.key) } : s));
+  };
+
+  const leftoverSize = leftovers ? leftovers.items.reduce((sum, it) => sum + (it.size_bytes ?? 0), 0) : 0;
+
+  const reloadStorage = () =>
+    systemApi
+      .storage()
+      .then((s) => {
+        setLoadError(null);
+        setStorage(s);
+      })
+      .catch((err) => setLoadError(describeError(err)));
+
+  const stopPolling = () => {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+  const startPolling = () => {
+    if (pollRef.current !== null) return;
+    pollRef.current = window.setInterval(async () => {
+      try {
+        const s = await systemApi.migrationStatus();
+        setMigration(s);
+        if (!MIGRATION_ACTIVE.includes(s.status)) {
+          stopPolling();
+          if (s.status === "done") reloadStorage();
+        }
+      } catch {
+        // transient poll failure -- next tick retries, no need to surface it
+      }
+    }, 1500);
+  };
+
+  useEffect(() => {
+    reloadStorage();
+    // Pick up a migration that was already running before this page loaded
+    // (e.g. a refresh mid-copy) instead of silently losing track of it.
+    systemApi
+      .migrationStatus()
+      .then((s) => {
+        setMigration(s);
+        if (MIGRATION_ACTIVE.includes(s.status)) startPolling();
+      })
+      .catch(() => {});
+    return stopPolling;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadDir = (path?: string) => {
+    systemApi
+      .browse(path)
+      .then((r) => {
+        setBrowse(r);
+        setBrowseError(null);
+        setManualPath(r.path);
+      })
+      .catch((err) => setBrowseError(describeError(err)));
+  };
+  const openBrowser = () => {
+    setBrowsing(true);
+    setBrowseError(null);
+    loadDir(undefined);
+  };
+  const createFolder = async () => {
+    if (!browse || !newFolderName.trim()) return;
+    try {
+      const path = `${browse.path.replace(/\/+$/, "")}/${newFolderName.trim()}`;
+      await systemApi.mkdir(path);
+      setNewFolderName("");
+      loadDir(path);
+    } catch (err) {
+      setBrowseError(describeError(err));
+    }
+  };
+  const chooseTarget = () => {
+    if (!browse) return;
+    setTarget(browse.path);
+    setBrowsing(false);
+  };
+  const startMigrate = async () => {
+    if (!target) return;
+    setMigrateError(null);
+    try {
+      const s = await systemApi.migrate(target);
+      setMigration(s);
+      setTarget(null);
+      startPolling();
+    } catch (err) {
+      setMigrateError(describeError(err));
+    }
+  };
+
+  const migrating = migration ? MIGRATION_ACTIVE.includes(migration.status) : false;
+  const filesPct = migration && migration.files_total > 0 ? (migration.files_done / migration.files_total) * 100 : 0;
+
+  return (
+    <div className="settings-section">
+      <h2>{t("storage.title")}</h2>
+      {loadError && <div className="error-text">{loadError}</div>}
+      {storage && (
+        <div style={{ fontSize: 12, display: "flex", flexDirection: "column", gap: 4 }}>
+          <div>
+            {t("storage.currentPath")}: <code>{storage.media_dir}</code>
+          </div>
+          <div className="progress-bar" title={t("storage.diskUsageTitle")}>
+            <div className="progress-bar-fill" style={{ width: `${(storage.disk.used / storage.disk.total) * 100}%` }} />
+          </div>
+          <div style={{ color: "var(--text-dim)" }}>
+            {t("storage.diskUsage", { used: formatBytes(storage.disk.used), total: formatBytes(storage.disk.total), free: formatBytes(storage.disk.free) })}
+          </div>
+          <div style={{ color: "var(--text-dim)" }}>
+            {t("storage.mediaSize", { size: formatBytes(storage.size_bytes), files: storage.file_count, assets: storage.asset_count })}
+          </div>
+        </div>
+      )}
+
+      {migrating && migration && (
+        <div style={{ marginTop: 10, fontSize: 12 }}>
+          <div>{migration.status === "copying" ? t("storage.phaseCopying") : t("storage.phaseVerifying")}</div>
+          <div className="progress-bar" style={{ marginTop: 4 }}>
+            <div className="progress-bar-fill" style={{ width: `${filesPct}%` }} />
+          </div>
+          <div style={{ color: "var(--text-dim)", marginTop: 2 }}>
+            {t("storage.progressCounts", {
+              filesDone: migration.files_done,
+              filesTotal: migration.files_total,
+              bytesDone: formatBytes(migration.bytes_done),
+              bytesTotal: formatBytes(migration.bytes_total),
+            })}
+          </div>
+        </div>
+      )}
+
+      {!migrating && migration?.status === "done" && (
+        <div style={{ marginTop: 10, fontSize: 12, color: "var(--success, #4caf50)" }}>
+          {t("storage.migrationDone", { path: migration.new_path ?? "" })}{" "}
+          <button onClick={() => setMigration(null)}>{t("common.close")}</button>
+        </div>
+      )}
+
+      {!migrating && migration?.status === "error" && (
+        <div style={{ marginTop: 10, fontSize: 12 }}>
+          <div className="error-text">{t("storage.migrationError", { error: migration.error ?? "" })}</div>
+          <div style={{ color: "var(--text-dim)" }}>{t("storage.oldUntouched")}</div>
+          <button style={{ marginTop: 4 }} onClick={() => setMigration(null)}>
+            {t("common.close")}
+          </button>
+        </div>
+      )}
+
+      {!migrating && !browsing && !target && !migrateError && (
+        <div className="node-actions" style={{ marginTop: 10 }}>
+          <button onClick={openBrowser}>{t("storage.changeLocation")}</button>
+          <button disabled={scanning} onClick={runScan}>
+            {scanning ? t("storage.scanning") : t("storage.scan")}
+          </button>
+        </div>
+      )}
+
+      {browsing && (
+        <div className="inline-form" style={{ flexDirection: "column", alignItems: "stretch", gap: 6, marginTop: 10 }}>
+          {browseError && <div className="error-text">{browseError}</div>}
+          <div style={{ display: "flex", gap: 6 }}>
+            <input style={{ flex: 1 }} value={manualPath} onChange={(e) => setManualPath(e.target.value)} placeholder={t("storage.pathPlaceholder")} />
+            <button onClick={() => loadDir(manualPath)}>{t("storage.go")}</button>
+          </div>
+          {browse && (
+            <>
+              <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 4 }}>
+                {browse.parent && (
+                  <div style={{ padding: "4px 8px", cursor: "pointer" }} onClick={() => loadDir(browse.parent!)}>
+                    .. ({t("storage.up")})
+                  </div>
+                )}
+                {browse.entries.map((entry) => (
+                  <div
+                    key={entry.path}
+                    style={{ padding: "4px 8px", cursor: "pointer", opacity: entry.writable ? 1 : 0.5 }}
+                    title={entry.writable ? undefined : t("storage.notWritable")}
+                    onClick={() => loadDir(entry.path)}
+                  >
+                    {entry.name}
+                  </div>
+                ))}
+                {browse.entries.length === 0 && <div style={{ padding: "4px 8px", color: "var(--text-dim)" }}>{t("storage.noSubfolders")}</div>}
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  style={{ flex: 1 }}
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  placeholder={t("storage.folderNamePlaceholder")}
+                />
+                <button disabled={!newFolderName.trim()} onClick={createFolder}>
+                  {t("storage.createFolder")}
+                </button>
+              </div>
+              <div className="node-actions">
+                <button className="primary" onClick={chooseTarget}>
+                  {t("storage.useThisFolder")}
+                </button>
+                <button onClick={() => setBrowsing(false)}>{t("common.cancel")}</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {target && !migrating && (
+        <div className="inline-form" style={{ flexDirection: "column", alignItems: "stretch", gap: 6, marginTop: 10 }}>
+          {migrateError && <div className="error-text">{migrateError}</div>}
+          <div style={{ fontSize: 12 }}>
+            {t("storage.confirmBody", {
+              target,
+              files: storage?.file_count ?? 0,
+              size: formatBytes(storage?.size_bytes ?? 0),
+              old: storage?.media_dir ?? "",
+            })}
+          </div>
+          <div className="node-actions">
+            <button className="primary" onClick={startMigrate}>
+              {t("storage.confirmButton")}
+            </button>
+            <button onClick={() => setTarget(null)}>{t("common.cancel")}</button>
+          </div>
+        </div>
+      )}
+
+      {scanError && <div className="error-text" style={{ marginTop: 10 }}>{scanError}</div>}
+
+      {leftovers && (
+        <div style={{ marginTop: 10 }}>
+          <div className="node-cell-hint">{t("storage.leftoverHint")}</div>
+          {leftovers.scanErrors.length > 0 && (
+            <div className="error-text" style={{ margin: "6px 0" }}>
+              {t("storage.leftoverScanIncomplete", { count: leftovers.scanErrors.length })}
+              <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                {leftovers.scanErrors.map((e, i) => (
+                  <li key={i}>{e}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6 }}>
+            {t("storage.leftoverSummary", { count: leftovers.items.length, size: formatBytes(leftoverSize) })}
+          </div>
+          {leftovers.missingFileCount > 0 && (
+            <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("storage.leftoverMissingCount", { count: leftovers.missingFileCount })}</div>
+          )}
+          {leftovers.items.length === 0 ? (
+            <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6 }}>{t("storage.leftoverEmpty")}</div>
+          ) : (
+            <div style={{ marginTop: 8 }}>
+              {leftovers.items.map((it) => (
+                <LeftoverRow key={it.key} item={it} projects={projects} onRemoved={removeLeftover} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -914,6 +1358,7 @@ export function Settings() {
     <div className="settings-panel">
       {loadError && <div className="error-text">{loadError}</div>}
       <LanguageSection />
+      <StorageSection />
       <BackendsSection items={backends} reload={reloadBackends} />
       <NodeTypesSection
         templates={templates}
