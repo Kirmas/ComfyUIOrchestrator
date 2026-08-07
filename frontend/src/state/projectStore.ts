@@ -25,6 +25,35 @@ function scheduleLayoutRefresh() {
   }, 60);
 }
 
+type NavEntry = { dashboardId: string | null; name: string };
+
+// Which sub-dashboard (if any) a project was last showing, so an F5 (or just
+// coming back to a project via the picker) lands where the session actually
+// was instead of always resetting to the main grid -- same "put you back
+// where you were" philosophy App.tsx already applies to project/view choice.
+// Keyed per-project since the trail only means something within one project.
+const NAV_STACK_KEY_PREFIX = "comfy-orchestrator:navStack:";
+
+function readStoredNavStack(projectId: string): NavEntry[] | null {
+  try {
+    const raw = localStorage.getItem(NAV_STACK_KEY_PREFIX + projectId);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeNavStack(projectId: string, navStack: NavEntry[]) {
+  try {
+    localStorage.setItem(NAV_STACK_KEY_PREFIX + projectId, JSON.stringify(navStack));
+  } catch {
+    // Storage full/unavailable -- losing the remembered scope isn't worth
+    // failing navigation over.
+  }
+}
+
 interface ProjectState {
   projectId: string | null;
   // Which grid scope is on screen: null = the project's main grid, otherwise a
@@ -53,6 +82,12 @@ interface ProjectState {
   annotations: Annotation[];
 
   loadProject: (projectId: string, dashboardId?: string | null) => Promise<void>;
+  // Entry point for mounting a project fresh (initial load, F5, or picking a
+  // project from the switcher): restores whichever scope that project's
+  // localStorage trail last had, falling back to loadProject's own main-grid
+  // default if there's nothing stored or the stored scope no longer resolves
+  // (its dashboard was since deleted).
+  restoreProject: (projectId: string) => Promise<void>;
   enterDashboard: (dashboardId: string, name: string) => Promise<void>;
   leaveDashboard: (toIndex: number) => Promise<void>;
   reloadTracks: (projectId: string) => Promise<void>;
@@ -130,6 +165,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       blockedCells: new Set(layout.blocked_cells.map(([r, c]) => `${r}:${c}`)),
       annotations,
     });
+    if (dashboardId === null) storeNavStack(projectId, [{ dashboardId: null, name: "" }]);
 
     for (const node of Object.values(nodesById)) {
       if (node.status === "done") {
@@ -137,6 +173,25 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           .refreshNodeOutputs(node.id)
           .catch(() => undefined);
       }
+    }
+  },
+
+  restoreProject: async (projectId: string) => {
+    const stored = readStoredNavStack(projectId);
+    const last = stored ? stored[stored.length - 1] : null;
+    if (!last || last.dashboardId === null) {
+      await get().loadProject(projectId);
+      return;
+    }
+    try {
+      await get().loadProject(projectId, last.dashboardId);
+      set({ navStack: stored! });
+    } catch {
+      // The remembered dashboard no longer resolves (deleted since last
+      // visit) -- fall back to the main grid rather than leaving the app on
+      // a scope loadProject already failed to populate.
+      storeNavStack(projectId, [{ dashboardId: null, name: "" }]);
+      await get().loadProject(projectId);
     }
   },
 
@@ -149,7 +204,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const { projectId, navStack } = get();
     if (!projectId) return;
     await get().loadProject(projectId, dashboardId);
-    set({ navStack: [...navStack, { dashboardId, name }] });
+    const next = [...navStack, { dashboardId, name }];
+    set({ navStack: next });
+    storeNavStack(projectId, next);
   },
 
   // Jump back to an earlier entry in the trail. `toIndex` is that entry's own
@@ -160,7 +217,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!projectId || toIndex < 0 || toIndex >= navStack.length) return;
     const target = navStack[toIndex];
     await get().loadProject(projectId, target.dashboardId);
-    set({ navStack: navStack.slice(0, toIndex + 1) });
+    const next = navStack.slice(0, toIndex + 1);
+    set({ navStack: next });
+    storeNavStack(projectId, next);
   },
 
   // Re-fetch just the ordered track list (nodes don't move -- their track_id

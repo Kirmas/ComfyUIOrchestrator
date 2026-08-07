@@ -66,7 +66,7 @@ function isPickable(node: NodeItem, outputs: Asset[]): boolean {
 
 export function Grid({ projectId }: { projectId: string }) {
   const t = useT();
-  const { tracks, nodesById, outputsByNode, spans, blockedCells, annotations, dashboardId, navStack, loadProject, reloadTracks, reloadAnnotations, applyProgressEvent, addNode, setNode, removeTrack, refreshNodeOutputs, leaveDashboard } =
+  const { tracks, nodesById, outputsByNode, spans, blockedCells, annotations, dashboardId, navStack, loadProject, restoreProject, reloadTracks, reloadAnnotations, applyProgressEvent, addNode, setNode, removeTrack, refreshNodeOutputs, leaveDashboard } =
     useProjectStore();
   // Nodes ticked for grouping into a comment block. Shift/Ctrl/Cmd-click on a
   // cell toggles membership; a plain click is left alone so it keeps meaning
@@ -235,13 +235,16 @@ export function Grid({ projectId }: { projectId: string }) {
   const reloadProject = () => projectsApi.get(projectId).then(setProject);
 
   useEffect(() => {
-    loadProject(projectId);
+    // Mounting fresh (initial load, F5, or switching projects) should land
+    // back on whichever scope this project was last showing, not always the
+    // main grid -- see restoreProject.
+    restoreProject(projectId);
     reloadProject();
     nodeTemplatesApi.list().then(setTemplates);
     backendsApi.list().then(setBackends);
     capabilitiesApi.list().then(setCapabilities);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, loadProject]);
+  }, [projectId, restoreProject]);
 
   useProjectWs(projectId, applyProgressEvent);
 
@@ -816,7 +819,7 @@ export function Grid({ projectId }: { projectId: string }) {
     structuralOpRef.current = true;
     try {
       await nodesApi.move(dragged.id, { target_row: targetRow, target_step: targetStep });
-      await loadProject(projectId);
+      await loadProject(projectId, dashboardId);
     } catch (e) {
       alert(e instanceof Error ? e.message : t("grid.moveCellFailed"));
     } finally {
@@ -838,7 +841,7 @@ export function Grid({ projectId }: { projectId: string }) {
     structuralOpRef.current = true;
     try {
       await nodesApi.move(workflowNode.id, { target_row: targetRow, target_step: targetStep });
-      await loadProject(projectId);
+      await loadProject(projectId, dashboardId);
     } catch (e) {
       alert(e instanceof Error ? e.message : t("grid.moveNodeFailed"));
     } finally {
@@ -1072,7 +1075,7 @@ export function Grid({ projectId }: { projectId: string }) {
     setCopyFor(null);
     try {
       await nodesApi.duplicate(sourceId, { target_row: row, target_step: step });
-      await loadProject(projectId);
+      await loadProject(projectId, dashboardId);
       // A copy carrying a template can grow rows for its input slots
       // (ensure_span_rows), same as choosing a template on a fresh cell does.
       await reloadTracks(projectId);

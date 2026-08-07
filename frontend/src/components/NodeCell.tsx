@@ -301,7 +301,7 @@ function BaseAssetNodeView({
     if (!confirm(t("cell.confirmDelete"))) return;
     await nodesApi.remove(node.id);
     const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
-    if (projectId) await loadProject(projectId);
+    if (projectId) await loadProject(projectId, useProjectStore.getState().dashboardId);
   };
 
   // "The source doesn't matter anymore, I just want to keep this result and
@@ -355,7 +355,7 @@ function BaseAssetNodeView({
     await nodesApi.update(node.id, { created_by_node_id: null });
     await nodesApi.remove(creatorId);
     const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
-    if (projectId) await loadProject(projectId);
+    if (projectId) await loadProject(projectId, useProjectStore.getState().dashboardId);
   };
 
   // Only offered when this asset is unambiguously a workflow's own output
@@ -435,7 +435,7 @@ function BaseAssetNodeView({
     try {
       await nodesApi.pickCandidate(node.id, asset.id);
       const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
-      if (projectId) await loadProject(projectId);
+      if (projectId) await loadProject(projectId, useProjectStore.getState().dashboardId);
     } catch (e) {
       alert(e instanceof Error ? e.message : t("cell.keepCandidateFailed"));
     }
@@ -478,7 +478,7 @@ function BaseAssetNodeView({
     try {
       await nodesApi.pickAllCandidates(node.id);
       const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
-      if (projectId) await loadProject(projectId);
+      if (projectId) await loadProject(projectId, useProjectStore.getState().dashboardId);
     } catch (e) {
       alert(e instanceof Error ? e.message : t("cell.settleFailed"));
     }
@@ -810,7 +810,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     if (!confirm(t("cell.confirmDeleteWorkflow"))) return;
     await nodesApi.remove(node.id);
     const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
-    if (projectId) await loadProject(projectId);
+    if (projectId) await loadProject(projectId, useProjectStore.getState().dashboardId);
   };
 
   // collapseInfo.assetId is the pass-through asset's own id -- the same one
@@ -822,7 +822,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     try {
       await nodesApi.expand(collapseInfo.assetId);
       const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
-      if (projectId) await loadProject(projectId);
+      if (projectId) await loadProject(projectId, useProjectStore.getState().dashboardId);
     } catch (err) {
       alert(err instanceof Error ? err.message : t("cell.expandFailed"));
     }
