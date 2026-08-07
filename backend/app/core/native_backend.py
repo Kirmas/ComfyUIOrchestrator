@@ -27,8 +27,6 @@ _ERRORS: dict[str, str] = {}
 
 
 class NativeBackend:
-    handler: str = "generic"
-
     async def submit(self, execution_config: dict, inputs: dict[str, Any]) -> str:
         job_id = str(uuid.uuid4())
         try:
@@ -112,8 +110,6 @@ class ChartComposer:
 
 
 class CharacterChartBackend(NativeBackend):
-    handler = "character_chart"
-
     async def _run(self, execution_config: dict, inputs: dict[str, Any]) -> list[AssetRef]:
         width = int(inputs.get("width", 7680))
         height = int(inputs.get("height", 4320))
@@ -131,8 +127,6 @@ class CharacterChartBackend(NativeBackend):
 
 
 class CropBackend(NativeBackend):
-    handler = "crop"
-
     async def _run(self, execution_config: dict, inputs: dict[str, Any]) -> list[AssetRef]:
         image = Image.open(BytesIO(inputs["image"])).convert("RGB")
         x = int(inputs.get("crop_x", 0))
@@ -161,8 +155,6 @@ class MaskBackend(NativeBackend):
     ComfyUI's own mask editor punches the same transparent hole for painted
     pixels, which its LoadImage node then reads back as mask=1."""
 
-    handler = "mask"
-
     async def _run(self, execution_config: dict, inputs: dict[str, Any]) -> list[AssetRef]:
         image = Image.open(BytesIO(inputs["image"])).convert("RGB")
         mask_png = inputs.get("mask_png")
@@ -180,17 +172,3 @@ class MaskBackend(NativeBackend):
         buf = BytesIO()
         result.save(buf, format="PNG")
         return [AssetRef(data=buf.getvalue(), mime_type="image/png", kind="image")]
-
-
-HANDLERS: dict[str, type[NativeBackend]] = {
-    CharacterChartBackend.handler: CharacterChartBackend,
-    CropBackend.handler: CropBackend,
-    MaskBackend.handler: MaskBackend,
-}
-
-
-def build_native_backend(handler: str) -> NativeBackend:
-    cls = HANDLERS.get(handler)
-    if cls is None:
-        raise ValueError(f"unknown native handler '{handler}'")
-    return cls()

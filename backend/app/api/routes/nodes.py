@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.asset_types import SingleAssetNode, is_picker_type, resolve_asset_node
 from app.core.node_types import resolve_effective_template, slot_count, sync_legacy_fields
 from app.api.routes.dashboards import enforce_pointer_deletion
 from app.core.grid_scope import scope_start_kind, set_scope_start_kind
@@ -19,7 +20,6 @@ from app.worker.tasks import (
     enqueue_node_job,
     has_room_for_output,
     own_output_nodes,
-    selected_or_latest_output,
 )
 
 router = APIRouter(prefix="/api/nodes", tags=["nodes"])
@@ -35,8 +35,7 @@ def _kind_for_step(start_kind: NodeKind, step_index: int) -> NodeKind:
 
 async def _ensure_slot_free(db: AsyncSession, track_id, step_index: int, exclude_node_id=None) -> None:
     """Guards the (track_id, step_index) uniqueness invariant everything that
-    reads a track's step sequence relies on (self_prev's "nearest asset
-    before step_index" scan, cell_index's position lookup,
+    reads a track's step sequence relies on (cell_index's position lookup,
     _claim_new_output_cell's empty-cell search, ...) -- a second live node claiming a slot
     already taken produces two nodes with no way to tell apart (2026-07-17
     incident, first found via CREATE). update_node needs this same guard:
@@ -363,14 +362,6 @@ async def move_node(node_id: uuid.UUID, payload: NodeMove, db: AsyncSession = De
     return [node]
 
 
-async def _desired_span(db: AsyncSession, workflow_node: Node) -> int:
-    """max(image/file input slots, 1 + spawned tracks) -- what the workflow's
-    card wants to be tall. Shared by the growth / span-shift / pick helpers."""
-    effective = await resolve_effective_template(db, workflow_node)
-    spawned = await db.execute(select(func.count()).select_from(Track).where(Track.spawned_from_node_id == workflow_node.id))
-    return max(slot_count(effective.param_schema if effective else {}), 1 + spawned.scalar_one(), 1)
-
-
 async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node | None:
     """The whole candidate fork, server-side (ports Grid.tsx's onSelectCandidate):
     settle `kept` in the picker's own cell as a fresh asset.single node, and
@@ -395,8 +386,8 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
     original_step = picker.step_index
 
     if not others:
-        picker.node_type = "asset.single"
-        picker.is_picker = False
+        picker.node_type = SingleAssetNode.node_type
+        picker.is_picker = is_picker_type(picker.node_type)
         await db.flush()
         return None
 
@@ -661,12 +652,15 @@ async def delete_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
 @router.get("/{node_id}/outputs", response_model=list[AssetRead])
 async def list_node_outputs(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    # asset.refasset owns no Asset row of its own -- see selected_or_latest_output's
-    # docstring -- so its "outputs" are whatever real asset its explicit ref points at.
+    # Each asset kind answers "what are this cell's outputs" itself
+    # (AssetNodeBackend.outputs): the two pointer kinds own no Asset row, so
+    # theirs is the single borrowed asset they stand for. This used to be an
+    # inline `if node_type == "asset.refasset"`, which is exactly why a
+    # subgraph pointer reported nothing here and couldn't be compared.
     node = await db.get(Node, node_id)
-    if node is not None and node.node_type == "asset.refasset":
-        pointed = await selected_or_latest_output(db, node)
-        assets = [pointed] if pointed else []
+    asset_kind = resolve_asset_node(node) if node is not None else None
+    if asset_kind is not None:
+        assets = await asset_kind.outputs(db, node)
     else:
         result = await db.execute(select(Asset).where(Asset.node_id == node_id).order_by(Asset.created_at))
         assets = result.scalars().all()
@@ -697,7 +691,7 @@ async def upload_asset_to_node(node_id: uuid.UUID, file: UploadFile, db: AsyncSe
 
     data = await file.read()
     mime_type = file.content_type or "application/octet-stream"
-    kind = AssetKind.image if mime_type.startswith("image/") else AssetKind.other
+    kind = AssetKind.for_mime(mime_type)
     storage = get_storage()
     # projects/<project_id>/nodes/<node_id>/... -- nests under the owning
     # project instead of a global nodes/ bucket, so a project's whole disk

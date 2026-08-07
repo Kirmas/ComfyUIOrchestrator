@@ -1,10 +1,13 @@
-"""Node.node_type resolution -- the single place that turns the namespaced
-discriminator ("asset.select" / "asset.single" / "native.<slug>" /
-"template.<slug>") into whatever a caller actually needs: a param_schema to
-validate against, a JobBackend instance to run, or which of asset/single vs
-select behavior applies.
+"""Workflow-node node_type resolution -- the single place that turns the
+namespaced discriminator ("native.<slug>" / "template.<slug>") into whatever
+a caller actually needs: a param_schema to validate against, or a JobBackend
+instance to run.
 
-"native"/"asset" are resolved via NATIVE_NODE_TYPES, a plain code registry --
+The `asset.*` half of the discriminator is resolved by core/asset_types.py
+instead (one class per asset kind, keyed the same way); is_picker_type is
+re-exported here only so existing callers keep working.
+
+"native" node types are resolved via NATIVE_NODE_TYPES, a plain code registry --
 no DB row, no FK, because (per memory/node_model_refactor_plan.md) they're a
 closed, developer-authored set that only ever grows when someone writes a new
 NativeBackend subclass, unlike "template" node types which are genuinely
@@ -16,6 +19,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.asset_types import is_picker_type  # noqa: F401 -- re-exported; asset kinds live in asset_types now
 from app.core.native_backend import CharacterChartBackend, CropBackend, MaskBackend, NativeBackend
 from app.db.models import Node, NodeTemplate
 
@@ -167,10 +171,6 @@ async def resolve_effective_template(db: AsyncSession, node: Node) -> EffectiveT
     return None
 
 
-def is_picker_type(node_type: str | None) -> bool:
-    return node_type == "asset.select"
-
-
 def sync_legacy_fields(node: Node, effective: EffectiveTemplate | None) -> None:
     """Keeps is_picker/template_id consistent with node.node_type after it
     changes, purely as a safety net for any code path that still reads them --
@@ -178,11 +178,9 @@ def sync_legacy_fields(node: Node, effective: EffectiveTemplate | None) -> None:
     instead. Callers that already resolved an EffectiveTemplate (to validate
     params, dispatch a job, etc.) pass it along so this doesn't need its own
     DB round trip; pass None for asset-kind nodes."""
-    parsed = parse_node_type(node.node_type)
-    if parsed is None:
+    if parse_node_type(node.node_type) is None:
         return
-    prefix, _ = parsed
-    node.is_picker = prefix == "asset" and is_picker_type(node.node_type)
+    node.is_picker = is_picker_type(node.node_type)
     node.template_id = effective.db_template.id if effective and effective.db_template else None
 
 

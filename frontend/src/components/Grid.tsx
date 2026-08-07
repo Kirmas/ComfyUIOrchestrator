@@ -2,8 +2,8 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { annotationsApi, backendsApi, capabilitiesApi, dashboardsApi, nodeTemplatesApi, nodesApi, projectsApi, tracksApi } from "../api/endpoints";
 import { useProjectWs } from "../api/useProjectWs";
 import { readClipboard, type CopiedAsset } from "../assetClipboard";
+import { assetFace, assetNodeKind } from "../assetNodes";
 import { useProjectStore } from "../state/projectStore";
-import { resolveSlotAsset } from "../slotResolution";
 import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project, Track } from "../types";
 import { useT } from "../i18n";
 import { cx } from "../utils";
@@ -49,19 +49,13 @@ function kindForStep(startKind: NodeKind, stepIndex: number): NodeKind {
   return stepIndex % 2 === 0 ? startKind : opposite;
 }
 
-// "pick cell..." may only target a settled asset cell with exactly one
-// resolved output -- a chooser cell (node_type "asset.select", still showing
-// several undecided candidates) has no single well-defined picture to grab,
-// so letting it be picked meant silently grabbing whichever candidate
-// happened to be "selected" or first in the list, never a choice the user
-// actually made. Resolve the chooser (select ★ one) first, then it becomes
-// pickable (node_type flips to "asset.single").
+// "pick cell..." / compare may only target an asset cell with a single
+// well-defined picture. Which cells those are is each asset kind's own rule
+// (AssetNodeKind.pickable in assetNodes.ts), not a list of node_type strings
+// maintained here -- keeping it here is how asset.subgraph ended up rendering
+// a picture it then refused to be compared with.
 function isPickable(node: NodeItem, outputs: Asset[]): boolean {
-  if (node.kind !== "asset" || node.node_type === "asset.select") return false;
-  // A refasset owns no Asset row of its own (outputs is always empty for
-  // it) -- it's pickable via its borrowed/resolved asset instead, resolved
-  // on demand in resolvePrimaryOutput.
-  return node.node_type === "asset.refasset" || outputs.length > 0;
+  return assetNodeKind(node)?.pickable(outputs) ?? false;
 }
 
 export function Grid({ projectId }: { projectId: string }) {
@@ -769,18 +763,12 @@ export function Grid({ projectId }: { projectId: string }) {
   // /pick-all-candidates. NodeCell calls those directly + reloads.)
 
   // Shared by every gesture below that needs "whatever this node's currently
-  // resolved output is" (compareFor and the ref gestures) -- picks the
-  // selected candidate if there is one, else the first output. A refasset
-  // owns no Asset row of its own, so it resolves through its "explicit"
-  // input pointer instead (same mechanism as its thumbnail, see
-  // resolveSlotAsset).
-  const resolvePrimaryOutput = async (node: NodeItem): Promise<Asset | null> => {
-    if (node.node_type === "asset.refasset") {
-      return resolveSlotAsset(node, 0, tracks, nodesById, outputsByNode, refreshNodeOutputs);
-    }
-    const outputs = await nodesApi.outputs(node.id).catch(() => []);
-    return outputs.find((a) => a.selected) ?? outputs[0] ?? null;
-  };
+  // resolved output is" (compareFor and the ref gestures). Each asset kind
+  // resolves its own face (assetNodes.ts): the two pointer kinds own no Asset
+  // row and follow their pointer instead of querying outputs, which is always
+  // empty for them.
+  const resolvePrimaryOutput = (node: NodeItem): Promise<Asset | null> =>
+    assetFace(node, (nodeId) => nodesApi.outputs(nodeId).catch(() => []));
 
   const onCellClicked = async (node: NodeItem) => {
     if (compareFor && compareFor.nodeId !== node.id) {
@@ -946,7 +934,7 @@ export function Grid({ projectId }: { projectId: string }) {
    *
    * Same node shape as createRefAssetAt above, minus node_id: a library asset
    * has no owning node, and `explicit` refs resolve straight by asset id on
-   * both ends (_explicit_ref_asset in worker/tasks.py, resolveSlotAsset here).
+   * both ends (explicit_ref_asset in core/asset_types.py, resolveSlotAsset here).
    * A refasset rather than a real asset node is the whole point -- Asset.node_id
    * cascades, so a cell that OWNED a board image would destroy it on deletion.
    */

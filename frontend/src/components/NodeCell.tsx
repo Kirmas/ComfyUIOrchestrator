@@ -6,6 +6,7 @@ import { detectCropGroups, resolveCropImageField } from "../cropUtils";
 import { isFileDrag } from "../dragUtils";
 import { detectMaskGroups, resolveMaskImageField } from "../maskUtils";
 import { copyAsset } from "../assetClipboard";
+import { assetFace } from "../assetNodes";
 import { resolveSlotAsset } from "../slotResolution";
 import { useProjectStore } from "../state/projectStore";
 import { defaultInputsForSchema, slotFields } from "../templateUtils";
@@ -203,37 +204,60 @@ function CandidatesGrid({
   );
 }
 
-function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImageOpen: (url: string) => void; onCompare: (asset: Asset) => void }) {
+/** The single picture an asset cell shows -- its *face*, in assetNodes.ts's
+ * terms -- with the two affordances every asset kind is entitled to: zoom and
+ * compare.
+ *
+ * Shared by all three asset views. The pointer kinds (RefAsset, Subgraph) used
+ * to hand-roll a cut-down copy of this: a bare <img> with double-click zoom and
+ * neither button, so a referenced or subgraph picture couldn't be opened from
+ * the 🔍 nor started as a compare, purely because nobody had copied those lines
+ * across a third and fourth time.
+ *
+ * `borrowed` dims the thumbnail slightly -- the RefAsset card has always done
+ * that to signal the picture belongs to another cell. */
+function AssetFaceView({
+  asset,
+  borrowed = false,
+  onImageOpen,
+  onCompare,
+}: {
+  asset: Asset;
+  borrowed?: boolean;
+  onImageOpen: (url: string) => void;
+  onCompare: (asset: Asset) => void;
+}) {
   const t = useT();
   const [dims, setDims] = useState<{ w: number; h: number } | undefined>(undefined);
+  const url = resolveAssetUrl(asset.url);
   return (
     <div className="output-grid">
       <div className="output-item">
         {asset.kind === "mesh" ? (
-          <Model3DThumb url={resolveAssetUrl(asset.url)} />
+          <Model3DThumb url={url} />
         ) : (
           <div className="output-thumb">
             <img
-              src={resolveAssetUrl(asset.url)}
+              src={url}
               alt="output"
               loading="lazy"
               decoding="async"
               draggable={false}
-              onDoubleClick={() => onImageOpen(resolveAssetUrl(asset.url))}
+              onDoubleClick={() => onImageOpen(url)}
               onLoad={(e) => {
                 const img = e.currentTarget;
                 if (!img) return;
                 setDims({ w: img.naturalWidth, h: img.naturalHeight });
               }}
               title={t("cell.doubleClickFullSize")}
-              style={{ cursor: "zoom-in" }}
+              style={{ cursor: "zoom-in", opacity: borrowed ? 0.85 : undefined }}
             />
             <button
               type="button"
               className="zoom-button"
               onClick={(e) => {
                 e.stopPropagation();
-                onImageOpen(resolveAssetUrl(asset.url));
+                onImageOpen(url);
               }}
               title={t("cell.openFullSize")}
             >
@@ -256,6 +280,48 @@ function SingleOutput({ asset, onImageOpen, onCompare }: { asset: Asset; onImage
       </div>
     </div>
   );
+}
+
+/** The full-size overlay every asset view opens on zoom.
+ *
+ * Portalled to document.body, which is load-bearing twice over and was
+ * previously re-derived in each of the three views: a cell sits inside Grid's
+ * pan/zoom CSS transform (so an inline position:fixed backdrop is no longer
+ * viewport-relative), and its wrapper is HTML5 draggable={true} (so a pan
+ * gesture started inside a non-portalled modal gets hijacked into a native
+ * image-drag). See CLAUDE.md's two 2026-07-21 incidents. */
+function FullSizeModal({ url, onClose }: { url: string; onClose: () => void }) {
+  const t = useT();
+  return createPortal(
+    <div className="image-modal-backdrop" onClick={onClose}>
+      <div className="image-modal-content image-modal-fullscreen" onClick={(e) => e.stopPropagation()}>
+        <button type="button" className="image-modal-close" onClick={onClose} title={t("cell.closeFullSize")}>
+          ×
+        </button>
+        <ZoomableImage src={url} />
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/** This cell's face, resolved by its own asset kind (assetNodes.ts): its own
+ * selected/latest output for the kinds that own Asset rows, the pointed-at
+ * asset for the two that don't. */
+function useAssetFace(node: NodeItem): Asset | null {
+  const outputsByNode = useProjectStore((s) => s.outputsByNode);
+  const [face, setFace] = useState<Asset | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    assetFace(node).then((asset) => {
+      if (!cancelled) setFace(asset);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node.id, node.node_type, node.inputs, node.subgraph_dashboard_id, outputsByNode]);
+  return face;
 }
 
 function BaseAssetNodeView({
@@ -625,7 +691,7 @@ function BaseAssetNodeView({
       {isCandidatesGrid ? (
         <CandidatesGrid outputs={outputs} onSelect={selectCandidate} onDiscard={discardCandidate} onImageOpen={openImage} onCompare={startCompare} />
       ) : outputs.length === 1 ? (
-        <SingleOutput asset={outputs[0]} onImageOpen={openImage} onCompare={startCompare} />
+        <AssetFaceView asset={outputs[0]} onImageOpen={openImage} onCompare={startCompare} />
       ) : null}
 
       {isComparingSource && (
@@ -636,26 +702,7 @@ function BaseAssetNodeView({
         <div style={{ fontSize: 10, color: "var(--warning)" }}>{t("cell.clickToPlaceRef")}</div>
       )}
 
-      {fullSizeUrl &&
-        createPortal(
-          // Portalled out of this cell's DOM subtree -- the cell wrapper
-          // (Grid.tsx) is HTML5 draggable={true}, and `draggable` on an
-          // ancestor claims the whole subtree as its native drag source
-          // regardless of position:fixed/z-index, so a pan gesture started
-          // inside this modal was being hijacked into a native image-drag
-          // (the ghost/duplicate you see mid-drag) instead of reaching
-          // ZoomableImage's own pointer handling. asset.select cells aren't
-          // draggable, which is why that modal never had this problem.
-          <div className="image-modal-backdrop" onClick={closeImage}>
-            <div className="image-modal-content image-modal-fullscreen" onClick={(e) => e.stopPropagation()}>
-              <button type="button" className="image-modal-close" onClick={closeImage} title={t("cell.closeFullSize")}>
-                ×
-              </button>
-              <ZoomableImage src={fullSizeUrl} />
-            </div>
-          </div>,
-          document.body,
-        )}
+      {fullSizeUrl && <FullSizeModal url={fullSizeUrl} onClose={closeImage} />}
     </div>
   );
 }
@@ -666,7 +713,6 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   const tracks = useProjectStore((s) => s.tracks);
   const nodesById = useProjectStore((s) => s.nodesById);
   const outputsByNode = useProjectStore((s) => s.outputsByNode);
-  const refreshNodeOutputs = useProjectStore((s) => s.refreshNodeOutputs);
   const loadProject = useProjectStore((s) => s.loadProject);
   const reloadTracks = useProjectStore((s) => s.reloadTracks);
   const template = templates.find((t) => t.node_type === node.node_type) ?? null;
@@ -753,7 +799,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
           next[group.prefix] = null;
           continue;
         }
-        const asset = await resolveSlotAsset(node, slotIndex, tracks, nodesById, outputsByNode, refreshNodeOutputs);
+        const asset = await resolveSlotAsset(node, slotIndex, tracks, nodesById);
         next[group.prefix] = asset ? resolveAssetUrl(asset.url) : null;
       }
       if (!cancelled) setCropImages(next);
@@ -783,7 +829,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
           next[group.maskField] = null;
           continue;
         }
-        const asset = await resolveSlotAsset(node, slotIndex, tracks, nodesById, outputsByNode, refreshNodeOutputs);
+        const asset = await resolveSlotAsset(node, slotIndex, tracks, nodesById);
         next[group.maskField] = asset ? resolveAssetUrl(asset.url) : null;
       }
       if (!cancelled) setMaskImages(next);
@@ -934,8 +980,8 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
 
   // Row-span paradigm: a slot's source is purely positional now (which row,
   // within this node's own span, feeds it -- see cell_index in types/index.ts
-  // and Grid.tsx's rowSpanByNode/effectiveRow). The old self_prev/
-  // track_below_prev/upload/"pick cell…" dropdown doesn't apply anymore --
+  // and Grid.tsx's rowSpanByNode/effectiveRow). The old ref-kind dropdown
+  // doesn't apply anymore (its four other ref types are gone entirely now) --
   // where the input comes from is decided by dragging the source asset (or a
   // RefAsset stand-in) to align with this row, not by choosing a ref kind
   // here. This is just the number that says *which* row.
@@ -1491,31 +1537,15 @@ function ChainMemberView({ node, templates, outputs }: { node: NodeItem; templat
 // node_type="asset.refasset", inputs=[{type:"explicit", node_id, output_id}]
 // pointing at the real node/output it stands in for (see Grid.tsx's
 // createRefAssetAt). It owns no Asset row itself -- it borrows the real one
-// for display via the same resolveSlotAsset helper BaseWorkflowNodeView uses
-// for crop previews, since ref.type "explicit" resolution is identical
-// either way. This is the ONE case position-based layout can't express (the
-// real asset is already spoken for elsewhere), so it's also the only node
-// left that gets a drawn arrow (Grid.tsx's edges memo, kind "ref").
-function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: Props) {
+// for display, which is RefAssetNode.face's job in assetNodes.ts, same as for
+// every other asset kind. This is the ONE case position-based layout can't
+// express (the real asset is already spoken for elsewhere), so it's also the
+// only node left that gets a drawn arrow (Grid.tsx's edges memo, kind "ref").
+function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked, onStartCompare }: Props) {
   const t = useT();
-  const tracks = useProjectStore((s) => s.tracks);
-  const nodesById = useProjectStore((s) => s.nodesById);
-  const outputsByNode = useProjectStore((s) => s.outputsByNode);
-  const refreshNodeOutputs = useProjectStore((s) => s.refreshNodeOutputs);
   const removeNode = useProjectStore((s) => s.removeNode);
-  const [resolved, setResolved] = useState<Asset | null>(null);
+  const resolved = useAssetFace(node);
   const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    resolveSlotAsset(node, 0, tracks, nodesById, outputsByNode, refreshNodeOutputs).then((asset) => {
-      if (!cancelled) setResolved(asset);
-    });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [node.inputs, outputsByNode]);
 
   const deleteCell = async () => {
     if (!confirm(t("cell.confirmRemoveRef"))) return;
@@ -1535,23 +1565,7 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: P
       </div>
 
       {resolved && (
-        <div className="output-grid">
-          <div className="output-item">
-            {resolved.kind === "mesh" ? (
-              <Model3DThumb url={resolveAssetUrl(resolved.url)} />
-            ) : (
-              <img
-                src={resolveAssetUrl(resolved.url)}
-                alt="referenced output"
-                loading="lazy"
-                decoding="async"
-                onDoubleClick={() => setFullSizeUrl(resolveAssetUrl(resolved.url))}
-                title={t("cell.doubleClickFullSize")}
-                style={{ cursor: "zoom-in", opacity: 0.85 }}
-              />
-            )}
-          </div>
-        </div>
+        <AssetFaceView asset={resolved} borrowed onImageOpen={setFullSizeUrl} onCompare={(asset) => onStartCompare(node, asset)} />
       )}
 
       <div className="node-actions">
@@ -1560,47 +1574,34 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked }: P
         </button>
       </div>
 
-      {fullSizeUrl &&
-        createPortal(
-          // Portalled out of this cell's DOM subtree -- see BaseAssetNodeView's
-          // identical modal for why (Grid.tsx's cell wrapper is HTML5
-          // draggable={true}, which hijacks pan gestures started anywhere
-          // inside it, portal or not, into a native drag).
-          <div className="image-modal-backdrop" onClick={() => setFullSizeUrl(null)}>
-            <div className="image-modal-content image-modal-fullscreen" onClick={(e) => e.stopPropagation()}>
-              <button type="button" className="image-modal-close" onClick={() => setFullSizeUrl(null)} title={t("cell.closeFullSize")}>
-                ×
-              </button>
-              <ZoomableImage src={fullSizeUrl} />
-            </div>
-          </div>,
-          document.body,
-        )}
+      {fullSizeUrl && <FullSizeModal url={fullSizeUrl} onClose={() => setFullSizeUrl(null)} />}
     </div>
   );
 }
 
 /** A smart pointer: an asset cell that also opens a sub-dashboard.
  *
- * Its face is resolved exactly like a RefAsset's -- an "explicit" InputRef at
- * slot 0 -- so picking which picture represents the subgraph reuses the
- * reference machinery instead of inventing a second one. Deliberately renders
- * as a normal asset (zoom, compare, drag) with one extra affordance: dive in.
+ * Its face is whichever asset the sub-dashboard was given as its result
+ * (Dashboard.result_asset_id) -- resolved through the same useAssetFace hook
+ * every other asset kind uses, so it renders as a normal asset (zoom, compare,
+ * drag) with one extra affordance: dive in. It used to render a hand-rolled
+ * <img> off `result_asset_url` and be excluded from Grid's isPickable, so it
+ * showed a picture that nothing else in the app would accept as one.
  *
  * Deletion is guarded server-side, not here: the main pointer of a subgraph
  * that still holds work is refused (409), and the alert surfaces that reason.
  * That rule is what keeps a whole chart from being one click from gone.
  */
-function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked }: Props) {
+function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onStartCompare }: Props) {
   const t = useT();
   const removeNode = useProjectStore((s) => s.removeNode);
   const enterDashboard = useProjectStore((s) => s.enterDashboard);
+  // The dashboard itself, for the name/counts/ownership row below only -- the
+  // picture comes from the kind's own face resolution, not from this payload.
   const [info, setInfo] = useState<Dashboard | null>(null);
   const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // The face comes from the dashboard (its chosen result), not from this
-  // node's own inputs -- see Dashboard.result_asset_id.
-  const faceUrl = info?.result_asset_url ? resolveAssetUrl(info.result_asset_url) : null;
+  const face = useAssetFace(node);
 
   useEffect(() => {
     if (!node.subgraph_dashboard_id) return;
@@ -1664,20 +1665,8 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked }: P
         <span className="status-pill">{t("subgraph.pill")}</span>
       </div>
 
-      {faceUrl ? (
-        <div className="output-grid">
-          <div className="output-item">
-            <img
-              src={faceUrl}
-              alt="subgraph result"
-              loading="lazy"
-              decoding="async"
-              onDoubleClick={() => setFullSizeUrl(faceUrl)}
-              title={t("cell.doubleClickFullSize")}
-              style={{ cursor: "zoom-in" }}
-            />
-          </div>
-        </div>
+      {face ? (
+        <AssetFaceView asset={face} onImageOpen={setFullSizeUrl} onCompare={(asset) => onStartCompare(node, asset)} />
       ) : (
         <div className="subgraph-empty">{t("subgraph.noFace")}</div>
       )}
@@ -1707,18 +1696,7 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked }: P
         </button>
       </div>
 
-      {fullSizeUrl &&
-        createPortal(
-          <div className="image-modal-backdrop" onClick={() => setFullSizeUrl(null)}>
-            <div className="image-modal-content image-modal-fullscreen" onClick={(e) => e.stopPropagation()}>
-              <button type="button" className="image-modal-close" onClick={() => setFullSizeUrl(null)} title={t("cell.closeFullSize")}>
-                ×
-              </button>
-              <ZoomableImage src={fullSizeUrl} />
-            </div>
-          </div>,
-          document.body,
-        )}
+      {fullSizeUrl && <FullSizeModal url={fullSizeUrl} onClose={() => setFullSizeUrl(null)} />}
     </div>
   );
 }

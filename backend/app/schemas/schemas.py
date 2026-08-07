@@ -235,17 +235,18 @@ class TrackRead(ORMModel):
 
 # ---------- InputRef (tagged union, stored as plain dict in JSONB) ----------
 class InputRef(BaseModel):
-    type: str  # self_prev | track_below_prev | explicit | upload | text | cell_index
+    # Two live types. Four others (self_prev, track_below_prev, upload, text)
+    # predate the row-span paradigm and were removed in 2026-08 once nothing
+    # created them and no row in the DB carried one: cell_index generalized
+    # the first two (they were index 0 and 1), explicit absorbed upload.
+    type: str  # cell_index | explicit
     node_id: uuid.UUID | None = None
     output_id: uuid.UUID | None = None
     asset_id: uuid.UUID | None = None
-    value: str | None = None
     # "cell_index" only: row-span paradigm positional ref -- read whatever
     # asset node's row (its track's row_index) equals this workflow node's
     # own home row (its track's row_index) + index, in the column right
-    # before it. Generalizes self_prev (equivalent to index 0) and
-    # track_below_prev (index 1) into one addressing scheme that reaches
-    # every row a spanning workflow node can grow into.
+    # before it, reaching every row a spanning workflow node can grow into.
     index: int | None = None
 
 

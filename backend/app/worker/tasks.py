@@ -10,9 +10,16 @@ from sqlalchemy import delete, select
 
 from app.config import get_settings
 from app.core import dispatcher
+from app.core.asset_types import (
+    SelectAssetNode,
+    SingleAssetNode,
+    explicit_ref_asset,
+    is_picker_type,
+    resolve_asset_node,
+)
 from app.core.comfyui_backend import ComfyUIBackend, wait_with_timeout
 from app.core.job_backend import JobStatus as BackendJobStatus
-from app.core.node_types import resolve_effective_template, slot_count, slot_fields, sync_legacy_fields
+from app.core.node_types import resolve_effective_template, slot_count, slot_fields
 from app.core.queue import job_queue
 from app.core.storage import get_storage
 from app.core.idea_macros import apply_macros, project_idea_texts
@@ -24,7 +31,6 @@ from app.db.models import (
     ApiUsageLog,
     Asset,
     Backend,
-    Dashboard,
     ExecutionType,
     Job,
     JobStatusEnum,
@@ -46,62 +52,21 @@ logger = logging.getLogger(__name__)
 MAX_SEED_VALUE = 2**50 - 1
 
 
-async def _explicit_ref_asset(db, ref: dict) -> Asset | None:
-    asset_id = ref.get("asset_id") or ref.get("output_id")
-    return await db.get(Asset, asset_id) if asset_id else None
-
-
 async def selected_or_latest_output(db, node: Node) -> Asset | None:
-    """A node's settled asset -- the one flagged selected, else the most
-    recently created. asset.refasset is a special case: per its own
-    docstring (see node_types.py / CLAUDE.md's grid model section) it owns
-    no Asset row of its own, just an "explicit" InputRef pointing at the
-    real one elsewhere, so every position-based lookup that can land on one
-    (self_prev, track_below_prev, cell_index -- a ref stands in for a real
-    asset cell, so anything scanning by row/step can equally land on it)
-    needs to follow that pointer instead of querying Asset.node_id, which
-    would come up empty and silently drop the slot (2026-07-18 incident:
-    native.character_chart's compose KeyError'd on a missing head_1 because
-    that cell held a refasset).
+    """A node's settled asset -- its *face*, in core/asset_types.py's terms.
 
-    asset.subgraph is the same situation for a different reason: a smart
-    pointer owns no Asset row either -- the picture it stands for is
-    whichever asset inside its sub-dashboard was chosen as the result
-    (Dashboard.result_asset_id, see api/routes/dashboards.py's
-    set_dashboard_result), not anything hung off the pointer node itself. A
-    position-based lookup landing on a subgraph cell (e.g. a workflow's image
-    slot pointed at it) needs to follow that instead, or it silently resolves
-    to no image -- same failure mode as the refasset case above."""
-    if node.node_type == "asset.refasset":
-        ref = (node.inputs or [{}])[0]
-        return await _explicit_ref_asset(db, ref)
-    if node.node_type == "asset.subgraph":
-        if node.subgraph_dashboard_id is None:
-            return None
-        dashboard = await db.get(Dashboard, node.subgraph_dashboard_id)
-        if dashboard is None or dashboard.result_asset_id is None:
-            return None
-        return await db.get(Asset, dashboard.result_asset_id)
-    result = await db.execute(select(Asset).where(Asset.node_id == node.id).order_by(Asset.created_at))
-    assets = list(result.scalars().all())
-    if not assets:
+    Position-based lookup (cell_index) can land on any asset cell, including
+    the two pointer kinds that own no Asset
+    row of their own, so none of them may query Asset.node_id directly: a
+    refasset would come up empty and silently drop the slot (2026-07-18
+    incident: native.character_chart's compose KeyError'd on a missing head_1
+    because that cell held a refasset), and a subgraph pointer the same, for
+    its own reason. Which pointer to follow is each kind's own business --
+    that lives in AssetNodeBackend.face, not here."""
+    backend = resolve_asset_node(node)
+    if backend is None:
         return None
-    selected = [a for a in assets if a.selected]
-    return selected[0] if selected else assets[-1]
-
-
-async def _prev_asset_node_output(db, track_id, step_index) -> Asset | None:
-    """Nearest asset-kind node before step_index in this track -- by construction
-    of the asset/workflow alternation this is normally exactly step_index - 1."""
-    result = await db.execute(
-        select(Node)
-        .where(Node.track_id == track_id, Node.step_index < step_index, Node.kind == NodeKind.asset)
-        .order_by(Node.step_index.desc())
-    )
-    prev_node = result.scalars().first()
-    if prev_node is None:
-        return None
-    return await selected_or_latest_output(db, prev_node)
+    return await backend.face(db, node)
 
 
 async def _asset_at_cell_index(db, node: Node, index: int) -> Asset | None:
@@ -335,13 +300,17 @@ async def _claim_new_output_cell(db, workflow_node: Node, is_native: bool) -> No
     picker left among its existing outputs, a fresh batch of variants that
     doesn't disturb anything already settled."""
     row = await _locate_output_row(db, workflow_node, materialize=True)
+    # A native node is deterministic and yields exactly one result, so it settles
+    # straight away; a ComfyUI batch lands as still-undecided candidates. is_picker
+    # is derived from the node_type rather than re-tested, so the two can't drift.
+    node_type = SingleAssetNode.node_type if is_native else SelectAssetNode.node_type
     asset_node = Node(
         track_id=row.id,
         step_index=workflow_node.step_index + 1,
         kind=NodeKind.asset,
         status=NodeStatus.running,
-        node_type="asset.single" if is_native else "asset.select",
-        is_picker=not is_native,
+        node_type=node_type,
+        is_picker=is_picker_type(node_type),
         created_by_node_id=workflow_node.id,
     )
     db.add(asset_node)
@@ -364,7 +333,7 @@ async def has_room_for_output(db, workflow_node: Node, is_native: bool) -> bool:
     if existing:
         if is_native:
             return True
-        if any(n.node_type == "asset.select" for n in existing):
+        if any(is_picker_type(n.node_type) for n in existing):
             return True
 
     try:
@@ -421,7 +390,7 @@ async def _get_or_create_output_asset_node(db, workflow_node: Node, is_native: b
         target.error = None
         return target
 
-    picker = next((n for n in existing if n.node_type == "asset.select"), None)
+    picker = next((n for n in existing if is_picker_type(n.node_type)), None)
     if picker is not None:
         return picker
 
@@ -499,28 +468,20 @@ async def resolve_node_inputs(
         ref = node.inputs[i]
         ref_type = ref.get("type")
 
-        if ref_type == "self_prev":
-            asset = await _prev_asset_node_output(db, node.track_id, node.step_index)
-        elif ref_type == "track_below_prev":
-            ordered = await ordered_tracks(db, *scope_of(track))
-            tpos = {t.id: i for i, t in enumerate(ordered)}
-            ti = tpos.get(track.id)
-            below = ordered[ti + 1] if ti is not None and ti + 1 < len(ordered) else None
-            # Same step_index bound as self_prev (not +1): kind-per-step
-            # (_kind_for_step in api/routes/nodes.py) is keyed off
-            # Project.start_kind, the same for every track, so this workflow
-            # node's own step_index is never an asset-kind step in *any*
-            # track -- "below" needs no extra slack to skip past it.
-            asset = await _prev_asset_node_output(db, below.id, node.step_index) if below else None
-        elif ref_type in ("upload", "explicit"):
-            asset = await _explicit_ref_asset(db, ref)
-        elif ref_type == "cell_index":
+        if ref_type == "cell_index":
             idx = ref.get("index")
             asset = await _asset_at_cell_index(db, node, idx) if idx is not None else None
-        elif ref_type == "text":
-            resolved[field_name] = ref.get("value", "")
-            continue
+        elif ref_type == "explicit":
+            asset = await explicit_ref_asset(db, ref)
         else:
+            # Loud rather than silent: an unresolvable slot means the node
+            # generates from the wrong image (or none), and the run still
+            # "succeeds" -- exactly the failure mode the refasset/subgraph
+            # incidents took months to notice. Four legacy ref types
+            # (self_prev, track_below_prev, upload, text) were removed here
+            # once nothing produced them and no row in the DB used them;
+            # this is what would surface one if a stale row ever turned up.
+            logger.warning("node %s slot '%s': unknown input ref type %r -- no image resolved", node.id, field_name, ref_type)
             asset = None
 
         if asset is not None:

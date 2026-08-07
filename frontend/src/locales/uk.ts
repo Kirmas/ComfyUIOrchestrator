@@ -14,7 +14,6 @@ export const uk: Record<TKey, string> = {
   "common.save": "Зберегти",
   "common.saving": "Збереження…",
   "common.saved": "збережено",
-  "common.saveLower": "зберегти",
   "common.delete": "Видалити",
   "common.deleteLower": "видалити",
   "common.remove": "прибрати",
@@ -26,7 +25,6 @@ export const uk: Record<TKey, string> = {
   "common.refresh": "Оновити",
   "common.reset": "скинути",
   "common.loading": "Завантаження…",
-  "common.loadingLower": "Завантаження…",
 
   // --- App shell ------------------------------------------------------
   "app.connecting": "Підключення…",
@@ -224,7 +222,6 @@ export const uk: Record<TKey, string> = {
   "wizard.approve": "Підтвердити",
   "wizard.fixed": "Фіксоване",
   "wizard.fixedHint": "вшите в тип вузла — та сама картинка щоразу, без рядка в гріді",
-  "wizard.fixedUpload": "Завантажити фіксовану картинку",
   "wizard.fixedUploaded": "{name} ({size} КБ)",
   "wizard.fixedMissing": "«{label}» позначено як фіксоване, але картинку не завантажено.",
 

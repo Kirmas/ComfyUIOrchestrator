@@ -13,7 +13,7 @@
  * annoyance.
  *
  * Only the asset id is meaningful. `explicit` refs resolve by asset id alone on
- * both ends (_explicit_ref_asset in worker/tasks.py, resolveSlotAsset here), so
+ * both ends (explicit_ref_asset in core/asset_types.py, resolveSlotAsset here), so
  * a pasted reference works regardless of which dashboard the original lives in.
  * The label and thumbnail are only there so the paste affordance can say what
  * it is about to place.
@@ -49,7 +49,3 @@ export function readClipboard(): CopiedAsset | null {
   }
 }
 
-export function clearClipboard(): void {
-  localStorage.removeItem(KEY);
-  window.dispatchEvent(new CustomEvent("asset-clipboard-changed"));
-}

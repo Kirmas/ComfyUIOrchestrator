@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.core.asset_types import REFERENCING_ASSET_NODE_TYPES
 from app.core.storage import get_storage
 from app.db.models import Asset, AssetKind, Dashboard, Node
 
@@ -162,7 +163,7 @@ async def adopt_orphan(db: AsyncSession, path: str, project_id: uuid.UUID) -> As
     already there instead of writing a fresh copy via put_object."""
     await _revalidate(db, path)
     mime_type = guess_mime_type(get_storage().path_of(path))
-    kind = AssetKind.image if mime_type.startswith("image/") else AssetKind.other
+    kind = AssetKind.for_mime(mime_type)
     asset = Asset(
         project_id=project_id,
         storage_key=path,
@@ -195,13 +196,17 @@ def preview_path(path: str) -> Path:
 
 async def _refasset_referenced_ids(db: AsyncSession, candidate_ids: set[str]) -> set[str]:
     """Which of candidate_ids (asset id strings) are pointed at by some
-    asset.refasset node's explicit input, or some Dashboard.result_asset_id,
-    anywhere in the whole app -- asset.refasset resolves by asset id alone
-    (resolveSlotAsset/_explicit_ref_asset), so this has to be a global check,
+    referencing asset node's explicit input (REFERENCING_ASSET_NODE_TYPES --
+    the asset kinds whose `references_by_input` is set, see
+    core/asset_types.py), or by some Dashboard.result_asset_id, anywhere in
+    the whole app -- such a reference resolves by asset id alone
+    (resolveSlotAsset/explicit_ref_asset), so this has to be a global check,
     not scoped to one project."""
     referenced: set[str] = set()
 
-    refasset_nodes = (await db.execute(select(Node.inputs).where(Node.node_type == "asset.refasset"))).scalars().all()
+    refasset_nodes = (
+        (await db.execute(select(Node.inputs).where(Node.node_type.in_(REFERENCING_ASSET_NODE_TYPES)))).scalars().all()
+    )
     for inputs in refasset_nodes:
         for inp in inputs or []:
             oid = inp.get("output_id") or inp.get("asset_id")

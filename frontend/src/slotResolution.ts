@@ -1,80 +1,28 @@
-import { assetsApi, dashboardsApi } from "./api/endpoints";
-import { useProjectStore } from "./state/projectStore";
+import { assetsApi } from "./api/endpoints";
+import { assetFace, storeOutputsFor } from "./assetNodes";
 import type { Asset, InputRef, NodeItem, Track } from "./types";
-
-/** Picks the same asset the backend would for a "settled" cell: the one
- * flagged selected, else the most recently created (see
- * _selected_or_latest_output in worker/tasks.py) -- outputs are already
- * ordered by created_at by the API, so "last" is "latest". */
-function selectedOrLatest(assets: Asset[]): Asset | null {
-  if (assets.length === 0) return null;
-  return assets.find((a) => a.selected) ?? assets[assets.length - 1];
-}
-
-/** Frontend mirror of selected_or_latest_output's asset.subgraph branch
- * (worker/tasks.py): a smart pointer owns no Asset row of its own -- the
- * picture it stands for is whichever asset its sub-dashboard chose as its
- * result (Dashboard.result_asset_id). A position-based lookup that lands on
- * a subgraph cell (e.g. an image slot pointed at it, as in the screenshot
- * that prompted this) must follow that instead of querying outputs for the
- * pointer node itself, which is always empty. */
-async function faceOf(node: NodeItem, outputsFor: (nodeId: string) => Promise<Asset[]>): Promise<Asset | null> {
-  if (node.node_type === "asset.subgraph") {
-    if (!node.subgraph_dashboard_id) return null;
-    const dashboard = await dashboardsApi.get(node.subgraph_dashboard_id).catch(() => null);
-    if (!dashboard?.result_asset_id) return null;
-    return assetsApi.get(dashboard.result_asset_id).catch(() => null);
-  }
-  return selectedOrLatest(await outputsFor(node.id));
-}
-
-function nearestAssetNodeBefore(nodes: NodeItem[], trackId: string, beforeStepIndex: number): NodeItem | null {
-  const candidates = nodes.filter((n) => n.track_id === trackId && n.kind === "asset" && n.step_index < beforeStepIndex);
-  if (candidates.length === 0) return null;
-  return candidates.reduce((latest, n) => (n.step_index > latest.step_index ? n : latest));
-}
 
 /** Frontend mirror of resolve_node_inputs' image-ref resolution (worker/tasks.py) --
  * for preview purposes only (no generation happens here), so it just needs to land
  * on the same Asset, not read its bytes. Used to find what image actually sits behind
- * an "image"/"file" slot so the crop-preview modal has something to show. */
+ * an "image"/"file" slot so the crop-preview modal has something to show.
+ *
+ * Two ref types, matching the backend. Four others (self_prev, track_below_prev,
+ * upload, text) predate the row-span paradigm and were removed in 2026-08 once
+ * nothing created them and no row in the DB carried one -- see types/index.ts. */
 export async function resolveSlotAsset(
   node: NodeItem,
   slotIndex: number,
   tracks: Track[],
   nodesById: Record<string, NodeItem>,
-  outputsByNode: Record<string, Asset[]>,
-  refreshNodeOutputs: (nodeId: string) => Promise<void>,
+  outputsFor = storeOutputsFor,
 ): Promise<Asset | null> {
   const ref: InputRef | undefined = node.inputs[slotIndex];
   if (!ref) return null;
 
-  const outputsFor = async (nodeId: string): Promise<Asset[]> => {
-    if (outputsByNode[nodeId]) return outputsByNode[nodeId];
-    await refreshNodeOutputs(nodeId).catch(() => undefined);
-    return useProjectStore.getState().outputsByNode[nodeId] ?? [];
-  };
-
-  if (ref.type === "upload" || ref.type === "explicit") {
-    const assetId = ref.type === "upload" ? ref.asset_id : ref.output_id;
-    if (!assetId) return null;
-    return assetsApi.get(assetId).catch(() => null);
-  }
-
-  if (ref.type === "self_prev") {
-    const priorAssetNode = nearestAssetNodeBefore(Object.values(nodesById), node.track_id, node.step_index);
-    if (!priorAssetNode) return null;
-    return faceOf(priorAssetNode, outputsFor);
-  }
-
-  if (ref.type === "track_below_prev") {
-    const track = tracks.find((t) => t.id === node.track_id);
-    if (!track) return null;
-    const below = tracks.find((t) => t.project_id === track.project_id && t.row_index === track.row_index + 1);
-    if (!below) return null;
-    const priorAssetNode = nearestAssetNodeBefore(Object.values(nodesById), below.id, node.step_index + 1);
-    if (!priorAssetNode) return null;
-    return faceOf(priorAssetNode, outputsFor);
+  if (ref.type === "explicit") {
+    if (!ref.output_id) return null;
+    return assetsApi.get(ref.output_id).catch(() => null);
   }
 
   if (ref.type === "cell_index") {
@@ -93,8 +41,8 @@ export async function resolveSlotAsset(
       return tracks.find((t) => t.id === n.track_id)?.row_index === targetRow;
     });
     if (!assetNode) return null;
-    return faceOf(assetNode, outputsFor);
+    return assetFace(assetNode, outputsFor);
   }
 
-  return null; // "text" -- no image
+  return null;
 }

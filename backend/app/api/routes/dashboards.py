@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import get_db
+from app.core.asset_types import SUBGRAPH_NODE_TYPE
 from app.core.storage import build_asset_url
 from app.db.models import Asset, Dashboard, Node, NodeKind, NodeStatus, Track
 from app.schemas.schemas import (
@@ -37,8 +38,6 @@ from app.schemas.schemas import (
 )
 
 router = APIRouter(prefix="/api", tags=["dashboards"])
-
-SUBGRAPH_NODE_TYPE = "asset.subgraph"
 
 
 async def _dashboard_of_node(db: AsyncSession, node: Node) -> uuid.UUID | None:

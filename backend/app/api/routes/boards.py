@@ -231,7 +231,7 @@ async def upload_project_asset(project_id: uuid.UUID, file: UploadFile, db: Asyn
 
     data = await file.read()
     mime_type = file.content_type or "application/octet-stream"
-    kind = AssetKind.image if mime_type.startswith("image/") else AssetKind.other
+    kind = AssetKind.for_mime(mime_type)
     key = get_storage().put_object(data, mime_type, prefix=f"projects/{project_id}")
     asset = Asset(project_id=project_id, storage_key=key, mime_type=mime_type, kind=kind, selected=False, tags=[], meta={})
     db.add(asset)

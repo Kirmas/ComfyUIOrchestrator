@@ -129,22 +129,26 @@ export interface Track {
   created_at: string;
 }
 
+// Where one image/file slot of a workflow node reads its picture from --
+// positionally matched to the slot fields of its param_schema (see
+// templateUtils.slotFields, resolve_node_inputs in worker/tasks.py).
+//
+// Two types, not six. `self_prev`, `track_below_prev`, `upload` and `text`
+// predate the row-span paradigm and were deleted in 2026-08: nothing in the
+// app created any of them and no row in the DB carried one (checked across
+// every node, sub-dashboards included). cell_index generalized the first two
+// -- they were index 0 and index 1 -- and explicit absorbed upload.
 export type InputRef =
-  | { type: "self_prev" }
-  | { type: "track_below_prev" }
   // node_id is optional: an asset in the project's reference library (the idea
   // board's) has no owning node at all, and resolution on both ends goes by
-  // asset id anyway (_explicit_ref_asset / resolveSlotAsset). It stays part of
+  // asset id anyway (explicit_ref_asset / resolveSlotAsset). It stays part of
   // the ref when there IS an owner, since that's what the grid draws its "ref"
   // arrow from.
   | { type: "explicit"; node_id?: string; output_id: string }
-  | { type: "upload"; asset_id: string }
-  | { type: "text"; value: string }
   // Row-span paradigm positional ref: reads whatever asset node's row (its
   // own track's row_index) equals this workflow node's own home row + index,
-  // in the column right before it. Generalizes self_prev (index 0) and
-  // track_below_prev (index 1) across every row a spanning workflow node
-  // can grow into.
+  // in the column right before it -- reaching every row a spanning workflow
+  // node can grow into.
   | { type: "cell_index"; index: number };
 
 export interface NodeItem {

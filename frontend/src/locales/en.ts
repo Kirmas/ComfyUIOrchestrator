@@ -17,7 +17,6 @@ export const en = {
   "common.save": "Save",
   "common.saving": "Saving…",
   "common.saved": "saved",
-  "common.saveLower": "save",
   "common.delete": "Delete",
   "common.deleteLower": "delete",
   "common.remove": "remove",
@@ -29,7 +28,6 @@ export const en = {
   "common.refresh": "Refresh",
   "common.reset": "reset",
   "common.loading": "Loading…",
-  "common.loadingLower": "Loading…",
 
   // --- App shell ------------------------------------------------------
   "app.connecting": "Connecting…",
@@ -224,7 +222,6 @@ export const en = {
   "wizard.approve": "Approve",
   "wizard.fixed": "Fixed",
   "wizard.fixedHint": "baked into the node type -- same picture every run, no grid row",
-  "wizard.fixedUpload": "Upload the fixed image",
   "wizard.fixedUploaded": "{name} ({size} KB)",
   "wizard.fixedMissing": "\"{label}\" is marked fixed but has no uploaded image.",
 

@@ -53,6 +53,14 @@ class AssetKind(str, enum.Enum):
     mesh = "mesh"
     other = "other"
 
+    @classmethod
+    def for_mime(cls, mime_type: str) -> "AssetKind":
+        """What every ingest path records for a file it only knows the MIME
+        type of. Never `mesh`: a .glb arrives as application/octet-stream, so
+        that kind is only ever set by the producer that knows it made a 3D
+        output (comfyui_backend.py), never guessed here."""
+        return cls.image if mime_type.startswith("image/") else cls.other
+
 
 class Backend(Base):
     __tablename__ = "backends"

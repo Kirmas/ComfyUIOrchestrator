@@ -23,7 +23,7 @@ def _to_read(asset: Asset) -> AssetRead:
 async def upload_asset(file: UploadFile, db: AsyncSession = Depends(get_db)):
     data = await file.read()
     mime_type = file.content_type or "application/octet-stream"
-    kind = AssetKind.image if mime_type.startswith("image/") else AssetKind.other
+    kind = AssetKind.for_mime(mime_type)
     storage = get_storage()
     key = storage.put_object(data, mime_type, prefix="uploads")
     asset = Asset(node_id=None, storage_key=key, mime_type=mime_type, kind=kind, selected=False, meta={})
