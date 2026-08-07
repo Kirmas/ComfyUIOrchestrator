@@ -160,8 +160,6 @@ export interface NodeItem {
   // "native.<slug>" / "template.<slug>" (see backend/app/core/node_types.py).
   // null only for a fresh workflow cell that hasn't picked a template yet.
   node_type: string | null;
-  is_picker: boolean;
-  template_id: string | null;
   inputs: InputRef[];
   params: Record<string, unknown>;
   status: NodeStatus;

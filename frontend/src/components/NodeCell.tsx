@@ -96,11 +96,11 @@ export interface Props {
   collapseInfo?: { assetId: string; consumerId: string; combinedLabel: string };
 }
 
-// node.is_picker (explicit, persistent -- see db/models.py) forces a decision
-// on *each* candidate: select it (it stays right here; the rest move out to
-// a new picker row) or reject it outright -- rather than a checkbox that
-// quietly leaves the rest sitting here forever. A settled node (is_picker
-// false) just renders its image, no decision needed.
+// An asset.select node (see assetNodes.ts) forces a decision on *each*
+// candidate: select it (it stays right here; the rest move out to a new picker
+// row) or reject it outright -- rather than a checkbox that quietly leaves the
+// rest sitting here forever. A settled node (asset.single) just renders its
+// image, no decision needed.
 function CandidatesGrid({
   outputs,
   onSelect,

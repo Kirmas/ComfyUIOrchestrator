@@ -246,20 +246,11 @@ class Node(Base):
     # resolved via node_templates.node_type_slug. NULL only transiently, for a
     # freshly-created workflow cell that hasn't picked a template yet.
     node_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # Legacy columns -- kept mirrored/derived from node_type on every write (see
-    # core/node_types.sync_legacy_fields) as a safety net, not read as
-    # authoritative by new code anymore.
-    # Explicit, persistent marker for an asset-kind node holding raw, not-yet-
-    # resolved generation output (set by _get_or_create_output_asset_node in
-    # worker/tasks.py) -- NodeCell.tsx uses this, not the current output count
-    # or sibling lookups, to decide whether to force a spawn/keep/discard
-    # choice on every image. Flips to False once the user resolves it via
-    # PATCH /api/nodes/{id} with is_picker: false (keep one in place) or once
-    # it empties out entirely (spawn/discard draining it to zero, see NodeCell.tsx).
-    is_picker: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    template_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("node_templates.id", ondelete="SET NULL"), nullable=True
-    )
+    # (is_picker and template_id used to sit here, mirrored from node_type on
+    # every write by a sync_legacy_fields helper and read by nobody. Dropped in
+    # migration 0017 once node_type was the only thing anything actually
+    # consulted: "is this a picker" is is_picker_type(node_type) and "which
+    # template" is resolve_effective_template, both in core/.)
     inputs: Mapped[list] = mapped_column(JSONVariant, default=list, nullable=False)
     params: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
     status: Mapped[NodeStatus] = mapped_column(String(32), default=NodeStatus.draft, nullable=False)

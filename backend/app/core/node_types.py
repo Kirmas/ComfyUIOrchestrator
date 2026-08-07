@@ -4,8 +4,12 @@ a caller actually needs: a param_schema to validate against, or a JobBackend
 instance to run.
 
 The `asset.*` half of the discriminator is resolved by core/asset_types.py
-instead (one class per asset kind, keyed the same way); is_picker_type is
-re-exported here only so existing callers keep working.
+instead -- one class per asset kind, keyed the same way.
+
+node_type is now the *only* thing consulted. The mirrored nodes.is_picker /
+nodes.template_id columns this module used to keep in sync were written for
+nobody's benefit and were dropped in migration 0017: "is this a picker" is
+is_picker_type(node_type), "which template" is resolve_effective_template.
 
 "native" node types are resolved via NATIVE_NODE_TYPES, a plain code registry --
 no DB row, no FK, because (per memory/node_model_refactor_plan.md) they're a
@@ -19,7 +23,6 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.asset_types import is_picker_type  # noqa: F401 -- re-exported; asset kinds live in asset_types now
 from app.core.native_backend import CharacterChartBackend, CropBackend, MaskBackend, NativeBackend
 from app.db.models import Node, NodeTemplate
 
@@ -169,19 +172,6 @@ async def resolve_effective_template(db: AsyncSession, node: Node) -> EffectiveT
         )
 
     return None
-
-
-def sync_legacy_fields(node: Node, effective: EffectiveTemplate | None) -> None:
-    """Keeps is_picker/template_id consistent with node.node_type after it
-    changes, purely as a safety net for any code path that still reads them --
-    new logic should resolve through resolve_effective_template/is_picker_type
-    instead. Callers that already resolved an EffectiveTemplate (to validate
-    params, dispatch a job, etc.) pass it along so this doesn't need its own
-    DB round trip; pass None for asset-kind nodes."""
-    if parse_node_type(node.node_type) is None:
-        return
-    node.is_picker = is_picker_type(node.node_type)
-    node.template_id = effective.db_template.id if effective and effective.db_template else None
 
 
 # Optional, gitignored extension point (see .gitignore) for native node types

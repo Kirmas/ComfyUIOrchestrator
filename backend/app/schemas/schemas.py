@@ -255,12 +255,9 @@ class NodeCreate(BaseModel):
     track_id: uuid.UUID
     step_index: int
     kind: NodeKind = NodeKind.workflow
-    # Authoritative discriminator going forward -- "asset.select"/"asset.single"/
-    # "native.<slug>"/"template.<slug>" (see core/node_types.py). template_id
-    # is kept for backward compatibility only; the route derives it (and
-    # is_picker) from node_type when both are given, node_type wins.
+    # The one discriminator -- "asset.select"/"asset.single"/"native.<slug>"/
+    # "template.<slug>" (see core/node_types.py).
     node_type: str | None = None
-    template_id: uuid.UUID | None = None
     inputs: list[InputRef] = []
     params: dict[str, Any] = {}
     requested_variants: int = 1
@@ -327,7 +324,6 @@ class NodeUpdate(BaseModel):
     # part of a whole-project batch that preserves every node's kind.
     step_index: int | None = None
     node_type: str | None = None
-    template_id: uuid.UUID | None = None
     inputs: list[InputRef] | None = None
     params: dict[str, Any] | None = None
     requested_variants: int | None = None
@@ -335,7 +331,6 @@ class NodeUpdate(BaseModel):
     backend_mode: str | None = None
     manual_backend_id: uuid.UUID | None = None
     use_api: bool | None = None
-    is_picker: bool | None = None
     # Explicit unbind only -- NodeCell.tsx's "detach & remove workflow"
     # button sends `created_by_node_id: null` right before deleting the
     # creator workflow node, so delete_node's own_output_nodes sweep no
@@ -353,8 +348,6 @@ class NodeRead(ORMModel):
     step_index: int
     kind: NodeKind
     node_type: str | None
-    is_picker: bool
-    template_id: uuid.UUID | None
     inputs: list[dict]
     params: dict
     status: NodeStatus

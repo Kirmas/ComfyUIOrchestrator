@@ -5,8 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.asset_types import SingleAssetNode, is_picker_type, resolve_asset_node
-from app.core.node_types import resolve_effective_template, slot_count, sync_legacy_fields
+from app.core.asset_types import SingleAssetNode, resolve_asset_node
+from app.core.node_types import resolve_effective_template, slot_count
 from app.api.routes.dashboards import enforce_pointer_deletion
 from app.core.grid_scope import scope_start_kind, set_scope_start_kind
 from app.core.queue import job_queue
@@ -387,7 +387,6 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
 
     if not others:
         picker.node_type = SingleAssetNode.node_type
-        picker.is_picker = is_picker_type(picker.node_type)
         await db.flush()
         return None
 
@@ -543,9 +542,6 @@ async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)):
     node = Node(**data)
     if node.created_by_node_id is not None:
         await _ensure_output_binding(db, node, payload.track_id, payload.step_index)
-    if node.node_type:
-        effective = await resolve_effective_template(db, node)
-        sync_legacy_fields(node, effective)
     db.add(node)
     await db.flush()
     # A workflow created already carrying a template needs its input-slot rows
@@ -582,8 +578,6 @@ async def update_node(node_id: uuid.UUID, payload: NodeUpdate, db: AsyncSession 
     for field, value in data.items():
         setattr(node, field, value)
     if "node_type" in data:
-        effective = await resolve_effective_template(db, node)
-        sync_legacy_fields(node, effective)
         # Template (re)assigned -- materialize the input-slot rows this
         # workflow now needs, right below it (see ensure_span_rows). Replaces
         # the frontend's reactive auto-expand effect.
@@ -944,7 +938,6 @@ async def reroll_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         step_index=old.step_index,
         kind=NodeKind.workflow,
         node_type=old.node_type,
-        template_id=old.template_id,
         inputs=old.inputs,
         params=old.params,
         requested_variants=old.requested_variants,
@@ -1006,7 +999,6 @@ async def duplicate_node(node_id: uuid.UUID, payload: NodeDuplicate, db: AsyncSe
         step_index=payload.target_step,
         kind=NodeKind.workflow,
         node_type=old.node_type,
-        template_id=old.template_id,
         # deepcopy, not the same list/dict object: inputs/params are JSON columns
         # held as plain Python structures, so handing both nodes the SAME object
         # would make an in-place edit of one node's params (updateParam in
@@ -1019,9 +1011,6 @@ async def duplicate_node(node_id: uuid.UUID, payload: NodeDuplicate, db: AsyncSe
         manual_backend_id=old.manual_backend_id,
         use_api=old.use_api,
     )
-    if new_node.node_type:
-        effective = await resolve_effective_template(db, new_node)
-        sync_legacy_fields(new_node, effective)
     db.add(new_node)
     await db.flush()
     # Same as create_node: a workflow that already carries a template needs its

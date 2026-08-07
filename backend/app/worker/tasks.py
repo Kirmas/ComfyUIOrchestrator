@@ -301,16 +301,15 @@ async def _claim_new_output_cell(db, workflow_node: Node, is_native: bool) -> No
     doesn't disturb anything already settled."""
     row = await _locate_output_row(db, workflow_node, materialize=True)
     # A native node is deterministic and yields exactly one result, so it settles
-    # straight away; a ComfyUI batch lands as still-undecided candidates. is_picker
-    # is derived from the node_type rather than re-tested, so the two can't drift.
-    node_type = SingleAssetNode.node_type if is_native else SelectAssetNode.node_type
+    # straight away; a ComfyUI batch lands as still-undecided candidates. node_type
+    # is the only thing recording that -- "is this a picker" is read back through
+    # is_picker_type(node_type), never a second stored flag.
     asset_node = Node(
         track_id=row.id,
         step_index=workflow_node.step_index + 1,
         kind=NodeKind.asset,
         status=NodeStatus.running,
-        node_type=node_type,
-        is_picker=is_picker_type(node_type),
+        node_type=SingleAssetNode.node_type if is_native else SelectAssetNode.node_type,
         created_by_node_id=workflow_node.id,
     )
     db.add(asset_node)

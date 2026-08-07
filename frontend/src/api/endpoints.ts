@@ -156,7 +156,6 @@ export const nodesApi = {
     step_index: number;
     kind?: NodeKind;
     node_type?: string | null;
-    template_id?: string | null;
     inputs?: InputRef[];
     params?: Record<string, unknown>;
     requested_variants?: number;
