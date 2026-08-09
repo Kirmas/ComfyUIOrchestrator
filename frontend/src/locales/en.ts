@@ -508,6 +508,7 @@ export const en = {
   "subgraph.open": "↳ Open",
   "subgraph.openTitle": "Open this subgraph's own grid",
   "subgraph.noFace": "No result picked yet",
+  "subgraph.refNeedsResult": "Pick a result inside this subgraph first — there's no picture to reference yet",
   "subgraph.contents": "{nodes} node(s) inside",
   "subgraph.pointers": "{count} pointers",
   "subgraph.renamePrompt": "Name for this subgraph:",

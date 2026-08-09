@@ -1596,7 +1596,7 @@ function ChainMemberView({ node, templates, outputs }: { node: NodeItem; templat
 // every other asset kind. This is the ONE case position-based layout can't
 // express (the real asset is already spoken for elsewhere), so it's also the
 // only node left that gets a drawn arrow (Grid.tsx's edges memo, kind "ref").
-function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked, onStartCompare }: Props) {
+function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked, onStartCompare, onStartRef, isRefSource }: Props) {
   const t = useT();
   const removeNode = useProjectStore((s) => s.removeNode);
   const resolved = useAssetFace(node);
@@ -1624,10 +1624,22 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked, onS
       )}
 
       <div className="node-actions">
+        {/* Referencing a reference points at the ORIGINAL asset, not at this
+            cell -- createRefAssetAt resolves whatever it's handed through
+            assetFace, and this kind's face IS the original. So no pointer
+            chain forms, and when the original lives in another sub-dashboard
+            (the case this exists for) there's no need to go find it. */}
+        {resolved && (
+          <button onClick={() => onStartRef(node)} title={t("cell.refElsewhereTitle")}>
+            {t("cell.refElsewhere")}
+          </button>
+        )}
         <button onClick={deleteCell} title={t("cell.removeRefTitle")}>
           {t("common.delete")}
         </button>
       </div>
+
+      {isRefSource && <div style={{ fontSize: 10, color: "var(--warning)" }}>{t("cell.clickToPlaceRef")}</div>}
 
       {fullSizeUrl && <FullSizeModal url={fullSizeUrl} onClose={() => setFullSizeUrl(null)} />}
     </div>
@@ -1647,7 +1659,7 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked, onS
  * that still holds work is refused (409), and the alert surfaces that reason.
  * That rule is what keeps a whole chart from being one click from gone.
  */
-function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onStartCompare }: Props) {
+function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onStartCompare, onStartRef, isRefSource }: Props) {
   const t = useT();
   const removeNode = useProjectStore((s) => s.removeNode);
   const enterDashboard = useProjectStore((s) => s.enterDashboard);
@@ -1746,11 +1758,22 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
             {t("subgraph.takeOwnership")}
           </button>
         )}
+        {/* References this pointer's face -- the asset the sub-dashboard was
+            given as its result -- so the picture can be used out here without
+            diving in to find whichever cell produced it. Disabled rather than
+            hidden while no result is chosen: there IS no picture to point at
+            yet, and saying so is more use than an absent button. Note this
+            takes the result as it stands now; a pointer that keeps following
+            the dashboard's result is a second asset.subgraph node, not a ref. */}
+        <button onClick={() => onStartRef(node)} disabled={!face || busy} title={face ? t("cell.refElsewhereTitle") : t("subgraph.refNeedsResult")}>
+          {t("cell.refElsewhere")}
+        </button>
         <button onClick={deleteCell} disabled={busy} title={t("subgraph.deleteTitle")}>
           {t("common.delete")}
         </button>
       </div>
 
+      {isRefSource && <div style={{ fontSize: 10, color: "var(--warning)" }}>{t("cell.clickToPlaceRef")}</div>}
       {fullSizeUrl && <FullSizeModal url={fullSizeUrl} onClose={() => setFullSizeUrl(null)} />}
     </div>
   );

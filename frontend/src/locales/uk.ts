@@ -510,6 +510,7 @@ export const uk: Record<TKey, string> = {
   "subgraph.open": "↳ Відкрити",
   "subgraph.openTitle": "Відкрити власну сітку цього субграфа",
   "subgraph.noFace": "Результат ще не обрано",
+  "subgraph.refNeedsResult": "Спершу оберіть результат усередині субграфа — поки що немає на що посилатися",
   "subgraph.contents": "{nodes} нод(и) всередині",
   "subgraph.pointers": "{count} вказівники",
   "subgraph.renamePrompt": "Назва субграфа:",
