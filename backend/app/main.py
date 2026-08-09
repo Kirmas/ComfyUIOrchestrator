@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -6,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from app.api.routes import annotations, assets, backends, boards, capabilities, dashboards, health, jobs, logs, node_templates, node_types, nodes, projects, system, tracks, ws
 from app.config import get_settings
@@ -17,6 +19,31 @@ from app.mcp import tools  # noqa: F401 -- importing registers the MCP tools
 from app.mcp.client import set_app
 from app.mcp.server import mcp_server
 from app.worker.tasks import recover_orphaned_jobs
+
+
+class FrontendStaticFiles(StaticFiles):
+    """Vite fingerprints every JS/CSS file by content
+    (`assets/index-<hash>.js`), so those are safe to cache forever -- but
+    `index.html` is what names those hashed files, and plain `StaticFiles`
+    sends no Cache-Control at all, only Last-Modified/ETag. A browser that
+    already has a tab/history for this origin can serve that response
+    straight from its heuristic cache without revalidating, so a deploy can
+    leave a browser on the *previous* index.html pointing at a bundle that
+    no longer exists on disk -- our own code looks unchanged there until a
+    hard refresh, even though the server has the fix (2026-08-09, the
+    Compare select/discard buttons appeared to be missing on desktop only
+    because that tab's index.html predated the deploy). `html=True` also
+    serves index.html for any unmatched path (SPA fallback) and 404.html for
+    real misses, so both get the same no-cache treatment; everything else
+    (the hashed assets) gets a long, immutable max-age instead."""
+
+    def file_response(self, full_path, stat_result, scope: Scope, status_code: int = 200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        if os.path.basename(str(full_path)) in ("index.html", "404.html"):
+            response.headers["Cache-Control"] = "no-cache"
+        else:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
 
 @asynccontextmanager
@@ -95,7 +122,7 @@ def create_app() -> FastAPI:
     if settings.frontend_dist_dir:
         dist = Path(settings.frontend_dist_dir)
         if dist.exists():
-            app.mount("/", StaticFiles(directory=str(dist), html=True), name="frontend")
+            app.mount("/", FrontendStaticFiles(directory=str(dist), html=True), name="frontend")
 
     return app
 
