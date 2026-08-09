@@ -1634,11 +1634,18 @@ export function Grid({ projectId }: { projectId: string }) {
                         {t("grid.placeRefHere")}
                       </button>
                     ) : (
+                      // "з референсів"/"вставити реф" used to sit here too,
+                      // before the cell even existed -- crowded this row
+                      // (CLAUDE.md-worthy incident 2026-08-09: didn't even fit
+                      // on screen once "+ крок"/"опустити" joined them). Both
+                      // now live on the empty asset.single cell itself, right
+                      // after "+ ассет" creates it (see NodeCell.tsx's
+                      // convertToRef) -- same place "+ субграф"/"вказівник"
+                      // already were for a freshly created empty cell.
                       <>
                         <button onClick={() => addStep(track.id, "asset", buttonStep)} title={t("grid.addAssetHereTitle")}>
                           {t("grid.addAsset")}
                         </button>
-                        {refPlacementButtons(track.row_index, buttonStep)}
                         <button onClick={skipColumn} title={t("grid.emptyTitle")}>
                           {t("grid.empty")}
                         </button>
@@ -1658,12 +1665,9 @@ export function Grid({ projectId }: { projectId: string }) {
                 {!showStartChoice && secondAvailable && (
                   <div style={{ gridColumn: secondStep + 2, gridRow: rowIdx + 1, alignSelf: "center", display: "flex", gap: 4 }}>
                     {secondKind === "asset" ? (
-                      <>
-                        <button onClick={() => addStep(track.id, "asset", secondStep)} title={t("grid.addAssetHereTitle")}>
-                          {t("grid.addAsset")}
-                        </button>
-                        {refPlacementButtons(track.row_index, secondStep)}
-                      </>
+                      <button onClick={() => addStep(track.id, "asset", secondStep)} title={t("grid.addAssetHereTitle")}>
+                        {t("grid.addAsset")}
+                      </button>
                     ) : (
                       <button onClick={() => addStep(track.id, "workflow", secondStep)} title={t("grid.addStepNoAssetTitle")}>
                         {t("grid.addStep")}

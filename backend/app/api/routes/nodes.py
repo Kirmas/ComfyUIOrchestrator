@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.asset_types import SingleAssetNode, resolve_asset_node
+from app.core.asset_types import ASSET_NODE_TYPES, SingleAssetNode, resolve_asset_node
 from app.core.node_types import resolve_effective_template, slot_count
 from app.api.routes.dashboards import enforce_pointer_deletion
 from app.core.grid_scope import scope_start_kind, set_scope_start_kind
@@ -575,6 +575,20 @@ async def update_node(node_id: uuid.UUID, payload: NodeUpdate, db: AsyncSession 
         await _ensure_output_binding(db, node, target_track_id, target_step, is_move=True)
 
     data = payload.model_dump(mode="json", exclude_unset=True)
+    if "node_type" in data and data["node_type"] != node.node_type and node.kind == NodeKind.asset:
+        # Only meant for converting a still-empty asset cell in place (e.g.
+        # the "з референсів"/"вставити реф" buttons on a freshly created
+        # asset.single cell -- see NodeCell.tsx) -- switching a node_type
+        # that already owns real Asset rows away from ownership (e.g. to
+        # asset.refasset) would leave those rows orphaned: still on disk,
+        # still in the DB, but no longer reachable through this node (its
+        # `face` now resolves through inputs instead), and never GC'd since
+        # storage_gc only walks assets a live node still references.
+        old_backend = ASSET_NODE_TYPES.get(node.node_type or "")
+        if old_backend is not None and old_backend.owns_assets:
+            has_assets = (await db.execute(select(Asset.id).where(Asset.node_id == node.id).limit(1))).first()
+            if has_assets:
+                raise HTTPException(409, "This cell already owns generated assets -- can't convert it into a reference.")
     for field, value in data.items():
         setattr(node, field, value)
     if "node_type" in data:

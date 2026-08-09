@@ -22,6 +22,7 @@ import { TransplantPreview } from "./TransplantPreview";
 import { IdeaTextPicker, MacroPreview } from "./IdeaTextPicker";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
 import { Model3DThumb } from "./Model3DThumb";
+import { ReferencePicker } from "./ReferencePicker";
 import { ZoomableImage } from "./ZoomableImage";
 
 const STATUS_LABEL_KEY: Record<NodeStatus, `status.${NodeStatus}`> = {
@@ -435,6 +436,31 @@ function BaseAssetNodeView({
     }
   };
 
+  /** Converts this still-empty cell into a refasset in place, instead of the
+   * old flow of picking "з референсів"/"вставити реф" *before* the cell
+   * existed at all (Grid.tsx's now-removed refPlacementButtons at the empty-
+   * track bootstrap row) -- collapses what used to be 4-5 separate buttons
+   * crowding that row into "+ ассет" (creates a plain empty cell) followed by
+   * whichever of these the user actually wants, the same way "+ субграф"/
+   * "вказівник" already worked on a freshly created empty cell. The backend
+   * (update_node) rejects this once the cell has owned assets, so it's only
+   * ever offered here while outputs.length === 0. */
+  const convertToRef = async (assetId: string) => {
+    try {
+      await nodesApi.update(node.id, { node_type: "asset.refasset", inputs: [{ type: "explicit", output_id: assetId }] });
+      setNode(await nodesApi.get(node.id));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : t("grid.pasteRefFailed"));
+    }
+  };
+
+  const clipboardAsset = useClipboardSlot(assetClipboard);
+  const [pickingRef, setPickingRef] = useState(false);
+  const pasteRefFromClipboard = async () => {
+    const entry = assetClipboard.read();
+    if (entry) await convertToRef(entry.assetId);
+  };
+
   const detachFromWorkflow = async () => {
     const creatorId = node.created_by_node_id;
     if (!creatorId) return;
@@ -630,10 +656,25 @@ function BaseAssetNodeView({
             {t("cell.download")}
           </a>
         )}
-        {outputs.length === 0 && (
+        {outputs.length === 0 && !isCandidatesGrid && (
           <button className="primary" onClick={() => fileInputRef.current?.click()} title={t("cell.uploadTitle")}>
             {t("cell.upload")}
           </button>
+        )}
+        {/* Reference/pointer options for a still-empty cell -- see
+            convertToRef's comment above for why these live here now instead
+            of on the pre-creation bootstrap row. */}
+        {outputs.length === 0 && !isCandidatesGrid && !node.created_by_node_id && !node.subgraph_dashboard_id && (
+          <>
+            <button onClick={() => setPickingRef(true)} title={t("grid.fromReferencesTitle")}>
+              {t("grid.fromReferences")}
+            </button>
+            {clipboardAsset && (
+              <button onClick={() => void pasteRefFromClipboard()} title={t("grid.pasteRefTitle", { label: clipboardAsset.label })}>
+                {t("grid.pasteRef")}
+              </button>
+            )}
+          </>
         )}
         {isCandidatesGrid && (
           <>
@@ -731,6 +772,16 @@ function BaseAssetNodeView({
       )}
 
       {fullSizeUrl && <FullSizeModal url={fullSizeUrl} onClose={closeImage} />}
+      {pickingRef && (
+        <ReferencePicker
+          projectId={tracks.find((tr) => tr.id === node.track_id)?.project_id ?? ""}
+          onPick={async (asset) => {
+            setPickingRef(false);
+            await convertToRef(asset.id);
+          }}
+          onClose={() => setPickingRef(false)}
+        />
+      )}
     </div>
   );
 }
