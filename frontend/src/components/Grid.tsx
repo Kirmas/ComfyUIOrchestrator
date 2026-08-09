@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { annotationsApi, backendsApi, capabilitiesApi, dashboardsApi, nodeTemplatesApi, nodesApi, projectsApi, tracksApi } from "../api/endpoints";
 import { useProjectWs } from "../api/useProjectWs";
-import { readClipboard, type CopiedAsset } from "../assetClipboard";
+import { assetClipboard, subgraphClipboard, useClipboardSlot } from "../clipboard";
 import { assetFace, assetNodeKind } from "../assetNodes";
 import { useProjectStore } from "../state/projectStore";
 import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project, Track } from "../types";
@@ -113,16 +113,8 @@ export function Grid({ projectId }: { projectId: string }) {
   const [dashboardNames, setDashboardNames] = useState<Record<string, string>>({});
   // Re-read on every change (including from another tab) so "paste ref" shows
   // up the moment something is copied, without a manual refresh.
-  const [clipboard, setClipboard] = useState<CopiedAsset | null>(() => readClipboard());
-  useEffect(() => {
-    const sync = () => setClipboard(readClipboard());
-    window.addEventListener("asset-clipboard-changed", sync);
-    window.addEventListener("storage", sync);
-    return () => {
-      window.removeEventListener("asset-clipboard-changed", sync);
-      window.removeEventListener("storage", sync);
-    };
-  }, []);
+  const clipboard = useClipboardSlot(assetClipboard);
+  const copiedSubgraph = useClipboardSlot(subgraphClipboard);
   // How many leading columns an as-yet-empty track should skip before its
   // first real cell -- purely a UI notion (never sent to the backend on its
   // own): a track only gets a step_index once a node actually exists at it,
@@ -961,12 +953,32 @@ export function Grid({ projectId }: { projectId: string }) {
    * they would rather repeat the paste than manage a multi-slot buffer.
    */
   const pasteRefAt = async (row: number, step: number) => {
-    const entry = readClipboard();
+    const entry = assetClipboard.read();
     if (!entry) return;
     try {
       await placeLibraryAssetAt({ id: entry.assetId } as Asset, row, step);
     } catch (err) {
       alert(err instanceof Error ? err.message : t("grid.pasteRefFailed"));
+    }
+  };
+
+  /** Makes an empty cell a pointer at the subgraph on the clipboard: the cell
+   * has to exist as an asset node first (addPointer converts an existing one,
+   * it doesn't create anything), which is the same two-step the card's own
+   * "point here" button skips only because its cell is already there. The node
+   * is rolled back if the conversion is refused, so a failed paste doesn't
+   * leave a stray empty cell behind. */
+  const placePointerAt = async (row: number, step: number) => {
+    const entry = subgraphClipboard.read();
+    const targetTrack = trackByRowIndex.get(row);
+    if (!entry || !targetTrack) return;
+    const created = await nodesApi.create({ track_id: targetTrack.id, step_index: step, kind: "asset" });
+    try {
+      await dashboardsApi.addPointer(entry.dashboardId, created.id);
+      addNode(await nodesApi.get(created.id));
+    } catch (err) {
+      await nodesApi.remove(created.id).catch(() => undefined);
+      alert(err instanceof Error ? err.message : t("subgraph.pointerFailed"));
     }
   };
 
@@ -986,6 +998,15 @@ export function Grid({ projectId }: { projectId: string }) {
         {clipboard && (
           <button style={style} onClick={() => void pasteRefAt(row, step)} title={t("grid.pasteRefTitle", { label: clipboard.label })}>
             {t("grid.pasteRef")}
+          </button>
+        )}
+        {copiedSubgraph && (
+          <button
+            style={style}
+            onClick={() => void placePointerAt(row, step)}
+            title={t("subgraph.pastePointerTitle", { name: copiedSubgraph.name })}
+          >
+            {t("subgraph.pastePointer")}
           </button>
         )}
       </>

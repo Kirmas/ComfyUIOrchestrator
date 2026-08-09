@@ -5,7 +5,7 @@ import { assetsApi, dashboardsApi, jobsApi, nodesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
 import { isFileDrag } from "../dragUtils";
 import { detectLayerMaskGroups, detectMaskGroups, resolveMaskImageField } from "../maskUtils";
-import { copyAsset } from "../assetClipboard";
+import { assetClipboard, subgraphClipboard, useClipboardSlot } from "../clipboard";
 import { assetFace } from "../assetNodes";
 import { resolveSlotAsset } from "../slotResolution";
 import { useProjectStore } from "../state/projectStore";
@@ -342,6 +342,7 @@ function BaseAssetNodeView({
   const refreshOutputs = useProjectStore((s) => s.refreshNodeOutputs);
   const removeNode = useProjectStore((s) => s.removeNode);
   const insideSubgraph = useProjectStore((s) => s.dashboardId !== null);
+  const copiedSubgraph = useClipboardSlot(subgraphClipboard);
   const tracks = useProjectStore((s) => s.tracks);
   const loadProject = useProjectStore((s) => s.loadProject);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -412,6 +413,25 @@ function BaseAssetNodeView({
       setNode(updated);
     } catch (err) {
       alert(err instanceof Error ? err.message : t("subgraph.deleteFailed"));
+    }
+  };
+
+  /** Turns this cell into an *additional* pointer at an already-existing
+   * dashboard -- the same gesture as "make a subgraph" next to it, except the
+   * dashboard is one carried here on the clipboard instead of a new one.
+   *
+   * A dashboard is reached by diving into a pointer, and there is deliberately
+   * no menu listing every dashboard (CLAUDE.md), so the target can only be one
+   * the user has actually been at and copied -- which is also what lets this
+   * cross a grid boundary at all, exactly like pasting an asset reference. */
+  const pasteSubgraphPointer = async () => {
+    const entry = subgraphClipboard.read();
+    if (!entry) return;
+    try {
+      await dashboardsApi.addPointer(entry.dashboardId, node.id);
+      setNode(await nodesApi.get(node.id));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : t("subgraph.pointerFailed"));
     }
   };
 
@@ -638,7 +658,7 @@ function BaseAssetNodeView({
           <button
             onClick={() => {
               const asset = outputs.find((o) => o.selected) ?? outputs[0];
-              copyAsset({ assetId: asset.id, label: node.node_type ?? t("cell.asset"), url: asset.url });
+              assetClipboard.copy({ assetId: asset.id, label: node.node_type ?? t("cell.asset"), url: asset.url });
             }}
             title={t("cell.copyRefTitle")}
           >
@@ -649,9 +669,16 @@ function BaseAssetNodeView({
             its creator's position, so it can't also be the way into a subgraph
             (the backend rejects it too). */}
         {!isCandidatesGrid && !node.created_by_node_id && !node.subgraph_dashboard_id && (
-          <button onClick={makeSubgraph} title={t("subgraph.createTitle")}>
-            {t("subgraph.create")}
-          </button>
+          <>
+            <button onClick={makeSubgraph} title={t("subgraph.createTitle")}>
+              {t("subgraph.create")}
+            </button>
+            {copiedSubgraph && (
+              <button onClick={pasteSubgraphPointer} title={t("subgraph.pastePointerTitle", { name: copiedSubgraph.name })}>
+                {t("subgraph.pastePointer")}
+              </button>
+            )}
+          </>
         )}
         {/* Only inside a subgraph -- that's the only place the question "what
             does this subgraph look like from outside" even applies. */}
@@ -1668,6 +1695,10 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
   const [info, setInfo] = useState<Dashboard | null>(null);
   const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Copying only writes to localStorage, and what it enables shows up in some
+  // other cell -- often in another grid entirely. Without this the button
+  // reads as dead: you press it and nothing anywhere visibly changes.
+  const [pointerCopied, setPointerCopied] = useState(false);
   const face = useAssetFace(node);
 
   useEffect(() => {
@@ -1768,12 +1799,34 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
         <button onClick={() => onStartRef(node)} disabled={!face || busy} title={face ? t("cell.refElsewhereTitle") : t("subgraph.refNeedsResult")}>
           {t("cell.refElsewhere")}
         </button>
+        {/* Carries this dashboard to an asset cell in some other grid, which
+            can then become a second pointer at it -- the "⧉ copy ref" of
+            subgraphs. Both ends of that have to exist at once, and they're
+            never on screen together, hence a clipboard rather than a
+            click-to-complete gesture (see clipboard.ts). */}
+        {node.subgraph_dashboard_id && (
+          <button
+            onClick={() => {
+              subgraphClipboard.copy({
+                dashboardId: node.subgraph_dashboard_id as string,
+                name: info?.name || t("subgraph.untitled"),
+              });
+              setPointerCopied(true);
+              window.setTimeout(() => setPointerCopied(false), 4000);
+            }}
+            title={t("subgraph.copyPointerTitle")}
+          >
+            {pointerCopied ? t("subgraph.pointerCopied") : t("subgraph.copyPointer")}
+          </button>
+        )}
         <button onClick={deleteCell} disabled={busy} title={t("subgraph.deleteTitle")}>
           {t("common.delete")}
         </button>
       </div>
 
       {isRefSource && <div style={{ fontSize: 10, color: "var(--warning)" }}>{t("cell.clickToPlaceRef")}</div>}
+      {pointerCopied && <div style={{ fontSize: 10, color: "var(--warning)" }}>{t("subgraph.pointerCopiedHint")}</div>}
+
       {fullSizeUrl && <FullSizeModal url={fullSizeUrl} onClose={() => setFullSizeUrl(null)} />}
     </div>
   );
