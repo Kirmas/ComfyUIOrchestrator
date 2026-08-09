@@ -256,13 +256,18 @@ class DetectedField:
     # Filled in by apply_combo_options() when the backend says this input is a
     # combo widget; None for a free-form one. type becomes "enum" alongside it.
     options: list[str] | None = None
-    # True for a field returned by variable_text_fields() rather than
-    # find_editable_text_fields(): it's already a param_schema variable
-    # (settable per node instance via Node.params), so editing it here changes
-    # the *default* a never-touched instance starts with, not a baked literal.
-    # node_id/input_key are still populated (from param_mapping) for display,
-    # but the write path is entirely different -- see
-    # update_variable_default vs update_capability_text_field.
+    # True when this same (node_id, input_key) is also promoted to a
+    # param_schema field (settable per node instance via Node.params) --
+    # purely informational, shown so an editor here knows a cell that already
+    # has its own value stored won't be affected. Does NOT change how the
+    # field is edited: update_capability_text_field writes this literal
+    # either way, since that's what a never-touched instance actually reads
+    # at generation time (build_workflow only overrides it once Node.params
+    # carries the key -- see CLAUDE.md's MCP section). A previous design had
+    # a second write path here (update_variable_default, writing
+    # NodeTemplate.param_schema's own decorative `default` instead) that
+    # never actually affected generation; removed 2026-08-09 rather than
+    # wired up, in favor of this one editor for both cases.
     is_variable: bool = False
 
 
@@ -295,13 +300,17 @@ def _is_link(value: Any) -> bool:
 def find_editable_text_fields(workflow_json: dict, param_mapping: dict) -> list[DetectedField]:
     """Literal prompt-shaped text values baked directly into an *existing*
     capability's workflow_json -- a CLIPTextEncode/TextEncodeQwenImageEditPlus
-    node's text, or a titled PrimitiveString(Multiline) node's value -- that
-    aren't already exposed as a param_schema field via param_mapping, so
-    today the only way to change them is re-uploading the whole workflow.
+    node's text, or a titled PrimitiveString(Multiline) node's value.
     Reuses the same class_type detection analyze_workflow uses at wizard
     time, minus the sampler-link-tracing: this walks every matching node
     directly (wired into a sampler or not), against a workflow_json that's
-    already live on a capability rather than a fresh upload."""
+    already live on a capability rather than a fresh upload.
+
+    Includes a field even when it's already promoted to a param_schema
+    variable via param_mapping (DetectedField.is_variable is set instead of
+    excluding it) -- editing the literal here is still the one thing that
+    changes what a never-touched instance of that field generates; see
+    DetectedField.is_variable's own docstring for why."""
     mapped = {(target.get("node_id"), target.get("input_key")) for target in param_mapping.values()}
     fields: list[DetectedField] = []
     for node_id, node in workflow_json.items():
@@ -316,41 +325,19 @@ def find_editable_text_fields(workflow_json: dict, param_mapping: dict) -> list[
 
         inputs = node.get("inputs", {})
         value = inputs.get(text_key)
-        if text_key not in inputs or _is_link(value) or (node_id, text_key) in mapped:
+        if text_key not in inputs or _is_link(value):
             continue
 
         title = (node.get("_meta") or {}).get("title") or class_type or node_id
         fields.append(
-            DetectedField(key=_slugify(f"{title}_{node_id}"), label=title, type="text", node_id=node_id, input_key=text_key, default=value)
-        )
-    return fields
-
-
-def variable_text_fields(param_schema: dict | None, param_mapping: dict) -> list[DetectedField]:
-    """The complement of find_editable_text_fields(): text-type fields a node
-    type's param_schema already exposes as variables (settable per node
-    instance -- see core/node_types.py). A capability's baked workflow_json
-    has no per-instance concept, so once a prompt is a variable there's
-    nothing left there to edit; what's still worth editing is the *default*
-    a never-touched instance starts with (param_schema field's own "default"),
-    which is what update_variable_default writes. node_id/input_key are
-    carried along from param_mapping purely for display -- this never reads
-    or writes workflow_json."""
-    mapped = param_mapping or {}
-    fields: list[DetectedField] = []
-    for field in (param_schema or {}).get("fields", []):
-        if field.get("type") != "text":
-            continue
-        target = mapped.get(field["name"], {})
-        fields.append(
             DetectedField(
-                key=field["name"],
-                label=field.get("label") or field["name"],
+                key=_slugify(f"{title}_{node_id}"),
+                label=title,
                 type="text",
-                node_id=str(target.get("node_id", "")),
-                input_key=str(target.get("input_key", "")),
-                default=field.get("default"),
-                is_variable=True,
+                node_id=node_id,
+                input_key=text_key,
+                default=value,
+                is_variable=(node_id, text_key) in mapped,
             )
         )
     return fields

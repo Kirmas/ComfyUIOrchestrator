@@ -130,6 +130,40 @@ prefix check covers `/mcp` explicitly, which matters because the unit binds
 app's **own REST API in-process** via `app/mcp/client.py` (`httpx.ASGITransport`),
 so route validation stays the single source of truth instead of being mirrored.
 
+**One editor for a capability's text fields, not two.** `set_prompt` writes
+the literal in one capability's ComfyUI `workflow_json` (redirected through
+`prompt_leader_id` if this instance follows another's prompts) — genuinely
+consulted at run time (`worker/tasks.py`'s `resolve_node_inputs`/
+`core/template_engine.build_workflow`) for ANY untouched param, text or not,
+mapped to a param_schema field or not: `build_workflow` only overwrites a
+mapped input if `Node.params` already has that key, otherwise the graph's
+own literal survives untouched. `set_node_params` only matters once an
+instance's `Node.params` actually carries the key — before that, the graph
+literal still wins regardless of what's in `param_schema`.
+`find_editable_text_fields` (`core/workflow_analyzer.py`) reflects this: it
+returns every text-shaped literal in `workflow_json`, marking
+`is_variable=true` when the same (node_id, input_key) is also a param — that
+flag is purely informational (so an editor can warn "a cell with its own
+value won't be affected"), not a fork in which tool to use.
+
+There used to be a second, parallel path here: a promoted field excluded
+from the baked list and redirected to `PATCH .../variable-default`, which
+wrote `NodeTemplate.param_schema`'s own field `default` instead. Traced and
+confirmed **dead** for generation (2026-08-09) — `resolve_node_inputs` never
+read it, `NodeCell.tsx`'s text field rendered `?? ""` not `?? field.default`,
+and `chooseTemplate` seeds a fresh node's params from `NodeTemplate.defaults`
+(a different, flat dict, always `{}` from `create_node_type`/MCP-authored
+types) — never from any per-field `default`. It only ever changed what
+`CapabilityTextFieldsModal` *displayed*, despite the UI's own hint string
+claiming otherwise. Removed outright the same day, route and UI branch both
+(`update_variable_default`, `CapabilityVariableDefaultUpdate`,
+`variable_text_fields()`) rather than wired up, once it was clear the
+original split ("baked" stops applying once a field is promoted, the
+promoted field's own default takes over) had never actually been finished on
+the generation side, and the literal was already the one thing that worked
+for both cases anyway. An MCP tool for the dead path (`set_node_type_default`)
+was briefly built, then removed the same day once this traced through.
+
 Two mounting gotchas, both already fixed — don't reintroduce them:
 - `FastMCP(..., streamable_http_path="/")`. The default is `/mcp`, which lands at
   `/mcp/mcp` once the sub-app is itself mounted at `/mcp`.

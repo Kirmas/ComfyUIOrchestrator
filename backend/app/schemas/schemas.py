@@ -98,11 +98,6 @@ class CapabilityTextFieldUpdate(BaseModel):
     value: str
 
 
-class CapabilityVariableDefaultUpdate(BaseModel):
-    field_name: str
-    value: str
-
-
 class CapabilityPromptLink(BaseModel):
     # Make this capability a "follower" that mirrors `leader_id`'s baked prompt
     # text (leader -> follower). None unlinks it back to independent prompts.
@@ -178,9 +173,11 @@ class DetectedFieldOut(BaseModel):
     # Present only for a combo widget, and only when the analyze call named a
     # backend to read /object_info from (see apply_combo_options).
     options: list[str] | None = None
-    # True => this field is already a param_schema variable; editing it in
-    # CapabilityTextFieldsModal writes its *default*, via a different endpoint
-    # than a baked literal. See workflow_analyzer.variable_text_fields.
+    # True => this same (node_id, input_key) is also a param_schema variable
+    # (settable per node instance via Node.params) -- informational only, so
+    # CapabilityTextFieldsModal can warn that a cell with its own value won't
+    # be affected. Edited exactly like any other field here either way; see
+    # workflow_analyzer.find_editable_text_fields.
     is_variable: bool = False
 
 

@@ -334,10 +334,9 @@ export interface DetectedField {
   // /object_info at analyze time -- a workflow.json records the picked value
   // but never the list it came from. Present => type is "enum".
   options?: string[] | null;
-  // True => this is already a param_schema variable (settable per node
-  // instance), not a baked literal -- CapabilityTextFieldsModal edits its
-  // *default* via a different endpoint. See workflow_analyzer.py's
-  // variable_text_fields.
+  // True => this same (node_id, input_key) is also a param_schema variable
+  // (settable per node instance) -- informational only, shown as a hint;
+  // CapabilityTextFieldsModal edits it the same way as any other field here.
   is_variable?: boolean;
 }
 

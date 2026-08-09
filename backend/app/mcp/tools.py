@@ -219,7 +219,18 @@ async def link_reference_asset(track_id: str, step_index: int, source_node_id: s
 
 @mcp_server.tool()
 async def set_prompt(capability_id: str, workflow_node_id: str, input_key: str, value: str) -> dict:
-    """Edit a workflow's baked prompt text (one not exposed as a grid param).
+    """Edit the literal prompt text baked into this capability's own ComfyUI
+    graph, at (workflow_node_id, input_key) -- get those from list_prompt_fields.
+
+    Use this for BOTH kinds of field list_prompt_fields returns, not just the
+    non-param (is_variable: false) ones: a param-mapped field's node.params
+    value only overrides this literal when a node instance has actually been
+    touched (see set_node_params); a fresh, never-touched instance still runs
+    on whatever's sitting here -- confirmed 2026-08-09 by tracing
+    resolve_node_inputs/build_workflow, neither of which falls back to
+    NodeTemplate.defaults or param_schema's own field default for a text
+    field. This is the only thing that changes what a fresh instance of a
+    mapped field generates.
 
     If this capability follows another instance's prompts, the write is
     redirected to its leader -- which is also mirrored into every other
@@ -246,6 +257,24 @@ async def set_prompt(capability_id: str, workflow_node_id: str, input_key: str, 
         "affected_capability_ids": affected,
         "capability": updated,
     }
+
+
+@mcp_server.tool()
+async def list_prompt_fields(capability_id: str) -> list[dict]:
+    """Every prompt-shaped text field worth knowing about for this
+    capability's node type, each with the (node_id, input_key) set_prompt
+    needs -- the discovery step for it.
+
+    `is_variable` tells you whether the SAME field is also independently
+    settable per node instance via set_node_params (true), or only exists in
+    the graph (false) -- it does NOT change which tool edits what a fresh
+    instance generates; that's always set_prompt, on this same (node_id,
+    input_key), either way. See set_prompt's docstring for why. (There is
+    deliberately no tool for `PATCH .../variable-default` -- it only writes
+    param_schema's own cosmetic `default`, never consulted at generation
+    time; see CLAUDE.md's MCP section.)
+    """
+    return await _get(f"/api/capabilities/{capability_id}/text-fields")
 
 
 # ---------- running ----------

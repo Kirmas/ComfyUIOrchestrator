@@ -4,18 +4,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.workflow_analyzer import find_editable_text_fields, variable_text_fields
+from app.core.workflow_analyzer import find_editable_text_fields
 from app.db.base import get_db
-from app.db.models import Capability, NodeTemplate
+from app.db.models import Capability
 from app.schemas.schemas import (
     CapabilityCreate,
     CapabilityPromptLink,
     CapabilityRead,
     CapabilityTextFieldUpdate,
     CapabilityUpdate,
-    CapabilityVariableDefaultUpdate,
     DetectedFieldOut,
-    NodeTemplateRead,
 )
 
 router = APIRouter(prefix="/api/capabilities", tags=["capabilities"])
@@ -88,23 +86,18 @@ async def update_capability(capability_id: uuid.UUID, payload: CapabilityUpdate,
 
 @router.get("/{capability_id}/text-fields", response_model=list[DetectedFieldOut])
 async def list_capability_text_fields(capability_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    """Every prompt-shaped text field worth editing for this capability:
-    literal ones still baked into its own workflow_json (see
-    find_editable_text_fields -- the ones a user would otherwise have to
-    re-upload the whole workflow to change) plus, once a prompt has been
-    promoted to a param_schema variable, that field's own default (see
-    variable_text_fields) -- the whole point of promoting one being that
-    the *baked* copy no longer means anything."""
+    """Every prompt-shaped text field worth editing for this capability --
+    literal values baked into its own workflow_json (see
+    find_editable_text_fields), including ones already promoted to a
+    param_schema variable (is_variable=true; still edited the same way here,
+    see find_editable_text_fields' own docstring for why there's no separate
+    path for those anymore)."""
     capability = await db.get(Capability, capability_id)
     if not capability:
         raise HTTPException(404, "Capability not found")
     workflow_json = capability.config.get("workflow_json")
     param_mapping = capability.config.get("param_mapping") or {}
-    baked = find_editable_text_fields(workflow_json, param_mapping) if isinstance(workflow_json, dict) else []
-    template_result = await db.execute(select(NodeTemplate).where(NodeTemplate.node_type_slug == capability.node_type_slug))
-    template = template_result.scalar_one_or_none()
-    variable = variable_text_fields(template.param_schema, param_mapping) if template else []
-    return [*baked, *variable]
+    return find_editable_text_fields(workflow_json, param_mapping) if isinstance(workflow_json, dict) else []
 
 
 @router.patch("/{capability_id}/text-fields", response_model=CapabilityRead)
@@ -132,35 +125,6 @@ async def update_capability_text_field(capability_id: uuid.UUID, payload: Capabi
     await db.commit()
     await db.refresh(capability)
     return capability
-
-
-@router.patch("/{capability_id}/variable-default", response_model=NodeTemplateRead)
-async def update_variable_default(capability_id: uuid.UUID, payload: CapabilityVariableDefaultUpdate, db: AsyncSession = Depends(get_db)):
-    """Change the default value of a text field that's already a param_schema
-    variable (see variable_text_fields). Unlike update_capability_text_field
-    this writes NodeTemplate.param_schema, not any one capability's
-    workflow_json -- the field's live value already lives on Node.params per
-    instance (see resolve_node_inputs), so there's nothing per-backend or
-    per-leader/follower to propagate here; every backend of this node type
-    shares the one template row already."""
-    capability = await db.get(Capability, capability_id)
-    if not capability:
-        raise HTTPException(404, "Capability not found")
-    template_result = await db.execute(select(NodeTemplate).where(NodeTemplate.node_type_slug == capability.node_type_slug))
-    template = template_result.scalar_one_or_none()
-    if not template:
-        raise HTTPException(404, "This node type has no editable template (native node type)")
-    fields = list((template.param_schema or {}).get("fields", []))
-    idx = next((i for i, f in enumerate(fields) if f.get("name") == payload.field_name), None)
-    if idx is None:
-        raise HTTPException(400, f"'{template.node_type_slug}' has no field named '{payload.field_name}'")
-    if fields[idx].get("type") != "text":
-        raise HTTPException(400, f"'{payload.field_name}' isn't a text field")
-    fields[idx] = {**fields[idx], "default": payload.value}
-    template.param_schema = {**template.param_schema, "fields": fields}
-    await db.commit()
-    await db.refresh(template)
-    return template
 
 
 @router.patch("/{capability_id}/prompt-link", response_model=CapabilityRead)

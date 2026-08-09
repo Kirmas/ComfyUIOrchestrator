@@ -144,7 +144,7 @@ export const en = {
   "caps.leaderFallback": "the leader instance",
   "caps.noTextFields":
     "No baked-in text fields found — this workflow's prompts are all already exposed as regular params, or it has none.",
-  "caps.variableDefaultHint": "Already a param — this edits the default new cells start with, not any node currently on the grid.",
+  "caps.variableFieldHint": "Also a per-cell param — a cell with its own value already set won't be affected by this.",
   "caps.leads": "leads {n}",
   "caps.leadsTitle": "Other instances follow this one's prompts",
   "caps.followTitle": "Follow another instance's prompts (leader → this one)",
