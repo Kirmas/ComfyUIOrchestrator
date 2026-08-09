@@ -113,14 +113,20 @@ async def move_tracks_to_dashboard(payload: TracksMove, db: AsyncSession = Depen
     - **Creator/output pairs.** An output is pinned to its creator's column and
       row range (_ensure_output_binding); split them across two grids and that
       relationship no longer has a coordinate system to be expressed in.
-    - **Spawned tracks.** A candidate line branched off a node in the selection
-      sits outside that node's span, so it has to be named explicitly or it
-      would be left behind pointing at a node in another grid.
     - **Smart pointers don't travel at all.** A selection containing one is
       refused outright rather than analysed: a pointer is pinned to the grid it
       was created in, and that pinning is exactly what makes the main pointers a
       spanning tree. To have a pointer somewhere else, create a new one there
       and transfer ownership to it.
+
+    Note what is deliberately NOT on that list: which node a track was spawned
+    from. A candidate line's actual binding to its producer is the picker's own
+    Node.created_by_node_id, already covered by the pair rule above --
+    Track.spawned_from_node_id is provenance for an arrow, it survives the
+    candidates being deleted, it can name a node that isn't even the creator
+    (see _relocate_leftover_candidates' cause_node_id), and the row can go on to
+    hold something else entirely. Refusing a move over it was refusing to move
+    rows on account of their history rather than their contents.
 
     Contiguity is required for the same reason: the tracks keep their relative
     order, so offsets between them survive the move only if there was no gap to
@@ -201,16 +207,6 @@ async def move_tracks_to_dashboard(payload: TracksMove, db: AsyncSession = Depen
                     "A workflow and its own output would end up in different grids -- move them together.",
                 )
 
-    spawned = await db.execute(
-        select(Track).where(Track.spawned_from_node_id.in_([n.id for n in scope_nodes if n.track_id in moving]))
-    )
-    for track in spawned.scalars().all():
-        if track.id not in moving and track.dashboard_id == source_dashboard:
-            raise HTTPException(
-                409,
-                "A candidate line spawned from this selection would be left behind -- include its track too.",
-            )
-
     # A smart pointer never rides along -- flat refusal, no reachability
     # analysis. A pointer is pinned to the dashboard it was created in (that
     # pinning is what makes the main pointers a spanning tree), and letting a
@@ -224,6 +220,23 @@ async def move_tracks_to_dashboard(payload: TracksMove, db: AsyncSession = Depen
                 409,
                 "That selection contains a subgraph pointer, which can't be moved between grids -- create a new pointer where you want it and transfer ownership to it instead.",
             )
+
+    # Past every refusal, so nothing is mutated on a move that then fails.
+    # Track.spawned_from_node_id is provenance, not structure: a row is just a
+    # row, whatever ends up living in it. The link only feeds the "branched off
+    # there" arrow and the empty-spawned-track cleanup button (Grid.tsx),
+    # neither of which can span two grids -- so when the two ends land in
+    # different scopes it's simply dropped, in whichever direction that
+    # happened. Dropping it also keeps _actual_span/ensure_span_rows (nodes.py,
+    # which still counts spawned tracks) from stretching a moved workflow's
+    # card over a row that isn't in its grid.
+    moving_node_ids = {n.id for n in scope_nodes if n.track_id in moving}
+    result = await db.execute(select(Track).where(Track.spawned_from_node_id.in_(moving_node_ids)))
+    crossing = [t for t in result.scalars().all() if t.id not in moving]
+    crossing += [t for t in tracks if t.spawned_from_node_id is not None and t.spawned_from_node_id not in moving_node_ids]
+    for track in crossing:
+        track.spawned_from_node_id = None
+        track.spawned_from_output_id = None
 
     source_kind = await scope_start_kind(db, project_id, source_dashboard)
     target_kind = await scope_start_kind(db, project_id, target_dashboard)
