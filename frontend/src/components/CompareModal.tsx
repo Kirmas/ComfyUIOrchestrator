@@ -28,8 +28,29 @@ const aspectMismatch = (l: Dims, r: Dims): boolean => {
  *    (usePinchPan, same as the single-image viewer) to inspect fine detail.
  *    Switching back to compare resets the zoom to fit.
  *
- * Image-vs-image only -- mesh assets aren't offered as compare candidates. */
-export function CompareModal({ left, right, onClose }: { left: Asset; right: Asset; onClose: () => void }) {
+ * Image-vs-image only -- mesh assets aren't offered as compare candidates.
+ *
+ * onSelectLeft/onDiscardLeft: only supplied by the caller when `left` is one
+ * candidate of an asset.select picker (Grid.tsx derives that from the source
+ * node's node_type, since this component only ever sees bare Assets) -- lets
+ * the user act on an undecided candidate right from the compare view instead
+ * of having to close it and find the same candidate again in the grid. Never
+ * offered for `right`: a picker can't be a compare target in the first place
+ * (isPickable excludes it), so there's never a matching decision to make on
+ * that side. */
+export function CompareModal({
+  left,
+  right,
+  onClose,
+  onSelectLeft,
+  onDiscardLeft,
+}: {
+  left: Asset;
+  right: Asset;
+  onClose: () => void;
+  onSelectLeft?: () => void;
+  onDiscardLeft?: () => void;
+}) {
   const t = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const [mode, setMode] = useState<"compare" | "zoom">("compare");
@@ -195,6 +216,38 @@ export function CompareModal({ left, right, onClose }: { left: Asset; right: Ass
         >
           {zoomMode ? t("compare.compare") : t("compare.zoom")}
         </button>
+        {/* Only present when `left` is an asset.select candidate (Grid.tsx
+            gates this) -- same "keep this one" / "reject this one" actions
+            CandidatesGrid offers in the grid itself, so a candidate can be
+            settled right from the compare view. Never shown for `right`. */}
+        {(onSelectLeft || onDiscardLeft) && (
+          <div className="compare-left-actions">
+            {onSelectLeft && (
+              <button
+                type="button"
+                className="compare-select-left"
+                onClick={onSelectLeft}
+                onPointerDown={(e) => e.stopPropagation()}
+                onPointerUp={(e) => e.stopPropagation()}
+                title={t("compare.selectLeftTitle")}
+              >
+                {t("compare.selectLeft")}
+              </button>
+            )}
+            {onDiscardLeft && (
+              <button
+                type="button"
+                className="compare-discard-left"
+                onClick={onDiscardLeft}
+                onPointerDown={(e) => e.stopPropagation()}
+                onPointerUp={(e) => e.stopPropagation()}
+                title={t("compare.discardLeftTitle")}
+              >
+                {t("compare.discardLeft")}
+              </button>
+            )}
+          </div>
+        )}
         <button
           type="button"
           className="image-modal-close"

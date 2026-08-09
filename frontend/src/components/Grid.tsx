@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { annotationsApi, backendsApi, capabilitiesApi, dashboardsApi, nodeTemplatesApi, nodesApi, projectsApi, tracksApi } from "../api/endpoints";
+import { annotationsApi, assetsApi, backendsApi, capabilitiesApi, dashboardsApi, nodeTemplatesApi, nodesApi, projectsApi, tracksApi } from "../api/endpoints";
 import { useProjectWs } from "../api/useProjectWs";
 import { assetClipboard, subgraphClipboard, useClipboardSlot } from "../clipboard";
 import { assetFace, assetNodeKind } from "../assetNodes";
@@ -60,7 +60,7 @@ function isPickable(node: NodeItem, outputs: Asset[]): boolean {
 
 export function Grid({ projectId }: { projectId: string }) {
   const t = useT();
-  const { tracks, nodesById, outputsByNode, spans, blockedCells, annotations, dashboardId, navStack, loadProject, restoreProject, reloadTracks, reloadAnnotations, applyProgressEvent, addNode, setNode, removeTrack, refreshNodeOutputs, leaveDashboard } =
+  const { tracks, nodesById, outputsByNode, spans, blockedCells, annotations, dashboardId, navStack, loadProject, restoreProject, reloadTracks, reloadAnnotations, applyProgressEvent, addNode, setNode, removeNode, removeTrack, refreshNodeOutputs, leaveDashboard } =
     useProjectStore();
   // Nodes ticked for grouping into a comment block. Shift/Ctrl/Cmd-click on a
   // cell toggles membership; a plain click is left alone so it keeps meaning
@@ -105,7 +105,11 @@ export function Grid({ projectId }: { projectId: string }) {
   // clicking any other pickable asset-node cell completes the pair (same
   // click-to-complete gesture the ref gesture below also uses).
   const [compareFor, setCompareFor] = useState<{ nodeId: string; asset: Asset } | null>(null);
-  const [comparePair, setComparePair] = useState<[Asset, Asset] | null>(null);
+  // leftNodeId is carried through from compareFor (discarded there once the
+  // pair completes) so CompareModal's select/discard-left actions know which
+  // node to act on -- and, via nodesById, whether that node is an
+  // asset.select picker at all (those two actions are its candidates only).
+  const [comparePair, setComparePair] = useState<{ left: Asset; right: Asset; leftNodeId: string } | null>(null);
   // Asset node currently being dragged (native HTML5 DnD) to a different row
   // within a workflow node's span -- see dropAssetAt below.
   const [draggingAssetId, setDraggingAssetId] = useState<string | null>(null);
@@ -839,12 +843,46 @@ export function Grid({ projectId }: { projectId: string }) {
         alert(t("grid.noOutputsYet"));
         return;
       }
-      setComparePair([compareFor.asset, asset]);
+      setComparePair({ left: compareFor.asset, right: asset, leftNodeId: compareFor.nodeId });
       setCompareFor(null);
     }
   };
 
   const onStartCompare = (node: NodeItem, asset: Asset) => setCompareFor({ nodeId: node.id, asset });
+
+  // Select/discard the left/anchor side of an in-progress compare, when it's
+  // one candidate of an asset.select picker -- same two actions
+  // CandidatesGrid offers per-candidate in the grid (NodeCell.tsx's
+  // selectCandidate/discardCandidate), just reachable without leaving
+  // Compare. Both end the compare: selecting settles the picker (its layout
+  // changes -- leftover candidates fork onto a new row) and discarding
+  // deletes the asset outright, so the pairing is stale either way.
+  const selectCompareLeft = async () => {
+    if (!comparePair) return;
+    const { left, leftNodeId } = comparePair;
+    try {
+      await nodesApi.pickCandidate(leftNodeId, left.id);
+      const projectId = tracks.find((tr) => tr.id === nodesById[leftNodeId]?.track_id)?.project_id;
+      if (projectId) await loadProject(projectId, dashboardId);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : t("cell.keepCandidateFailed"));
+    }
+    setComparePair(null);
+  };
+
+  const discardCompareLeft = async () => {
+    if (!comparePair) return;
+    if (!confirm(t("cell.confirmDiscardImage"))) return;
+    const { left, leftNodeId } = comparePair;
+    await assetsApi.remove(left.id);
+    await refreshNodeOutputs(leftNodeId);
+    const remaining = await nodesApi.outputs(leftNodeId).catch(() => []);
+    if (remaining.length === 0) {
+      await nodesApi.remove(leftNodeId);
+      removeNode(leftNodeId);
+    }
+    setComparePair(null);
+  };
 
   // Manual drag of an asset node onto another cell. The frontend does NO
   // placement logic anymore -- it just sends the intent (the target grid
@@ -1868,7 +1906,23 @@ export function Grid({ projectId }: { projectId: string }) {
         </div>
       </div>
 
-      {comparePair && <CompareModal left={comparePair[0]} right={comparePair[1]} onClose={() => setComparePair(null)} />}
+      {comparePair &&
+        (() => {
+          // Only an asset.select picker's own candidates get select/discard
+          // here -- everything else (asset.single/refasset/subgraph faces)
+          // is already settled, so there's no "which one" decision left to
+          // make from Compare.
+          const eligible = nodesById[comparePair.leftNodeId]?.node_type === "asset.select";
+          return (
+            <CompareModal
+              left={comparePair.left}
+              right={comparePair.right}
+              onClose={() => setComparePair(null)}
+              onSelectLeft={eligible ? selectCompareLeft : undefined}
+              onDiscardLeft={eligible ? discardCompareLeft : undefined}
+            />
+          );
+        })()}
       {pickRefAt && (
         <ReferencePicker
           projectId={projectId}

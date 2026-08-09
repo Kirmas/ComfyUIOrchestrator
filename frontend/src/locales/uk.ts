@@ -474,6 +474,10 @@ export const uk: Record<TKey, string> = {
   "compare.compare": "⇔ Порівняти",
   "compare.zoom": "🔍 Масштаб",
   "compare.closeTitle": "Закрити порівняння",
+  "compare.selectLeft": "обрати ★",
+  "compare.selectLeftTitle": "Лишити цього кандидата тут — решта кандидатів переїде в новий рядок",
+  "compare.discardLeft": "відхилити ✕",
+  "compare.discardLeftTitle": "Відхилити цього кандидата",
 
   // --- Crop preview ----------------------------------------------------
   "crop.free": "Вільно",

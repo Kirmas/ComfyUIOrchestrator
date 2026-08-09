@@ -472,6 +472,10 @@ export const en = {
   "compare.compare": "⇔ Compare",
   "compare.zoom": "🔍 Zoom",
   "compare.closeTitle": "Close compare",
+  "compare.selectLeft": "select ★",
+  "compare.selectLeftTitle": "Keep this candidate here -- moves the other candidates to a new row",
+  "compare.discardLeft": "discard ✕",
+  "compare.discardLeftTitle": "Reject this candidate",
 
   // --- Crop preview ----------------------------------------------------
   "crop.free": "Free",
