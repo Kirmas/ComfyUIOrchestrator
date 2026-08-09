@@ -183,7 +183,10 @@ async def rename_dashboard(dashboard_id: uuid.UUID, payload: DashboardRename, db
     dashboard = await db.get(Dashboard, dashboard_id)
     if dashboard is None:
         raise HTTPException(404, "Dashboard not found")
-    dashboard.name = payload.name
+    if payload.name is not None:
+        dashboard.name = payload.name
+    if payload.asset_only_view is not None:
+        dashboard.asset_only_view = payload.asset_only_view
     await db.commit()
     await db.refresh(dashboard)
     return _read(dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))

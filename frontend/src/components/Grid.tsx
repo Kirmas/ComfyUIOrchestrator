@@ -70,6 +70,36 @@ export function Grid({ projectId }: { projectId: string }) {
   const [backends, setBackends] = useState<Backend[]>([]);
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
   const [project, setProject] = useState<Project | null>(null);
+  // Column 0's kind is per-scope, not per-project (grid_scope.py) -- a
+  // sub-dashboard fixes its own origin the first time a node is created in
+  // it, independently of whatever the main grid started with. project.start_kind
+  // is *always* the main grid's origin (Dashboard gets its own start_kind
+  // field instead of a Project row of its own), so it can't be read directly
+  // while dashboardId is set -- doing so used to silently skip the "start
+  // with asset/workflow" prompt in a brand-new sub-dashboard (it inherited
+  // the main grid's already-fixed kind) and shifted anything dragged in from
+  // the main grid by one column to paper over the mismatch instead of asking.
+  const [dashboardStartKind, setDashboardStartKind] = useState<NodeKind | null>(null);
+  const effectiveStartKind = dashboardId ? dashboardStartKind : (project?.start_kind ?? null);
+  const reloadScopeStartKind = () =>
+    dashboardId ? dashboardsApi.get(dashboardId).then((d) => setDashboardStartKind(d.start_kind)) : reloadProject();
+  // "Asset only" view: a pure display toggle, per scope like start_kind above
+  // -- hides workflow cells and their "+ крок" buttons without touching any
+  // placement/layout math (positions, spans, columns are all unchanged; a
+  // hidden workflow cell still occupies its column exactly as before, so
+  // toggling this back on can't have drifted anything). The backend only
+  // remembers the flag (Project.asset_only_view / Dashboard.asset_only_view).
+  const [dashboardAssetOnlyView, setDashboardAssetOnlyView] = useState(false);
+  const assetOnlyView = dashboardId ? dashboardAssetOnlyView : (project?.asset_only_view ?? false);
+  const toggleAssetOnlyView = async () => {
+    const next = !assetOnlyView;
+    if (dashboardId) {
+      const d = await dashboardsApi.setAssetOnlyView(dashboardId, next);
+      setDashboardAssetOnlyView(d.asset_only_view);
+    } else {
+      setProject(await projectsApi.setAssetOnlyView(projectId, next));
+    }
+  };
   // Compare mode spans the whole project, not just one node's own candidates
   // -- compareFor is the anchor asset (from wherever "⇄" was clicked), and
   // clicking any other pickable asset-node cell completes the pair (same
@@ -231,6 +261,21 @@ export function Grid({ projectId }: { projectId: string }) {
     capabilitiesApi.list().then(setCapabilities);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, restoreProject]);
+
+  // Re-fetch the scope's own start_kind/asset_only_view whenever the scope
+  // itself changes (diving into/out of a sub-dashboard) -- these otherwise
+  // keep showing whichever scope was open before.
+  useEffect(() => {
+    if (dashboardId) {
+      dashboardsApi.get(dashboardId).then((d) => {
+        setDashboardStartKind(d.start_kind);
+        setDashboardAssetOnlyView(d.asset_only_view);
+      });
+    } else {
+      setDashboardStartKind(null);
+      setDashboardAssetOnlyView(false);
+    }
+  }, [dashboardId]);
 
   useProjectWs(projectId, applyProgressEvent);
 
@@ -399,7 +444,7 @@ export function Grid({ projectId }: { projectId: string }) {
   // case too (nothing else claims the cell right after it either), so this
   // replaces that per-track "+ step" entirely rather than living alongside it.
   const assetNextStepCells = useMemo(() => {
-    const list: { node: NodeItem; row: number; step: number }[] = [];
+    const list: { node: NodeItem; row: number; step: number; skipStep: number | null }[] = [];
     for (const node of Object.values(nodesById)) {
       if (node.kind !== "asset") continue;
       // A collapsed chain's pass-through asset doesn't render its own cell
@@ -410,7 +455,17 @@ export function Grid({ projectId }: { projectId: string }) {
       const step = node.step_index + 1;
       if (nodesByRowStep.has(`${row}:${step}`)) continue;
       if (blockedCells.has(`${row}:${step}`)) continue;
-      list.push({ node, row, step });
+      // The column right after THAT one is asset-parity again (kinds
+      // alternate every column) -- offer a way straight to it too, for a
+      // second independent asset with no workflow between them (e.g. a
+      // subgraph pointer's row that doesn't need its own regeneration step
+      // right now). Dragging/moving an existing asset there already worked
+      // (the backend only checks parity+free, not what's immediately
+      // before it); this is the same placement made reachable by a click
+      // instead of only a drag.
+      const skipStep = step + 1;
+      const skipAvailable = !nodesByRowStep.has(`${row}:${skipStep}`) && !blockedCells.has(`${row}:${skipStep}`);
+      list.push({ node, row, step, skipStep: skipAvailable ? skipStep : null });
     }
     return list;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -427,7 +482,7 @@ export function Grid({ projectId }: { projectId: string }) {
     let s = step;
     while (
       blockedCells.has(`${rowIndex}:${s}`) ||
-      (requiredKind && project?.start_kind != null && kindForStep(project.start_kind, s) !== requiredKind)
+      (requiredKind && effectiveStartKind != null && kindForStep(effectiveStartKind, s) !== requiredKind)
     ) {
       s++;
     }
@@ -455,6 +510,21 @@ export function Grid({ projectId }: { projectId: string }) {
     return Math.max(max, maxStep);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tracks, nodesByTrack, maxStep, emptyTrackSkip, blockedCells]);
+
+  // Collapses every workflow-parity column to near-zero width while
+  // assetOnlyView is on -- hiding the cards themselves (see the trackNodes
+  // render loop) left their column's own 260px reserved, which read as
+  // "still there, just invisible" rather than actually gone. Column *count*
+  // and step_index math are completely untouched (only CSS track sizes
+  // change), so toggling this back off needs no re-layout.
+  const gridColumnTemplate = useMemo(() => {
+    const widths: string[] = [];
+    for (let step = 0; step <= maxButtonStep + 1; step++) {
+      const collapsed = assetOnlyView && effectiveStartKind != null && kindForStep(effectiveStartKind, step) === "workflow";
+      widths.push(collapsed ? "0px" : "260px");
+    }
+    return `120px ${widths.join(" ")}`;
+  }, [maxButtonStep, assetOnlyView, effectiveStartKind]);
 
   const maxRowSpanBottom = useMemo(() => {
     let max = sortedTracks.length;
@@ -741,7 +811,7 @@ export function Grid({ projectId }: { projectId: string }) {
       kind: firstKindChoice ?? "workflow",
     });
     addNode(node);
-    if (project?.start_kind == null) reloadProject();
+    if (effectiveStartKind == null) reloadScopeStartKind();
     setEmptyTrackSkip((prev) => {
       if (!(trackId in prev)) return prev;
       const next = { ...prev };
@@ -841,11 +911,11 @@ export function Grid({ projectId }: { projectId: string }) {
   // into it or copied into it, so the same list serves both rather than a
   // second near-identical memo.
   const emptyWorkflowCells = useMemo(() => {
-    if ((!draggingWorkflowId && !copyFor) || !project?.start_kind) return [];
+    if ((!draggingWorkflowId && !copyFor) || !effectiveStartKind) return [];
     const cells: { row: number; step: number }[] = [];
     for (const row of tracks.map((t) => t.row_index)) {
       for (let step = 0; step <= maxButtonStep; step++) {
-        if (kindForStep(project.start_kind, step) !== "workflow") continue;
+        if (kindForStep(effectiveStartKind, step) !== "workflow") continue;
         if (nodesByRowStep.has(`${row}:${step}`)) continue;
         // A cell some other workflow's spanning card already covers holds no
         // node of its own, so the check above passes -- but dropping (or
@@ -858,23 +928,23 @@ export function Grid({ projectId }: { projectId: string }) {
       }
     }
     return cells;
-  }, [draggingWorkflowId, copyFor, project, tracks, maxButtonStep, nodesByRowStep, blockedCells]);
+  }, [draggingWorkflowId, copyFor, effectiveStartKind, tracks, maxButtonStep, nodesByRowStep, blockedCells]);
 
   // Same idea as emptyWorkflowCells, but for the asset half of the grid: every
   // currently-empty asset-parity cell, regardless of any drag -- the raw set
   // both asset drop-target layers below are cut from.
   const emptyAssetCells = useMemo(() => {
-    if (!project?.start_kind) return [];
+    if (!effectiveStartKind) return [];
     const cells: { row: number; step: number }[] = [];
     for (const row of tracks.map((t) => t.row_index)) {
       for (let step = 0; step <= maxButtonStep; step++) {
-        if (kindForStep(project.start_kind, step) !== "asset") continue;
+        if (kindForStep(effectiveStartKind, step) !== "asset") continue;
         if (nodesByRowStep.has(`${row}:${step}`)) continue;
         cells.push({ row, step });
       }
     }
     return cells;
-  }, [project, tracks, maxButtonStep, nodesByRowStep]);
+  }, [effectiveStartKind, tracks, maxButtonStep, nodesByRowStep]);
 
   // Drop targets for an internal asset-node drag: all of the above except the
   // cells reachable from some workflow's own span (emptyReachableCells, which
@@ -1236,6 +1306,13 @@ export function Grid({ projectId }: { projectId: string }) {
         <button onClick={() => setZoomIndex(2)} title={t("grid.resetZoomTitle")} disabled={zoomIndex === 2}>
           {t("common.reset")}
         </button>
+        <button
+          onClick={() => void toggleAssetOnlyView()}
+          title={t("grid.assetOnlyViewTitle")}
+          className={cx(assetOnlyView && "active")}
+        >
+          {t("grid.assetOnlyView")}
+        </button>
       </div>
       {/* Only shown once you're actually inside something. Sibling of the
           scaled wrapper for the same containing-block reason as .zoom-indicator.
@@ -1298,7 +1375,7 @@ export function Grid({ projectId }: { projectId: string }) {
         <div
           className="grid-canvas"
           style={{
-            gridTemplateColumns: `120px repeat(${maxButtonStep + 2}, 260px)`,
+            gridTemplateColumns: gridColumnTemplate,
             // minmax floor, not plain "auto": an "auto" row with nothing else
             // in it collapses to zero, so a workflow node spanning several
             // otherwise-empty rows would render at the same height as a
@@ -1363,6 +1440,10 @@ export function Grid({ projectId }: { projectId: string }) {
             const trackNodes = nodesByTrack.get(track.id) ?? [];
             return trackNodes.map((node) => {
               if (hiddenChainNodeIds.has(node.id)) return null;
+              // "Asset only" view: skip rendering the card, nothing else --
+              // its column/step_index is completely untouched, so toggling
+              // this back off shows exactly what was there before.
+              if (assetOnlyView && node.kind === "workflow") return null;
               const row = effectiveRow(node);
               const gridRow = node.kind === "workflow" ? `${row + 1} / span ${spanAchieved(node.id)}` : row + 1;
               // No span here (unlike an earlier version): collapse_node
@@ -1562,7 +1643,7 @@ export function Grid({ projectId }: { projectId: string }) {
           ))}
 
           {sortedTracks.map((track, rowIdx) => {
-            const showStartChoice = project?.start_kind == null;
+            const showStartChoice = effectiveStartKind == null;
             const trackNodes = nodesByTrack.get(track.id) ?? [];
             const firstNode = trackNodes[0];
             // A track's own leading columns (before its first node) can be
@@ -1598,7 +1679,7 @@ export function Grid({ projectId }: { projectId: string }) {
             // on top of it.
             const buttonStep = showStartChoice ? rawButtonStep : nextFreeStep(track.row_index, rawButtonStep);
             if (buttonStep >= ceiling) return null;
-            const emptyTrackKind = !showStartChoice ? kindForStep(project!.start_kind!, buttonStep) : null;
+            const emptyTrackKind = !showStartChoice ? kindForStep(effectiveStartKind!, buttonStep) : null;
             const skipColumn = () => setEmptyTrackSkip((prev) => ({ ...prev, [track.id]: (prev[track.id] ?? 0) + 1 }));
             // The column right after buttonStep is just as reachable, and its
             // kind is always the opposite one by construction (parity
@@ -1651,7 +1732,12 @@ export function Grid({ projectId }: { projectId: string }) {
                         </button>
                       </>
                     )
-                  ) : emptyTrackKind === "workflow" ? (
+                  ) : emptyTrackKind === "workflow" && !assetOnlyView ? (
+                    // No button at all when assetOnlyView -- this column is
+                    // collapsed to 0 width below (columnWidths), and the
+                    // asset-kind secondStep button right after it already
+                    // covers "place the next real thing" without needing to
+                    // create the hidden workflow cell first.
                     <>
                       <button onClick={() => addStep(track.id, "workflow", buttonStep)} title={t("grid.addStepTitle")}>
                         {t("grid.addStep")}
@@ -1662,7 +1748,7 @@ export function Grid({ projectId }: { projectId: string }) {
                     </>
                   ) : null}
                 </div>
-                {!showStartChoice && secondAvailable && (
+                {!showStartChoice && secondAvailable && (secondKind === "asset" || !assetOnlyView) && (
                   <div style={{ gridColumn: secondStep + 2, gridRow: rowIdx + 1, alignSelf: "center", display: "flex", gap: 4 }}>
                     {secondKind === "asset" ? (
                       <button onClick={() => addStep(track.id, "asset", secondStep)} title={t("grid.addAssetHereTitle")}>
@@ -1710,15 +1796,54 @@ export function Grid({ projectId }: { projectId: string }) {
             </div>
           ))}
 
-          {assetNextStepCells.map(({ node, row, step }) => (
-            <div
-              key={`add-asset-${node.id}`}
-              style={{ gridColumn: step + 2, gridRow: row + 1, alignSelf: "center", display: "flex", gap: 4 }}
-            >
-              <button onClick={() => addStep(node.track_id, undefined, step)} title={t("grid.addStepAfterAssetTitle")}>
-                {t("grid.addStep")}
-              </button>
-            </div>
+          {assetNextStepCells.map(({ node, row, step, skipStep }) => (
+            <Fragment key={`add-asset-${node.id}`}>
+              {!assetOnlyView && (
+                <div style={{ gridColumn: step + 2, gridRow: row + 1, alignSelf: "center", display: "flex", gap: 4 }}>
+                  <button onClick={() => addStep(node.track_id, undefined, step)} title={t("grid.addStepAfterAssetTitle")}>
+                    {t("grid.addStep")}
+                  </button>
+                </div>
+              )}
+              {/* A second independent asset one column further out, no
+                  workflow required in between -- same placement a plain
+                  drag already allowed (the backend only checks
+                  parity+free), now reachable by a click too. This cell may
+                  also be outside emptyAssetDropCells' own coverage (that
+                  overlay only spans up to maxButtonStep, which tracks each
+                  track's own next free step, not a jump two columns out) --
+                  so rather than lean on that overlay (and risk stacking two
+                  drop targets, or one hiding the other by DOM order), this
+                  div handles the internal asset drag itself directly, same
+                  as emptyReachableCells' own div does. */}
+              {skipStep !== null && (
+                <div
+                  style={{ gridColumn: skipStep + 2, gridRow: row + 1, alignSelf: "center", display: "flex", gap: 4 }}
+                  onDragOver={(e) => {
+                    if (draggingAssetId) e.preventDefault();
+                  }}
+                  onDrop={(e) => {
+                    if (!draggingAssetId) return;
+                    e.preventDefault();
+                    dropAssetAt(row, skipStep);
+                  }}
+                >
+                  {draggingAssetId ? (
+                    <div style={{ fontSize: 10, padding: "1px 4px", opacity: 0.6, border: "1px dashed var(--success)", borderRadius: 4 }}>
+                      {t("grid.dropHere")}
+                    </div>
+                  ) : (
+                    <button
+                      style={{ fontSize: 10, padding: "1px 4px", opacity: 0.6 }}
+                      onClick={() => addStep(node.track_id, "asset", skipStep)}
+                      title={t("grid.addAssetSkipStepTitle")}
+                    >
+                      {t("grid.addAsset")}
+                    </button>
+                  )}
+                </div>
+              )}
+            </Fragment>
           ))}
         </div>
 

@@ -66,29 +66,51 @@ async def create_project(name: str) -> dict:
 
 
 @mcp_server.tool()
-async def get_project_recipe(project_id: str) -> dict:
+async def get_project_recipe(project_id: str, dashboard_id: str | None = None) -> dict:
     """Read a project step by step: ordered tracks, the nodes at each step with
     their params, plus which cells are occupied or blocked by a spanning card.
 
     Call this before creating nodes -- create_node needs a concrete
     (track_id, step_index) and a collision is a hard error.
+
+    Any asset node here with a non-null `subgraph_dashboard_id` is a smart
+    pointer into its own separate grid ("sub-dashboard") -- pass that value
+    as `dashboard_id` in a second call to read the nested grid the same way
+    (its own tracks/steps/spans, not a filter over this one). `project_id`
+    stays the same top-level project either way.
     """
-    return await _get(f"/api/projects/{project_id}/recipe")
+    params = {"dashboard_id": dashboard_id} if dashboard_id else {}
+    return await _get(f"/api/projects/{project_id}/recipe", **params)
 
 
 @mcp_server.tool()
-async def list_tracks(project_id: str) -> list[dict]:
-    """Tracks (grid rows) of a project, already in top-to-bottom order."""
-    return await _get(f"/api/projects/{project_id}/tracks")
+async def list_tracks(project_id: str, dashboard_id: str | None = None) -> list[dict]:
+    """Tracks (grid rows) of a project, already in top-to-bottom order.
+
+    Pass a sub-dashboard's id (from an asset node's `subgraph_dashboard_id`,
+    see get_project_recipe) to list that nested grid's own tracks instead of
+    the main grid's.
+    """
+    params = {"dashboard_id": dashboard_id} if dashboard_id else {}
+    return await _get(f"/api/projects/{project_id}/tracks", **params)
 
 
 @mcp_server.tool()
-async def create_track(project_id: str, after_track_id: str | None = None, place_at_head: bool = False) -> dict:
+async def create_track(
+    project_id: str, after_track_id: str | None = None, place_at_head: bool = False, dashboard_id: str | None = None
+) -> dict:
     """Add a row. Placement is relative: after a given track, at the head, or
-    (default) appended at the bottom -- there is no numeric row index."""
+    (default) appended at the bottom -- there is no numeric row index.
+
+    dashboard_id omitted adds to the project's main grid; pass a
+    sub-dashboard's id (see get_project_recipe) to add a row inside that
+    nested grid instead. Omit it when after_track_id is set -- the new row
+    joins whichever scope that track is already in."""
     payload: dict = {"project_id": project_id, "place_at_head": place_at_head}
     if after_track_id:
         payload["after_track_id"] = after_track_id
+    if dashboard_id:
+        payload["dashboard_id"] = dashboard_id
     return await _post("/api/tracks", payload)
 
 

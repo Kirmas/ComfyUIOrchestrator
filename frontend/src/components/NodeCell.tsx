@@ -342,7 +342,15 @@ function BaseAssetNodeView({
   const setNode = useProjectStore((s) => s.setNode);
   const refreshOutputs = useProjectStore((s) => s.refreshNodeOutputs);
   const removeNode = useProjectStore((s) => s.removeNode);
-  const insideSubgraph = useProjectStore((s) => s.dashboardId !== null);
+  const dashboardId = useProjectStore((s) => s.dashboardId);
+  const dashboardName = useProjectStore((s) => s.navStack[s.navStack.length - 1]?.name);
+  const insideSubgraph = dashboardId !== null;
+  // If this cell's own output is the sub-dashboard's chosen result, download
+  // it under the dashboard's own name instead of its opaque storage filename.
+  const [isDashboardResult, setIsDashboardResult] = useState(false);
+  useEffect(() => {
+    if (dashboardId && outputs[0]) dashboardsApi.get(dashboardId).then((d) => setIsDashboardResult(d.result_asset_id === outputs[0].id));
+  }, [dashboardId, outputs[0]?.id]);
   const copiedSubgraph = useClipboardSlot(subgraphClipboard);
   const tracks = useProjectStore((s) => s.tracks);
   const loadProject = useProjectStore((s) => s.loadProject);
@@ -652,7 +660,12 @@ function BaseAssetNodeView({
       />
       <div className="node-actions" onClick={(e) => e.stopPropagation()}>
         {outputs.length === 1 && !isCandidatesGrid && (
-          <a className="primary" style={{ textDecoration: "none", padding: "4px 8px" }} href={resolveAssetUrl(outputs[0].url)} download>
+          <a
+            className="primary"
+            style={{ textDecoration: "none", padding: "4px 8px" }}
+            href={resolveAssetUrl(outputs[0].url)}
+            download={isDashboardResult && dashboardName ? `${dashboardName}.${outputs[0].url?.split(".").pop()}` : true}
+          >
             {t("cell.download")}
           </a>
         )}

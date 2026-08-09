@@ -87,6 +87,9 @@ export interface Project {
   id: string;
   name: string;
   start_kind: NodeKind | null;
+  // Pure display toggle -- Grid.tsx hides workflow columns when set. Persisted
+  // here purely so it's remembered across reloads; nothing server-side reads it.
+  asset_only_view: boolean;
   created_at: string;
 }
 
@@ -202,6 +205,8 @@ export interface Dashboard {
   project_id: string;
   name: string;
   start_kind: NodeKind | null;
+  // Same purely-cosmetic toggle as Project.asset_only_view, for this scope.
+  asset_only_view: boolean;
   // The main pointer. Deleting it is refused while node_count > 0; if the
   // dashboard is empty and other pointers remain, one is auto-promoted.
   owner_node_id: string | null;

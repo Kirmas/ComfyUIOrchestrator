@@ -56,6 +56,18 @@ grid. This is *organisational decomposition*, not a performance trick.
   something inside one grid, so relocating one node across scopes would strand
   its creator/output binding. Moving finished work between dashboards is meant
   to be a deliberate whole-track operation (not built yet).
+- **An MCP agent reads a sub-dashboard the same way the frontend does: pass
+  its id, don't look for a separate tool.** `get_project_recipe`/`list_tracks`/
+  `create_track` (mcp/tools.py) take an optional `dashboard_id`, mirrored
+  straight through to `GET /api/projects/{id}/recipe|tracks` and
+  `POST /api/tracks`, which already had the parameter for the frontend's own
+  navigation. A `recipe` read also now echoes each node's
+  `subgraph_dashboard_id` (previously only on `GET /api/nodes/{id}`), so an
+  agent can spot every nested pointer in one call instead of probing each
+  asset node individually, and get the value to pass back in. Board tools
+  (`get_board`, `list_board_items`) are unrelated -- a dashboard is a grid
+  scope, not a `Board` row, and never accepts a dashboard id (2026-08-09
+  gap report; fixed same day).
 
 ## Idea board (`backend/app/api/routes/boards.py`, `frontend/src/components/Board.tsx`)
 

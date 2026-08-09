@@ -200,7 +200,12 @@ class ProjectRead(ORMModel):
     id: uuid.UUID
     name: str
     start_kind: NodeKind | None
+    asset_only_view: bool
     created_at: datetime
+
+
+class ProjectUpdate(BaseModel):
+    asset_only_view: bool | None = None
 
 
 # ---------- Track ----------
@@ -571,7 +576,8 @@ class PointerCreate(BaseModel):
 
 
 class DashboardRename(BaseModel):
-    name: str
+    name: str | None = None
+    asset_only_view: bool | None = None
 
 
 class TransferOwnership(BaseModel):
@@ -588,6 +594,7 @@ class DashboardRead(BaseModel):
     project_id: uuid.UUID
     name: str
     start_kind: NodeKind | None
+    asset_only_view: bool
     owner_node_id: uuid.UUID | None
     result_asset_id: uuid.UUID | None = None
     # Resolved here so a pointer can render the face without a second lookup.

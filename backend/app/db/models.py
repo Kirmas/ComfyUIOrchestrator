@@ -127,6 +127,10 @@ class Project(Base):
     # given fixes column 0's kind, and it strictly alternates from there. Null
     # until that first node exists. See nodes.py's create_node.
     start_kind: Mapped[NodeKind | None] = mapped_column(String(32), nullable=True)
+    # Pure frontend display toggle (Grid.tsx hides workflow columns when set) --
+    # the backend only remembers it per scope, same split as start_kind. Never
+    # read by any placement/layout logic here.
+    asset_only_view: Mapped[bool] = mapped_column(nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     tracks: Mapped[list["Track"]] = relationship(back_populates="project", cascade="all, delete-orphan")
@@ -165,6 +169,8 @@ class Dashboard(Base):
     # on a different kind than its parent (nodes moved in are re-aligned by
     # shifting a column, never rejected).
     start_kind: Mapped[NodeKind | None] = mapped_column(String(32), nullable=True)
+    # Same purely-cosmetic toggle as Project.asset_only_view, for this scope.
+    asset_only_view: Mapped[bool] = mapped_column(nullable=False, default=False)
     # The main pointer. SET NULL rather than CASCADE: losing the owner must
     # never silently destroy the dashboard's contents -- the delete/auto-promote
     # rules in api/routes/dashboards.py decide what happens instead.

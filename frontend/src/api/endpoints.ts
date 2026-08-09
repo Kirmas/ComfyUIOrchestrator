@@ -100,6 +100,7 @@ export const projectsApi = {
   layout: (id: string, dashboardId?: string | null) =>
     api.get<GridLayout>(`/api/projects/${id}/layout${dashboardId ? `?dashboard_id=${dashboardId}` : ""}`),
   annotations: (id: string) => api.get<Annotation[]>(`/api/projects/${id}/annotations`),
+  setAssetOnlyView: (id: string, value: boolean) => api.patch<Project>(`/api/projects/${id}`, { asset_only_view: value }),
   remove: (id: string) => api.delete(`/api/projects/${id}`),
 };
 
@@ -112,6 +113,7 @@ export const dashboardsApi = {
   addPointer: (dashboardId: string, nodeId: string) =>
     api.post<Dashboard>(`/api/dashboards/${dashboardId}/pointers`, { node_id: nodeId }),
   rename: (id: string, name: string) => api.patch<Dashboard>(`/api/dashboards/${id}`, { name }),
+  setAssetOnlyView: (id: string, value: boolean) => api.patch<Dashboard>(`/api/dashboards/${id}`, { asset_only_view: value }),
   setResult: (id: string, assetId: string | null) =>
     api.post<Dashboard>(`/api/dashboards/${id}/result`, { asset_id: assetId }),
   transferOwnership: (id: string, nodeId: string) =>
