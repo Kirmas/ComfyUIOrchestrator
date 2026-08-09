@@ -12,7 +12,7 @@ import { useProjectStore } from "../state/projectStore";
 import { defaultInputsForSchema, slotFields } from "../templateUtils";
 import type { Asset, Backend, Capability, Dashboard, InputRef, Job, NodeItem, NodeStatus, NodeTemplate } from "../types";
 import { useT, type TFunc } from "../i18n";
-import { cx } from "../utils";
+import { cx, extensionForMimeType } from "../utils";
 import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
 import { capabilityUsesIdeogram4 } from "../ideogram4";
 import { CaptionBoxEditor, type CaptionBgOption } from "./CaptionBoxEditor";
@@ -664,7 +664,7 @@ function BaseAssetNodeView({
             className="primary"
             style={{ textDecoration: "none", padding: "4px 8px" }}
             href={resolveAssetUrl(outputs[0].url)}
-            download={isDashboardResult && dashboardName ? `${dashboardName}.${outputs[0].url?.split(".").pop()}` : true}
+            download={isDashboardResult && dashboardName ? `${dashboardName}.${extensionForMimeType(outputs[0].mime_type)}` : true}
           >
             {t("cell.download")}
           </a>
