@@ -23,7 +23,14 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.native_backend import CharacterChartBackend, CropBackend, MaskBackend, NativeBackend
+from app.core.native_backend import (
+    DEFAULT_TRANSPLANT_FEATHER,
+    CharacterChartBackend,
+    CropBackend,
+    MaskBackend,
+    NativeBackend,
+    TransplantBackend,
+)
 from app.db.models import Node, NodeTemplate
 
 
@@ -72,6 +79,24 @@ NATIVE_NODE_TYPES: dict[str, NativeNodeType] = {
         },
         defaults={"crop_x": 0, "crop_y": 0, "crop_width": 512, "crop_height": 512},
         backend_cls=CropBackend,
+    ),
+    "transplant": NativeNodeType(
+        slug="transplant",
+        name="Transplant",
+        param_schema={
+            "fields": [
+                # Slot order is the layer order the editor stacks them in:
+                # "target" on top (the image being fixed, kept everywhere the
+                # user doesn't paint), "source" underneath (the older image
+                # whose detail shows through where they do).
+                {"name": "target", "type": "image", "label": "Target (top layer)", "required": True},
+                {"name": "source", "type": "image", "label": "Source (underneath)", "required": True},
+                {"name": "transplant_png", "type": "layer_mask", "label": "Transplanted area", "optional": True},
+                {"name": "transplant_feather", "type": "float", "label": "Edge Feather (px)", "default": DEFAULT_TRANSPLANT_FEATHER, "optional": True},
+            ]
+        },
+        defaults={"transplant_feather": DEFAULT_TRANSPLANT_FEATHER},
+        backend_cls=TransplantBackend,
     ),
     "mask": NativeNodeType(
         slug="mask",

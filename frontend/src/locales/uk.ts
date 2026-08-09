@@ -404,6 +404,7 @@ export const uk: Record<TKey, string> = {
   "cell.labelHint": "(необов'язково — показується на комірці)",
   "cell.noCropSource": "Вихідного зображення для перегляду ще немає — x={x}, y={y}, ш={w}, в={h}",
   "cell.noMaskSource": "Вихідного зображення для малювання ще немає",
+  "cell.noTransplantSource": "Обидва слоти мають містити зображення, щоб переносити між ними",
   "cell.chainNoOutput": "виходу немає",
   "cell.chainNoParams": "параметрів немає",
   "cell.reference": "↗ Посилання",
@@ -487,6 +488,10 @@ export const uk: Record<TKey, string> = {
   "mask.erasing": "Стирання",
   "mask.painting": "Малювання",
   "mask.undo": "Скасувати дію",
+
+  // --- Transplant editor (native.transplant) ---------------------------
+  "transplant.topOpacity": "Верхній шар",
+  "transplant.hint": "Малюй по верхньому зображенню — там проступить ця ділянка з нижнього.",
 
   // --- Comment block (annotation) --------------------------------------
   "annotation.addTitle": "Подвійний клік — додати коментар",

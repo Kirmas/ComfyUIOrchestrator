@@ -4,7 +4,7 @@ import { resolveAssetUrl } from "../api/client";
 import { assetsApi, dashboardsApi, jobsApi, nodesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
 import { isFileDrag } from "../dragUtils";
-import { detectMaskGroups, resolveMaskImageField } from "../maskUtils";
+import { detectLayerMaskGroups, detectMaskGroups, resolveMaskImageField } from "../maskUtils";
 import { copyAsset } from "../assetClipboard";
 import { assetFace } from "../assetNodes";
 import { resolveSlotAsset } from "../slotResolution";
@@ -18,6 +18,7 @@ import { capabilityUsesIdeogram4 } from "../ideogram4";
 import { CaptionBoxEditor, type CaptionBgOption } from "./CaptionBoxEditor";
 import { CropPreview, type CropBox } from "./CropPreview";
 import { MaskPreview } from "./MaskPreview";
+import { TransplantPreview } from "./TransplantPreview";
 import { IdeaTextPicker, MacroPreview } from "./IdeaTextPicker";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
 import { Model3DThumb } from "./Model3DThumb";
@@ -782,6 +783,18 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     return options.reverse();
   }, [nodesById, outputsByNode, node.id, t]);
 
+  /** The picture currently feeding one of this node type's image/file fields,
+   * as a URL -- what every in-modal editor (crop box, mask brush, transplant
+   * layers) needs before it can draw anything. Named field -> its position
+   * among the slots -> whatever asset that grid position resolves to. */
+  const slotImageUrl = async (fieldName: string | null): Promise<string | null> => {
+    if (!template || !fieldName) return null;
+    const slotIndex = slotFields(template.param_schema).findIndex((f) => f.name === fieldName);
+    if (slotIndex < 0) return null;
+    const asset = await resolveSlotAsset(node, slotIndex, tracks, nodesById);
+    return asset ? resolveAssetUrl(asset.url) : null;
+  };
+
   useEffect(() => {
     if (!paramsOpen || !template || cropGroups.length === 0) {
       setCropImages({});
@@ -789,18 +802,10 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     }
     let cancelled = false;
     (async () => {
-      const slots = slotFields(template.param_schema);
       const capability = capabilities.find((c) => c.node_type_slug === template.node_type_slug);
       const next: Record<string, string | null> = {};
       for (const group of cropGroups) {
-        const fieldName = resolveCropImageField(capability, group, template.param_schema.fields ?? []);
-        const slotIndex = fieldName ? slots.findIndex((f) => f.name === fieldName) : -1;
-        if (slotIndex < 0) {
-          next[group.prefix] = null;
-          continue;
-        }
-        const asset = await resolveSlotAsset(node, slotIndex, tracks, nodesById);
-        next[group.prefix] = asset ? resolveAssetUrl(asset.url) : null;
+        next[group.prefix] = await slotImageUrl(resolveCropImageField(capability, group, template.param_schema.fields ?? []));
       }
       if (!cancelled) setCropImages(next);
     })();
@@ -820,17 +825,9 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     }
     let cancelled = false;
     (async () => {
-      const slots = slotFields(template.param_schema);
       const next: Record<string, string | null> = {};
       for (const group of maskGroups) {
-        const fieldName = resolveMaskImageField(template.param_schema.fields ?? []);
-        const slotIndex = fieldName ? slots.findIndex((f) => f.name === fieldName) : -1;
-        if (slotIndex < 0) {
-          next[group.maskField] = null;
-          continue;
-        }
-        const asset = await resolveSlotAsset(node, slotIndex, tracks, nodesById);
-        next[group.maskField] = asset ? resolveAssetUrl(asset.url) : null;
+        next[group.maskField] = await slotImageUrl(resolveMaskImageField(template.param_schema.fields ?? []));
       }
       if (!cancelled) setMaskImages(next);
     })();
@@ -839,6 +836,33 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paramsOpen, template, node.inputs, maskGroups]);
+
+  const layerGroups = useMemo(() => (template ? detectLayerMaskGroups(template.param_schema.fields ?? []) : []), [template]);
+  // Both layers of each transplant group, keyed by its mask field. Only a pair
+  // is usable -- with one side missing there's nothing to transplant between.
+  const [layerImages, setLayerImages] = useState<Record<string, { target: string | null; source: string | null }>>({});
+
+  useEffect(() => {
+    if (!paramsOpen || !template || layerGroups.length === 0) {
+      setLayerImages({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const next: Record<string, { target: string | null; source: string | null }> = {};
+      for (const group of layerGroups) {
+        next[group.maskField] = {
+          target: await slotImageUrl(group.targetField),
+          source: await slotImageUrl(group.sourceField),
+        };
+      }
+      if (!cancelled) setLayerImages(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paramsOpen, template, node.inputs, layerGroups]);
 
   // Always available, not just for the last cell in a track -- unlike an
   // asset cell, a workflow node's own output(s) aren't guaranteed to still
@@ -1009,6 +1033,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     [cropGroups],
   );
   const maskFieldNames = useMemo(() => new Set(maskGroups.map((g) => g.maskField)), [maskGroups]);
+  const layerMaskFieldNames = useMemo(() => new Set(layerGroups.map((g) => g.maskField)), [layerGroups]);
 
   const paramFieldInputs = template &&
     (template.param_schema.fields ?? [])
@@ -1016,8 +1041,17 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
       // (resolve_node_inputs in worker/tasks.py) -- nothing for the user to set.
       // Crop-group fields render as one draggable box instead (see cropGroups
       // below) -- 4 raw x/y/width/height numbers are one entity, not 4 params.
-      // Mask fields render as a paint canvas instead (see maskGroups below).
-      .filter((f) => f.type !== "image" && f.type !== "file" && f.type !== "seed" && !cropFieldNames.has(f.name) && !maskFieldNames.has(f.name))
+      // Mask fields render as a paint canvas instead (see maskGroups below),
+      // layer-mask fields as the two-layer transplant editor (layerGroups).
+      .filter(
+        (f) =>
+          f.type !== "image" &&
+          f.type !== "file" &&
+          f.type !== "seed" &&
+          !cropFieldNames.has(f.name) &&
+          !maskFieldNames.has(f.name) &&
+          !layerMaskFieldNames.has(f.name),
+      )
       .map((field) => (
         <div key={field.name} className="field-row">
           <label>{field.label ?? field.name}</label>
@@ -1298,9 +1332,10 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
         </div>
       )}
 
-      {!collapseInfo && ((paramFieldInputs && paramFieldInputs.length > 0) || cropGroups.length > 0 || maskGroups.length > 0) && (
-        <div className="node-cell-hint">{t("cell.moreParams")}</div>
-      )}
+      {!collapseInfo &&
+        ((paramFieldInputs && paramFieldInputs.length > 0) || cropGroups.length > 0 || maskGroups.length > 0 || layerGroups.length > 0) && (
+          <div className="node-cell-hint">{t("cell.moreParams")}</div>
+        )}
 
       {jobs.length > 0 && node.status !== "done" && node.status !== "discarded" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 3 }} onClick={(e) => e.stopPropagation()}>
@@ -1454,6 +1489,26 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                       />
                     ) : (
                       <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("cell.noMaskSource")}</div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {layerGroups.map((group) => {
+                const layers = layerImages[group.maskField];
+                return (
+                  <div key={group.maskField} className="field-row">
+                    <label>{group.label}</label>
+                    {layers?.target && layers?.source ? (
+                      <TransplantPreview
+                        targetUrl={layers.target}
+                        sourceUrl={layers.source}
+                        maskPng={(node.params[group.maskField] as string) ?? null}
+                        feather={group.featherField ? Number(node.params[group.featherField] ?? group.featherDefault) : 0}
+                        onCommit={(maskPng) => updateParam(group.maskField, maskPng)}
+                      />
+                    ) : (
+                      <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("cell.noTransplantSource")}</div>
                     )}
                   </div>
                 );

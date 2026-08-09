@@ -38,7 +38,10 @@ export interface ParamField {
   name: string;
   // "mask" is a params-stored bilevel PNG (base64), not a workflow input
   // slot -- see native.mask in node_types.py and MaskPreview.tsx.
-  type: "image" | "text" | "int" | "float" | "seed" | "enum" | "file" | "bool" | "mask";
+  // "layer_mask" is the same storage for a mask painted over two stacked
+  // image slots rather than one -- see native.transplant and
+  // TransplantPreview.tsx.
+  type: "image" | "text" | "int" | "float" | "seed" | "enum" | "file" | "bool" | "mask" | "layer_mask";
   label?: string;
   required?: boolean;
   // Not every capability for this node_type_slug has to honor this field --

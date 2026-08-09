@@ -402,6 +402,7 @@ export const en = {
   "cell.labelHint": "(optional — shown on the cell)",
   "cell.noCropSource": "No source image to preview yet -- x={x}, y={y}, w={w}, h={h}",
   "cell.noMaskSource": "No source image to paint on yet",
+  "cell.noTransplantSource": "Both slots need an image before you can transplant between them",
   "cell.chainNoOutput": "no output",
   "cell.chainNoParams": "no params",
   "cell.reference": "↗ Reference",
@@ -485,6 +486,10 @@ export const en = {
   "mask.erasing": "Erasing",
   "mask.painting": "Painting",
   "mask.undo": "Undo",
+
+  // --- Transplant editor (native.transplant) ---------------------------
+  "transplant.topOpacity": "Top layer",
+  "transplant.hint": "Paint over the top image to bring that area back from the one underneath.",
 
   // --- Comment block (annotation) --------------------------------------
   "annotation.addTitle": "Double-click to add a comment",
