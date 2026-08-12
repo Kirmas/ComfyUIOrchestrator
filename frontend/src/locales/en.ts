@@ -467,7 +467,7 @@ export const en = {
 
   // --- Compare ---------------------------------------------------------
   "compare.mismatch": "Can’t compare images with different aspect ratios.",
-  "compare.backTitle": "Back to compare (resets zoom)",
+  "compare.backTitle": "Back to compare (keeps zoom)",
   "compare.zoomTitle": "Zoom in to inspect detail",
   "compare.compare": "⇔ Compare",
   "compare.zoom": "🔍 Zoom",

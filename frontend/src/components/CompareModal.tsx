@@ -26,7 +26,9 @@ const aspectMismatch = (l: Dims, r: Dims): boolean => {
  *  - "zoom": the divider freezes (glued to the image content, so it tracks the
  *    same feature) and the gestures instead zoom + pan BOTH images together
  *    (usePinchPan, same as the single-image viewer) to inspect fine detail.
- *    Switching back to compare resets the zoom to fit.
+ *    Switching back to compare keeps that zoom/pan as-is (no snap-to-fit) --
+ *    it only recenters the divider under the screen's own center, wherever
+ *    that now lands in image content, so it's reachable for dragging again.
  *
  * Image-vs-image only -- mesh assets aren't offered as compare candidates.
  *
@@ -71,7 +73,7 @@ export function CompareModal({
   const draggingRef = useRef(false);
   const stageRef = useRef<HTMLDivElement>(null);
 
-  const { view, grabbing, reset, handlers } = usePinchPan(containerRef, mode === "zoom");
+  const { view, grabbing, handlers } = usePinchPan(containerRef, mode === "zoom");
 
   useEffect(() => {
     const c = containerRef.current;
@@ -84,13 +86,6 @@ export function CompareModal({
     measure();
     return () => observer.disconnect();
   }, []);
-
-  const toggleMode = () => {
-    setMode((m) => {
-      if (m === "zoom") reset(); // going back to compare -> zoom snaps to fit
-      return m === "zoom" ? "compare" : "zoom";
-    });
-  };
 
   // Screen X of the content-fraction u under the current transform, as a % of
   // the container width. The image is centered in the container, transform-
@@ -106,6 +101,20 @@ export function CompareModal({
     const localScreenX = clientX - rect.left;
     const localX = (localScreenX - rect.width / 2 - view.x) / view.zoom + iw / 2;
     return Math.min(1, Math.max(0, localX / iw));
+  };
+
+  const toggleMode = () => {
+    setMode((m) => {
+      if (m === "zoom") {
+        // Going back to compare: keep the zoom/pan exactly as it was (no
+        // snap-to-fit) -- just bring the divider back under the screen's own
+        // center, wherever that now lands in image content, so it's within
+        // reach to drag again instead of stuck off past the screen edge.
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (rect) setU(uFromClientX(rect.left + rect.width / 2));
+      }
+      return m === "zoom" ? "compare" : "zoom";
+    });
   };
 
   // Slider-mode divider drag (only when not in zoom mode -- there usePinchPan's
