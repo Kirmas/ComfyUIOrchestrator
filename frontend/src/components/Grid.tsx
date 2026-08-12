@@ -1186,12 +1186,18 @@ export function Grid({ projectId }: { projectId: string }) {
   // the backend copies the fields, validates the cell and materializes the
   // copy's own input-slot rows (duplicate_node), and we re-fetch the
   // authoritative layout. A rejected placement comes back as a 409 shown as-is.
+  //
+  // copyFor isn't cleared on dashboard navigation, so the gesture can be armed
+  // on a card in one subgraph and completed after diving into another -- row/
+  // step are always positions in the CURRENTLY DISPLAYED grid (dashboardId),
+  // which target_dashboard_id names explicitly so the backend doesn't assume
+  // it matches the source node's own dashboard.
   const completeCopyAt = async (row: number, step: number) => {
     if (!copyFor) return;
     const sourceId = copyFor.nodeId;
     setCopyFor(null);
     try {
-      await nodesApi.duplicate(sourceId, { target_row: row, target_step: step });
+      await nodesApi.duplicate(sourceId, { target_row: row, target_step: step, target_dashboard_id: dashboardId });
       await loadProject(projectId, dashboardId);
       // A copy carrying a template can grow rows for its input slots
       // (ensure_span_rows), same as choosing a template on a fresh cell does.

@@ -176,8 +176,12 @@ export const nodesApi = {
     api.post<NodeItem[]>(`/api/nodes/${id}/move`, data),
   // Real copy of a workflow node (template + every local setting, none of its
   // results) at the named cell -- same intent-only shape as move above. Not the
-  // asset world's reference: the copy is a second independent node.
-  duplicate: (id: string, data: { target_row: number; target_step: number }) =>
+  // asset world's reference: the copy is a second independent node. Unlike
+  // move, this can cross dashboards -- target_dashboard_id names the scope
+  // target_row/target_step are positions within (the grid displayed when the
+  // gesture completes, which the "⧉" gesture lets be a different one than
+  // where it started -- see Grid.tsx's completeCopyAt).
+  duplicate: (id: string, data: { target_row: number; target_step: number; target_dashboard_id?: string | null }) =>
     api.post<NodeItem>(`/api/nodes/${id}/duplicate`, data),
   // Candidate fork -- backend owns the whole reshuffle (settle one, relocate
   // the leftover picker). Client just names the kept asset.

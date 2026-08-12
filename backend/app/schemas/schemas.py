@@ -291,10 +291,24 @@ class PickCandidate(BaseModel):
 class NodeDuplicate(BaseModel):
     # Intent only, same two fields and same meaning as NodeMove below: "put a
     # real copy of this workflow node at grid (row, column)". target_row is a
-    # position in the project's track list order (core/track_order.py), not a
-    # stored number. See api/routes/nodes.py's duplicate_node.
+    # position in a track list order (core/track_order.py), not a stored
+    # number -- specifically the order of target_dashboard_id's own scope, NOT
+    # necessarily the source node's own scope. See api/routes/nodes.py's
+    # duplicate_node.
     target_row: int
     target_step: int
+    # Which grid scope target_row/target_step are positions within. Unlike
+    # NodeMove (which can't cross scopes at all -- see _ensure_same_scope),
+    # a duplicate is a fresh, independent node with no creator/output binding
+    # to strand, so copying into a different dashboard than the source is
+    # safe. Grid.tsx's "⧉" gesture can be armed on a card in one dashboard and
+    # completed after navigating to another (it doesn't reset copyFor on
+    # navigation), so this must be named explicitly rather than assumed equal
+    # to the source's own dashboard -- defaulting to the source's scope here
+    # is exactly what produced the "A node already exists at this track/step"
+    # 409 when the two didn't match. None means the project's main grid, same
+    # convention as Track.dashboard_id.
+    target_dashboard_id: uuid.UUID | None = None
 
 
 class NodeMove(BaseModel):

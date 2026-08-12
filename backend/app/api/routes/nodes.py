@@ -13,7 +13,7 @@ from app.core.queue import job_queue
 from app.core.track_order import ordered_tracks, scope_of, splice_after
 from app.core.storage import build_asset_url, get_storage
 from app.db.base import get_db
-from app.db.models import Asset, AssetKind, Job, Node, NodeKind, NodeStatus, Track
+from app.db.models import Asset, AssetKind, Dashboard, Job, Node, NodeKind, NodeStatus, Track
 from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeDuplicate, NodeMove, NodeRead, NodeUpdate, PickCandidate
 from app.worker.tasks import (
     _splice_after_would_split_a_span,
@@ -983,7 +983,9 @@ async def duplicate_node(node_id: uuid.UUID, payload: NodeDuplicate, db: AsyncSe
     original's collapsed chain.
 
     Placement is intent-only, like move_node: the client says which cell the user
-    picked and this either accepts it or 409s."""
+    picked and this either accepts it or 409s. Unlike move_node, the target cell
+    may be in a different dashboard than the source node's own -- see
+    NodeDuplicate.target_dashboard_id."""
     old = await db.get(Node, node_id)
     if not old:
         raise HTTPException(404, "Node not found")
@@ -995,13 +997,24 @@ async def duplicate_node(node_id: uuid.UUID, payload: NodeDuplicate, db: AsyncSe
     home = await db.get(Track, old.track_id)
     if home is None:
         raise HTTPException(409, "Node has no track.")
-    ordered = await ordered_tracks(db, *scope_of(home))
+
+    # The destination scope is named explicitly, not assumed equal to the
+    # source's own (see NodeDuplicate.target_dashboard_id) -- only checking
+    # that it's a real dashboard in the same project, since a copy is a fresh
+    # node with no creator/output binding to strand.
+    target_dashboard_id = payload.target_dashboard_id
+    if target_dashboard_id is not None:
+        dest_dashboard = await db.get(Dashboard, target_dashboard_id)
+        if dest_dashboard is None or dest_dashboard.project_id != home.project_id:
+            raise HTTPException(404, "Dashboard not found")
+
+    ordered = await ordered_tracks(db, home.project_id, target_dashboard_id)
     if not (0 <= payload.target_row < len(ordered)) or payload.target_step < 0:
         raise HTTPException(409, "Target cell is off the grid.")
 
     # Column kind is a per-scope parity pattern, not a per-node choice (see
     # create_node) -- a workflow copy only ever belongs in a workflow column.
-    start_kind = await scope_start_kind(db, home.project_id, home.dashboard_id)
+    start_kind = await scope_start_kind(db, home.project_id, target_dashboard_id)
     if start_kind is not None and _kind_for_step(start_kind, payload.target_step) != NodeKind.workflow:
         raise HTTPException(409, "That column holds asset cells -- a workflow copy needs a workflow column.")
 
