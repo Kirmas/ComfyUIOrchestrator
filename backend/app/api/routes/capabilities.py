@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.workflow_analyzer import find_editable_text_fields
 from app.db.base import get_db
-from app.db.models import Capability
+from app.db.models import Capability, NodeTemplate
 from app.schemas.schemas import (
     CapabilityCreate,
     CapabilityPromptLink,
@@ -32,6 +32,36 @@ def _apply_text_value(config: dict, node_id: str, input_key: str, value) -> dict
         return None
     new_wf = {**wf, node_id: {**node, "inputs": {**node["inputs"], input_key: value}}}
     return {**config, "workflow_json": new_wf}
+
+
+async def _sync_template_default(db: AsyncSession, capability: Capability, node_id: str, input_key: str, value) -> None:
+    """Keep NodeTemplate.defaults in step with a capability's own literal for
+    any field that's also promoted to a param_schema variable (is_variable).
+
+    NodeTypeWizard.tsx's submitCreate seeds NodeTemplate.defaults[field] from
+    the *wizard-time* snapshot of this same value, and NodeCell.tsx's
+    chooseTemplate seeds a brand-new node's own Node.params straight from that
+    defaults dict -- so without this, editing the field here (which only ever
+    touched Capability.config.workflow_json) left every freshly created node
+    seeded with a stale, pre-edit prompt that then permanently outranked the
+    live literal (Node.params always wins once the key exists, see
+    template_engine.build_workflow) -- a fresh node looked like it had "saved"
+    a prompt nobody ever typed into it (2026-08-14 report). One shared
+    NodeTemplate row backs every backend instance of a node type, so this is
+    a single write regardless of which capability/backend was edited -- same
+    "one editor, one value" model as the text field itself."""
+    param_mapping = capability.config.get("param_mapping") or {}
+    field_name = next(
+        (k for k, target in param_mapping.items() if target.get("node_id") == node_id and target.get("input_key") == input_key),
+        None,
+    )
+    if field_name is None:
+        return
+    result = await db.execute(select(NodeTemplate).where(NodeTemplate.node_type_slug == capability.node_type_slug))
+    template = result.scalar_one_or_none()
+    if template is None:
+        return
+    template.defaults = {**template.defaults, field_name: value}
 
 
 async def _followers_of(db: AsyncSession, capability: Capability) -> list[Capability]:
@@ -114,6 +144,7 @@ async def update_capability_text_field(capability_id: uuid.UUID, payload: Capabi
     if updated is None:
         raise HTTPException(400, f"workflow has no node '{payload.node_id}' with input '{payload.input_key}'")
     capability.config = updated
+    await _sync_template_default(db, capability, payload.node_id, payload.input_key, payload.value)
 
     # Leader -> followers: mirror this same field into every instance following
     # it (skipping any whose workflow lacks the field -- a simplified variant).
