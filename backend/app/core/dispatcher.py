@@ -1,16 +1,20 @@
 """Capability-filtered, least-loaded backend selection."""
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import dispatch_stats
 from app.core.api_backend import build_api_backend
 from app.core.comfyui_backend import ComfyUIBackend
 from app.core.job_backend import JobBackend
 from app.core.node_types import EffectiveTemplate
-from app.db.models import ApiUsageLog, Backend, Capability, ExecutionType
+from app.db.models import ApiUsageLog, Backend, Capability, ExecutionType, Job, JobStatusEnum
+
+logger = logging.getLogger(__name__)
 
 # Same rolling-window choice as backends.py's used_today computation -- must
 # match exactly, or a backend could read as "over quota" in one place and
@@ -94,6 +98,19 @@ async def _backend_within_quota(db: AsyncSession, backend: Backend) -> bool:
     return used < backend.daily_limit
 
 
+async def _waiting_job_count(db: AsyncSession) -> int:
+    """How many jobs are still looking for a backend right now, this one
+    included. It is what makes dispatch_stats.plan_dispatch's answer depend on
+    queue depth -- one job left is worth holding back for a faster backend,
+    several are not (see its docstring). Counted across all nodes on purpose:
+    they all contend for the same pool, and over-counting only ever biases
+    towards using a free backend, which is the harmless direction."""
+    stmt = select(func.count()).select_from(Job).where(
+        Job.status.in_((JobStatusEnum.pending, JobStatusEnum.waiting_for_backend))
+    )
+    return (await db.execute(stmt)).scalar_one()
+
+
 def _instantiate(backend: Backend, capability: Capability) -> JobBackend | None:
     if capability.execution_type == ExecutionType.comfyui_workflow:
         if not backend.base_url:
@@ -117,7 +134,12 @@ async def select_backend(
     manual_backend_id: str | None = None,
     exclude_backend_ids: set[str] | None = None,
     use_api: bool = False,
+    node_id: str | None = None,
+    job_id: str | None = None,
 ) -> DispatchChoice | None:
+    """node_id/job_id are only used to consult dispatch_stats -- without them
+    (or without measurements for this node yet) selection is exactly the
+    least-loaded rule it always was."""
     if effective.is_native:
         # No Capability/Backend row involved at all -- native types are a code
         # registry (see node_types.py), always available, nothing to pick
@@ -153,23 +175,56 @@ async def select_backend(
     # be atomic, otherwise two callers can both read the same stale reservation
     # count before either has incremented it (see module docstring above).
     infos = [(choice, await choice.instance.capacity()) for choice in candidates]
+    # Read before taking the lock -- it's a DB round trip, and the count only
+    # needs to be good enough to tell "one job left" from "several".
+    waiting_jobs = await _waiting_job_count(db) if node_id and len(candidates) > 1 else 0
 
     best: DispatchChoice | None = None
     async with _reservation_lock:
-        best_effective_length = None
+        # effective_length: the backend's own live queue plus picks this batch
+        # has already made but not yet submitted (see _reserved above).
+        # has_room: whether we're willing to commit one more job to it at all.
+        alive: list[tuple[DispatchChoice, int, bool]] = []
         for choice, info in infos:
             if not info.is_alive:
                 continue
             effective_length = info.queue_length + _reserved.get(str(choice.backend.id), 0)
-            if info.max_queue_length is not None and effective_length >= info.max_queue_length:
-                continue  # backend already has as much queued as we're willing to commit -- let it drain first
-            if best is None or effective_length < best_effective_length:
-                best = choice
-                best_effective_length = effective_length
+            has_room = info.max_queue_length is None or effective_length < info.max_queue_length
+            alive.append((choice, effective_length, has_room))
+
+        plan = None
+        if node_id and job_id:
+            plan = dispatch_stats.plan_dispatch(
+                node_id,
+                [dispatch_stats.BackendSlot(str(choice.backend.id), has_room) for choice, _, has_room in alive],
+                waiting_jobs,
+                job_id,
+            )
+
+        if plan is not None and plan.backend_id is None:
+            # A busy backend will finish this job sooner than any free one would
+            # start it, and there's nothing else queued to fill the free one
+            # with -- stay in waiting_for_backend and re-poll.
+            logger.info("job %s held back: %s", job_id, plan.detail)
+            return None
+
+        if plan is not None:
+            best = next(choice for choice, _, _ in alive if str(choice.backend.id) == plan.backend_id)
+            logger.info("job %s -> backend %s: %s", job_id, plan.backend_id, plan.detail)
+        else:
+            best_effective_length = None
+            for choice, effective_length, has_room in alive:
+                if not has_room:
+                    continue  # already has as much queued as we're willing to commit -- let it drain first
+                if best is None or effective_length < best_effective_length:
+                    best = choice
+                    best_effective_length = effective_length
 
         if best is not None:
             backend_id = str(best.backend.id)
             _reserved[backend_id] = _reserved.get(backend_id, 0) + 1
+            if node_id and job_id:
+                dispatch_stats.note_dispatch(backend_id, node_id, job_id)
 
     return best
 

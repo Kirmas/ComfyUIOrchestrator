@@ -9,7 +9,7 @@ import httpx
 from sqlalchemy import delete, select
 
 from app.config import get_settings
-from app.core import dispatcher
+from app.core import dispatch_stats, dispatcher
 from app.core.asset_types import (
     SelectAssetNode,
     SingleAssetNode,
@@ -742,6 +742,8 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
             manual_backend_id=str(node.manual_backend_id) if node.manual_backend_id else None,
             exclude_backend_ids=exclude,
             use_api=node.use_api,
+            node_id=str(node.id),
+            job_id=str(job.id),
         )
 
         if choice is None:
@@ -848,6 +850,16 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                 project_id,
                 {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "error", "error": str(exc)},
             )
+        finally:
+            # Closes the timing sample the next variant of this same batch gets
+            # placed against (core/dispatch_stats.py). In a finally, and on
+            # every exit including the retry `return` above, so a backend can
+            # never be left holding a phantom in-flight job that would make it
+            # read as busy forever.
+            if choice.backend:
+                dispatch_stats.note_finish(
+                    str(choice.backend.id), str(job.id), succeeded=job.status == JobStatusEnum.done
+                )
 
         await _finalize_node_if_done(db, node.id, project_id)
 
