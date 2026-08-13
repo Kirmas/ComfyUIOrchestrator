@@ -363,6 +363,7 @@ export const en = {
   "cell.slotRowTitle": "Row offset within this node's span (0 = its own row)",
   "cell.fromIdeas": "from ideas",
   "cell.fromIdeasTitle": "Take text from the idea board",
+  "cell.numericExprError": "Not a valid expression (try e.g. 9/3)",
   "cell.chooseTemplate": "(choose template)",
   "cell.editParamsHint": "⚙ or double-click to edit parameters",
   "cell.native": "native",

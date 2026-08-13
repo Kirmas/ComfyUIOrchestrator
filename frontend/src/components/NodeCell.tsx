@@ -5,6 +5,7 @@ import { assetsApi, dashboardsApi, jobsApi, nodesApi, nodeTemplatesApi } from ".
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
 import { isFileDrag } from "../dragUtils";
 import { detectLayerMaskGroups, detectMaskGroups, resolveMaskImageField } from "../maskUtils";
+import { evaluateMathExpression } from "../mathExpr";
 import { assetClipboard, subgraphClipboard, useClipboardSlot } from "../clipboard";
 import { assetFace } from "../assetNodes";
 import { resolveSlotAsset } from "../slotResolution";
@@ -36,6 +37,76 @@ const STATUS_LABEL_KEY: Record<NodeStatus, `status.${NodeStatus}`> = {
 
 function statusLabel(t: TFunc, status: NodeStatus): string {
   return t(STATUS_LABEL_KEY[status]);
+}
+
+// An int/float param field's input: typed text is kept as-is while the user
+// is mid-edit (so "9/" isn't rejected the moment it's typed) and only
+// evaluated as an arithmetic expression on commit (blur or Enter), e.g.
+// "9/3" -> 3. Committing round()s to a whole number for "int" fields, then
+// clamps to field.min/max same as the plain number input used to. An
+// expression that doesn't fully parse (or divides by zero) is rejected --
+// the typed text stays put with an error outline instead of silently
+// becoming 0 or the previous value, so the user can see what to fix.
+function NumericExprInput({
+  t,
+  value,
+  min,
+  max,
+  round,
+  onCommit,
+}: {
+  t: TFunc;
+  value: number;
+  min?: number;
+  max?: number;
+  round: boolean;
+  onCommit: (value: number) => void;
+}) {
+  const [text, setText] = useState(String(value));
+  const [invalid, setInvalid] = useState(false);
+
+  // Follow external changes (reroll, another tab) while not being edited --
+  // but a mid-edit invalid state is the user's own unfinished input, not
+  // something to stomp on from underneath them.
+  useEffect(() => {
+    setText(String(value));
+    setInvalid(false);
+  }, [value]);
+
+  const commit = () => {
+    const evaluated = evaluateMathExpression(text);
+    if (evaluated === null) {
+      setInvalid(true);
+      return;
+    }
+    let next = round ? Math.round(evaluated) : evaluated;
+    if (min !== undefined) next = Math.max(min, next);
+    if (max !== undefined) next = Math.min(max, next);
+    setInvalid(false);
+    setText(String(next));
+    if (next !== value) onCommit(next);
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      className={cx("numeric-expr-input", invalid && "numeric-expr-input-error")}
+      value={text}
+      title={invalid ? t("cell.numericExprError") : undefined}
+      onChange={(e) => {
+        setText(e.target.value);
+        if (invalid) setInvalid(false);
+      }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          (e.target as HTMLInputElement).blur();
+        }
+      }}
+    />
+  );
 }
 
 // Shared by CandidatesGrid and SingleOutput -- resolution (read off the
@@ -1246,12 +1317,13 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
               onChange={(e) => updateParam(field.name, e.target.checked)}
             />
           ) : (
-            <input
-              type="number"
+            <NumericExprInput
+              t={t}
               value={(node.params[field.name] as number) ?? field.default ?? 0}
               min={field.min}
               max={field.max}
-              onChange={(e) => updateParam(field.name, Number(e.target.value))}
+              round={field.type === "int"}
+              onCommit={(next) => updateParam(field.name, next)}
             />
           )}
         </div>

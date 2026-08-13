@@ -363,6 +363,7 @@ export const uk: Record<TKey, string> = {
   "cell.slotRowTitle": "Зсув рядка в межах висоти цього вузла (0 = його власний рядок)",
   "cell.fromIdeas": "з ідей",
   "cell.fromIdeasTitle": "Взяти текст із дошки ідей",
+  "cell.numericExprError": "Невалідний вираз (напр. 9/3)",
   "cell.chooseTemplate": "(оберіть шаблон)",
   "cell.editParamsHint": "⚙ або подвійний клік — редагувати параметри",
   "cell.native": "нативний",

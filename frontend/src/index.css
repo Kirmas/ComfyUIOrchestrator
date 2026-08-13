@@ -330,6 +330,15 @@ input, select, textarea {
   color: var(--text-dim);
 }
 
+/* Accepts arithmetic ("9/3") as well as plain numbers -- see mathExpr.ts.
+   Only the error state needs its own look; the valid state matches the
+   plain text/number inputs around it via the shared input,select,textarea
+   rule. */
+.numeric-expr-input-error {
+  border-color: var(--danger);
+  outline: 1px solid var(--danger);
+}
+
 .slot-row {
   display: flex;
   align-items: center;
