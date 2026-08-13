@@ -70,6 +70,12 @@ export const nodeTemplatesApi = {
   setDescription: (slug: string, description: string) =>
     api.patch(`/api/node-templates/by-slug/${slug}/description`, { description }),
   resetDescription: (slug: string) => api.delete(`/api/node-templates/by-slug/${slug}/description`),
+  // list() strips `defaults` from every item (see the route's own docstring
+  // -- a "fixed" image/file field can bake megabytes of base64 in there).
+  // Fetch one type's defaults here instead, right when something actually
+  // needs them -- addressed by slug, same reasoning as description above.
+  getDefaults: (slug: string) =>
+    api.get<{ node_type_slug: string; defaults: Record<string, unknown> }>(`/api/node-templates/by-slug/${slug}/defaults`),
   // backendId is the ComfyUI this node type is being created for: combo
   // widgets only become enum fields with real options if the analyzer can ask
   // that instance's /object_info, and a custom node present on one backend may

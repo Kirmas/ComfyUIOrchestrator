@@ -462,9 +462,23 @@ async def resolve_node_inputs(
                 )
 
     for i, field_name in enumerate(slot_field_names):
-        if i >= len(node.inputs or []):
-            continue
-        ref = node.inputs[i]
+        # A slot with no Node.inputs entry yet (the schema grew a new slot --
+        # e.g. an existing template got a dedicated mask field, see the
+        # "get mask as its own asset" design thread -- after this node's own
+        # `inputs` was already saved with fewer entries) isn't "no
+        # connection": templateUtils.ts's defaultInputsForSchema documents
+        # the row-span paradigm's own invariant as "a fresh slot defaults to
+        # reading its own row offset -- position is the connection now,
+        # there's nothing left to ask", and NodeCell.tsx's slot-row UI
+        # already *displays* that same default (`ref?.index ?? slotIndex`)
+        # before the user ever touches it. Generation used to disagree --
+        # `continue`d past it entirely, silently leaving whatever literal
+        # was baked into workflow_json -- so a node could show "Mask: cell 2"
+        # on screen and still submit a placeholder image, with nothing
+        # differentiating "genuinely saved" from "just the display default"
+        # (2026-08-13 incident, a real prompt validation failure on a
+        # dedicated mask slot added after the node itself already existed).
+        ref = node.inputs[i] if i < len(node.inputs or []) else {"type": "cell_index", "index": i}
         ref_type = ref.get("type")
 
         if ref_type == "cell_index":

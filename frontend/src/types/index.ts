@@ -77,7 +77,11 @@ export interface NodeTemplate {
   node_type_slug: string;
   name: string;
   param_schema: ParamSchema;
-  defaults: Record<string, unknown>;
+  // Absent from GET /api/node-templates' list response on purpose (a "fixed"
+  // image/file field can bake megabytes of base64 in here) -- present only
+  // from a single-template read. Fetch via nodeTemplatesApi.getDefaults(slug)
+  // when something actually needs a template's defaults.
+  defaults?: Record<string, unknown>;
   created_at: string;
   // What this node type does. Resolved server-side from the best available
   // source -- hand-written, agent-distilled, or derived from the workflows --
@@ -330,6 +334,9 @@ export interface WorkflowNodeInfo {
   node_id: string;
   class_type: string;
   title: string | null;
+  // Same value space as AssetKind -- see workflow_analyzer.WorkflowNodeInfo's
+  // own docstring for why this is a kind string rather than a mask-only bool.
+  likely_kind: string | null;
 }
 
 export interface DetectedField {

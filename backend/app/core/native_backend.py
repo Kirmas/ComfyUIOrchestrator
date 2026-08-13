@@ -254,34 +254,38 @@ class TransplantBackend(NativeBackend):
 
 
 class MaskBackend(NativeBackend):
-    """Bakes a painted bilevel mask into the source image's alpha channel,
-    producing a single RGBA PNG -- matches ComfyUI's own "clipspace-painted-
-    masked" convention (its stock LoadImage node splits such a file back into
-    IMAGE/MASK outputs from RGB/alpha), so the result drops into any workflow
-    expecting a masked LoadImage input with no ComfyUI-side changes needed.
+    """Outputs the painted mask itself -- a single-channel grayscale PNG,
+    kind="mask" -- rather than the source image with the mask baked into its
+    alpha channel. Same AssetKind.mask convention comfyui_backend.py's
+    MaskToImage detection produces for a SAM3-style generated mask (see the
+    "get mask as its own asset" design thread), so a hand-painted mask and a
+    model-generated one are indistinguishable to every downstream consumer:
+    both round-trip through LoadImage -> ImageToMask(channel=red) the same
+    way (ComfyUI's LoadImage always expands a grayscale file back to R=G=B).
+
     mask_png (params, not a slot -- see node_types.py's "mask" entry) is a
     frontend-painted bilevel PNG capped at a small resolution regardless of
     the source image's real size (see MaskPreview.tsx); nearest-neighbor
     resize back up to the source size keeps its edges hard rather than
     introducing gradient values a painted mask never had. Painted (white)
-    pixels are the region to mask out, so they become transparent (alpha 0) --
-    ComfyUI's own mask editor punches the same transparent hole for painted
-    pixels, which its LoadImage node then reads back as mask=1."""
+    pixels are the masked region -- same polarity MaskToImage itself uses
+    (mask value 1 -> white), so no inversion is needed on the way out.
+
+    Used to bake into the source's alpha channel instead, matching ComfyUI's
+    own clipspace-painted-masked convention -- dropped once every downstream
+    consumer in this app moved to consuming a real mask asset instead of a
+    pre-composited RGBA file."""
 
     async def _run(self, execution_config: dict, inputs: dict[str, Any]) -> list[AssetRef]:
-        image = Image.open(BytesIO(inputs["image"])).convert("RGB")
+        image = Image.open(BytesIO(inputs["image"]))
         mask_png = inputs.get("mask_png")
         if mask_png:
             mask = Image.open(BytesIO(base64.b64decode(mask_png))).convert("L")
             if mask.size != image.size:
                 mask = mask.resize(image.size, Image.NEAREST)
-            alpha = mask.point(lambda p: 0 if p >= 128 else 255)
         else:
-            alpha = Image.new("L", image.size, 255)
-
-        result = image.convert("RGBA")
-        result.putalpha(alpha)
+            mask = Image.new("L", image.size, 0)
 
         buf = BytesIO()
-        result.save(buf, format="PNG")
-        return [AssetRef(data=buf.getvalue(), mime_type="image/png", kind="image")]
+        mask.save(buf, format="PNG")
+        return [AssetRef(data=buf.getvalue(), mime_type="image/png", kind="mask")]

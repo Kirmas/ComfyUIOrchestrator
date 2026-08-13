@@ -239,6 +239,21 @@ def _trace_prompt_node(workflow_json: dict, node_id: str, depth: int = 0) -> tup
         if text_key in inputs and not _is_link(text_value):
             return node_id, text_key, text_value
         return None
+
+    # A node named "conditioning" for the one input that actually carries the
+    # chain (ReferenceLatent, ControlNetApply, ...) can have other, unrelated
+    # link inputs alongside it -- ReferenceLatent's own "latent" -- that would
+    # otherwise fail the generic "exactly one link" test below on a node that
+    # was perfectly traceable (2026-08-13: a Flux2/Klein "Set Reference
+    # Latent" node -- {conditioning, latent}, two links -- silently broke
+    # prompt detection on every workflow built around it, so "prompt" simply
+    # never showed up as a detectable field at all). ComfyUI's own conditioning
+    # sockets are conventionally named exactly this, so this is a naming
+    # convention to trust, not a per-class_type allow-list to maintain.
+    conditioning_link = inputs.get("conditioning")
+    if _is_link(conditioning_link):
+        return _trace_prompt_node(workflow_json, conditioning_link[0], depth + 1)
+
     links = [v for v in inputs.values() if _is_link(v)]
     if len(links) != 1:
         branch_keys = SWITCH_BRANCH_INPUT_KEYS.get(class_type)
@@ -258,6 +273,20 @@ class WorkflowNodeInfo:
     node_id: str
     class_type: str
     title: str | None
+    # Same value space as AssetKind (db/models.py) -- "mask" for an
+    # input_image_nodes entry (a LoadImage) whose output feeds an
+    # ImageToMask node, None for a plain picture. Deliberately a kind string,
+    # not a mask-only bool: the point isn't "detect masks specially", it's
+    # "detect what an input slot actually is, generically" -- the day a mesh
+    # (or anything else with its own ComfyUI loader) gets the same
+    # treatment, it's another value here, not a second parallel flag. Set by
+    # analyze_workflow, never guessed from the node's title -- a wizard that
+    # zips input_image_nodes to user-declared slots purely by array position
+    # (NodeTypeWizard.tsx) has no other way to tell "Load Mask" and
+    # "Load Image" apart and can pair them backwards (2026-08-13 incident: a
+    # 2-LoadImage workflow got its image/mask slots swapped because the
+    # graph's own node order didn't match the order the slots were typed in).
+    likely_kind: str | None = None
 
 
 @dataclass
@@ -392,6 +421,21 @@ def analyze_workflow(workflow_json: dict) -> WorkflowAnalysis:
             if isinstance(name, str) and not any(l.name == name for l in loras):
                 strength = inputs.get(strength_key)
                 loras.append(LoraInfo(name=name, strength=strength if isinstance(strength, (int, float)) else None))
+
+    # Second, short pass: which of input_nodes actually feeds an ImageToMask
+    # -- can't be folded into the loop above since an ImageToMask can appear
+    # either before or after the LoadImage it reads from in dict-iteration
+    # order, so the full node set has to be known first.
+    mask_source_ids = {
+        source[0]
+        for node in workflow_json.values()
+        if isinstance(node, dict) and node.get("class_type") == "ImageToMask"
+        for source in [node.get("inputs", {}).get("image")]
+        if isinstance(source, list) and len(source) == 2 and isinstance(source[0], str)
+    }
+    for info in input_nodes:
+        if info.node_id in mask_source_ids:
+            info.likely_kind = "mask"
 
     # Only the first sampler encountered in dict-iteration order is exposed as
     # fields -- a multi-stage workflow (e.g. a base + refiner pass with two

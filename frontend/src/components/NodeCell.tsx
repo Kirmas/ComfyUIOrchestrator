@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { createPortal } from "react-dom";
 import { resolveAssetUrl } from "../api/client";
-import { assetsApi, dashboardsApi, jobsApi, nodesApi } from "../api/endpoints";
+import { assetsApi, dashboardsApi, jobsApi, nodesApi, nodeTemplatesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
 import { isFileDrag } from "../dragUtils";
 import { detectLayerMaskGroups, detectMaskGroups, resolveMaskImageField } from "../maskUtils";
@@ -1040,7 +1040,12 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   const chooseTemplate = async (templateId: string) => {
     const chosen = templates.find((t) => t.id === templateId);
     const inputs = await defaultInputsForSchema(chosen?.param_schema, node.inputs, { node, tracks, nodesById });
-    const params = { ...(chosen?.defaults ?? {}), ...node.params };
+    // templates (the list) no longer carries `defaults` -- see
+    // GET /api/node-templates' own docstring -- so the chosen type's own
+    // baked defaults (seed, prompt, any non-fixed scalar) are fetched fresh
+    // here instead, right when a node actually needs them seeded.
+    const defaults = chosen ? await nodeTemplatesApi.getDefaults(chosen.node_type_slug).then((r) => r.defaults).catch(() => ({})) : {};
+    const params = { ...defaults, ...node.params };
     const updated = await nodesApi.update(node.id, { node_type: chosen?.node_type, inputs, params });
     setNode(updated);
     // Assigning a template can make the backend materialize this workflow's

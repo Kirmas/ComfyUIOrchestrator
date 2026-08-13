@@ -119,6 +119,27 @@ class NodeTemplateUpdate(BaseModel):
     defaults: dict[str, Any] | None = None
 
 
+class NodeTemplateListRead(ORMModel):
+    """GET /api/node-templates' own shape -- everything NodeTemplateRead has
+    except `defaults`, which is deliberately not included here (see that
+    route's own docstring: FastAPI's response_model_exclude doesn't actually
+    filter fields on a `list[Model]` response -- fields keep showing up in
+    the actual JSON despite being excluded, a real gap in this FastAPI/
+    Pydantic combo confirmed by a minimal repro -- so the only way to
+    reliably drop `defaults` from a list response is to validate into a model
+    that never declared the field in the first place)."""
+
+    id: uuid.UUID
+    node_type_slug: str
+    name: str
+    param_schema: dict
+    created_at: datetime
+    node_type: str = ""
+    description: str = ""
+    description_source: str = "auto"
+    fingerprint: dict[str, str] = {}
+
+
 class NodeTemplateRead(ORMModel):
     id: uuid.UUID
     node_type_slug: str
@@ -161,6 +182,9 @@ class WorkflowNodeInfoOut(BaseModel):
     node_id: str
     class_type: str
     title: str | None
+    # Same value space as AssetKind -- see workflow_analyzer.WorkflowNodeInfo's
+    # own docstring for why this is a kind string rather than a mask-only bool.
+    likely_kind: str | None = None
 
 
 class DetectedFieldOut(BaseModel):

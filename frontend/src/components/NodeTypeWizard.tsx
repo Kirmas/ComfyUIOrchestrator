@@ -6,6 +6,8 @@ import {
   defaultGroupLabel,
   groupDetectedFields,
   groupMemberSuffix,
+  matchInputNodesToSlots,
+  nodesForKind,
   matchTypeFor,
   type DetectedFieldGroup,
   type FieldResolution,
@@ -30,6 +32,21 @@ interface InputSlot {
   // per-instance picker. See core/node_types.is_slot_field on the backend.
   fixed: boolean;
   fixedImage: FixedImagePayload | null;
+}
+
+// The only signal available before a slot has a backing node yet: what the
+// human typed as its label ("Mask", "Alpha Mask", ...). Matches
+// WorkflowNodeInfo.likely_kind's value space (null = plain picture) so both
+// sides of matchInputNodesToSlots speak the same kind vocabulary.
+function slotLabelKind(label: string): string | null {
+  return label.toLowerCase().includes("mask") ? "mask" : null;
+}
+
+// ParamField.expects_kind defaults to "image" (see its own docstring in
+// types/index.ts) -- that's the same "nothing special" bucket a plain
+// picture's null likely_kind is, not a distinct kind of its own.
+function fieldExpectedKind(field: ParamField): string | null {
+  return field.expects_kind && field.expects_kind !== "image" ? field.expects_kind : null;
 }
 
 function readFileAsBase64(file: File): Promise<string> {
@@ -218,7 +235,13 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
         );
         return;
       }
-      setInputSlots((slots) => slots.map((s, i) => ({ ...s, nodeId: result.input_image_nodes[i]?.node_id ?? "" })));
+      setInputSlots((slots) => {
+        const matched = matchInputNodesToSlots(
+          result.input_image_nodes,
+          slots.map((s) => slotLabelKind(s.label)),
+        );
+        return slots.map((s, i) => ({ ...s, nodeId: matched[i] ?? "" }));
+      });
       const included: Record<string, boolean> = {};
       const labels: Record<string, string> = {};
       for (const f of result.detected_fields) {
@@ -234,7 +257,12 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
         );
         return;
       }
-      setImageSlotNodeIds(templateImageFields.map((_, i) => result.input_image_nodes[i]?.node_id ?? ""));
+      setImageSlotNodeIds(
+        matchInputNodesToSlots(
+          result.input_image_nodes,
+          templateImageFields.map(fieldExpectedKind),
+        ),
+      );
       const resolutions: Record<string, FieldResolution> = {};
       for (const f of templateOtherFields) resolutions[f.name] = autoMatchField(f, result);
       setFieldResolutions(resolutions);
@@ -536,55 +564,65 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
           )}
 
           {mode.kind === "create" &&
-            inputSlots.map((slot, i) => (
-              <div key={i} className="field-row">
-                <label>{t("wizard.sourceLoadImage", { label: slot.label })}</label>
-                <select
-                  value={slot.nodeId}
-                  onChange={(e) => setInputSlots((s) => s.map((x, idx) => (idx === i ? { ...x, nodeId: e.target.value } : x)))}
-                >
-                  {analysis.input_image_nodes.map((n) => (
-                    <option key={n.node_id} value={n.node_id}>
-                      {n.title ?? t("wizard.untitledNode", { id: n.node_id })}
-                    </option>
-                  ))}
-                </select>
-                {slot.fixed && (
-                  <div className="inline-form" style={{ marginTop: 0 }}>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) setFixedImageFile(i, file);
-                      }}
-                    />
-                    {slot.fixedImage && (
-                      <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
-                        {t("wizard.fixedUploaded", { name: slot.fixedImage.fileName, size: Math.ceil(slot.fixedImage.sizeBytes / 1024) })}
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
+            inputSlots.map((slot, i) => {
+              // Structural, not advisory -- a mask slot's dropdown only ever
+              // offers mask-shaped nodes and vice versa, so the wrong pairing
+              // (2026-08-13 incident) can't be picked in the first place,
+              // rather than picked and merely warned about.
+              const visibleNodes = nodesForKind(analysis.input_image_nodes, slotLabelKind(slot.label));
+              return (
+                <div key={i} className="field-row">
+                  <label>{t("wizard.sourceLoadImage", { label: slot.label })}</label>
+                  <select
+                    value={slot.nodeId}
+                    onChange={(e) => setInputSlots((s) => s.map((x, idx) => (idx === i ? { ...x, nodeId: e.target.value } : x)))}
+                  >
+                    {visibleNodes.map((n) => (
+                      <option key={n.node_id} value={n.node_id}>
+                        {n.title ?? t("wizard.untitledNode", { id: n.node_id })}
+                      </option>
+                    ))}
+                  </select>
+                  {slot.fixed && (
+                    <div className="inline-form" style={{ marginTop: 0 }}>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) setFixedImageFile(i, file);
+                        }}
+                      />
+                      {slot.fixedImage && (
+                        <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                          {t("wizard.fixedUploaded", { name: slot.fixedImage.fileName, size: Math.ceil(slot.fixedImage.sizeBytes / 1024) })}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
 
           {mode.kind === "add-instance" &&
-            templateImageFields.map((field, i) => (
-              <div key={field.name} className="field-row">
-                <label>{t("wizard.sourceLoadImage", { label: field.label ?? field.name })}</label>
-                <select
-                  value={imageSlotNodeIds[i] ?? ""}
-                  onChange={(e) => setImageSlotNodeIds((s) => s.map((x, idx) => (idx === i ? e.target.value : x)))}
-                >
-                  {analysis.input_image_nodes.map((n) => (
-                    <option key={n.node_id} value={n.node_id}>
-                      {n.title ?? t("wizard.untitledNode", { id: n.node_id })}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            ))}
+            templateImageFields.map((field, i) => {
+              const visibleNodes = nodesForKind(analysis.input_image_nodes, fieldExpectedKind(field));
+              return (
+                <div key={field.name} className="field-row">
+                  <label>{t("wizard.sourceLoadImage", { label: field.label ?? field.name })}</label>
+                  <select
+                    value={imageSlotNodeIds[i] ?? ""}
+                    onChange={(e) => setImageSlotNodeIds((s) => s.map((x, idx) => (idx === i ? e.target.value : x)))}
+                  >
+                    {visibleNodes.map((n) => (
+                      <option key={n.node_id} value={n.node_id}>
+                        {n.title ?? t("wizard.untitledNode", { id: n.node_id })}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              );
+            })}
 
           <div className="field-row">
             <label>{t("wizard.outputNodes")}</label>

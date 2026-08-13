@@ -118,7 +118,12 @@ async def create_track(
 @mcp_server.tool()
 async def list_node_types() -> list[dict]:
     """Available node types (both DB-backed template.* and built-in native.*),
-    with the param_schema whose image/file fields decide a node's row span."""
+    with the param_schema whose image/file fields decide a node's row span.
+
+    Doesn't include each type's `defaults` -- a "fixed" image/file field can
+    bake megabytes of base64 in there, which used to ride along on every
+    single call here regardless of relevance. Call get_node_type_defaults for
+    one specific type's defaults if something actually needs them."""
     return await _get("/api/node-templates")
 
 
@@ -127,6 +132,14 @@ async def get_node_type_description(node_type_slug: str) -> dict:
     """What a node type does, plus the facts it was derived from (model, LoRAs,
     image inputs, prompt) -- shown per backend where they differ."""
     return await _get(f"/api/node-templates/by-slug/{node_type_slug}/description")
+
+
+@mcp_server.tool()
+async def get_node_type_defaults(node_type_slug: str) -> dict:
+    """One node type's baked defaults -- deliberately not part of
+    list_node_types (see its own docstring): a "fixed" image/file field's
+    value lives here as base64 and can be megabytes."""
+    return await _get(f"/api/node-templates/by-slug/{node_type_slug}/defaults")
 
 
 @mcp_server.tool()

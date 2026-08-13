@@ -1,4 +1,4 @@
-import type { DetectedField, ParamField, WorkflowAnalysis } from "./types";
+import type { DetectedField, ParamField, WorkflowAnalysis, WorkflowNodeInfo } from "./types";
 
 // Matching a workflow's detected fields onto an *existing* template's fixed
 // schema (add-instance flow). DetectedField.key is deterministic, fixed
@@ -33,6 +33,68 @@ export function typesCompatible(a: ParamField["type"], b: ParamField["type"]): b
   if (a === b) return true;
   const stringy = (t: ParamField["type"]) => t === "enum" || t === "text";
   return stringy(a) && stringy(b);
+}
+
+/** Pairs each declared image slot (by its own kind -- same AssetKind value
+ * space as WorkflowNodeInfo.likely_kind, null meaning "just a plain
+ * picture") with one of the workflow's actually-detected LoadImage nodes --
+ * used by NodeTypeWizard.tsx for both a fresh template's input slots
+ * (`slotKinds` from each slot's own typed label) and an existing template's
+ * image fields when adding a second backend (`slotKinds` from
+ * ParamField.expects_kind).
+ *
+ * Naively zipping the two lists by declaration order (the previous behavior)
+ * pairs purely on coincidence: a workflow's own LoadImage node order has
+ * nothing to do with the order a human happened to type slot labels in, so a
+ * 2-slot "Image"/"Mask" workflow could -- and did (2026-08-13 incident) --
+ * come out backwards whenever the graph's "Load Mask" node sits before its
+ * "Load Image" one. Matching within each kind's own bucket first (falling
+ * back to a plain positional zip only when a bucket's counts don't actually
+ * line up on both sides, i.e. genuinely ambiguous) mirrors templateUtils.ts's
+ * defaultInputsForSchema kind-matching -- same "only a same-bucket,
+ * same-count pairing is unambiguous" reasoning. Deliberately N-way by kind
+ * rather than a mask-only boolean: the day a mesh (or anything else with its
+ * own ComfyUI loader) gets detected the same way, it's just another bucket
+ * here, not a second parallel special case. */
+/** Which of the workflow's detected LoadImage nodes are valid dropdown
+ * choices for a slot that wants `wantedKind` -- masks only pair with masks,
+ * plain pictures only with plain pictures, kind for kind, structurally, not
+ * "pick whatever and get warned about it" (2026-08-13: a warning next to the
+ * dropdown wasn't enough, the wrong pairing could still be saved). Falls
+ * back to the full list when nothing actually matches `wantedKind` -- kind
+ * detection is a heuristic (workflow_analyzer.py's ImageToMask-edge check),
+ * and an empty dropdown would strand the user with no way to pick anything
+ * at all, which is worse than an unfiltered one. */
+export function nodesForKind(nodes: WorkflowNodeInfo[], wantedKind: string | null): WorkflowNodeInfo[] {
+  const matching = nodes.filter((n) => (n.likely_kind ?? null) === wantedKind);
+  return matching.length > 0 ? matching : nodes;
+}
+
+export function matchInputNodesToSlots(nodes: WorkflowNodeInfo[], slotKinds: (string | null)[]): string[] {
+  const nodesByKind = new Map<string | null, WorkflowNodeInfo[]>();
+  for (const n of nodes) {
+    const bucket = nodesByKind.get(n.likely_kind) ?? [];
+    bucket.push(n);
+    nodesByKind.set(n.likely_kind, bucket);
+  }
+  const slotCountByKind = new Map<string | null, number>();
+  for (const kind of slotKinds) slotCountByKind.set(kind, (slotCountByKind.get(kind) ?? 0) + 1);
+
+  // Every bucket has to reconcile in both directions -- a kind the slots ask
+  // for but no node has (or vice versa) means the buckets can't actually be
+  // trusted, so this falls back to the old positional behavior wholesale
+  // rather than guessing part of the pairing.
+  const useBuckets =
+    [...slotCountByKind].every(([kind, count]) => (nodesByKind.get(kind)?.length ?? 0) === count) &&
+    [...nodesByKind].every(([kind, bucket]) => (slotCountByKind.get(kind) ?? 0) === bucket.length);
+
+  const nextIndexByKind = new Map<string | null, number>();
+  return slotKinds.map((kind, i) => {
+    if (!useBuckets) return nodes[i]?.node_id ?? "";
+    const idx = nextIndexByKind.get(kind) ?? 0;
+    nextIndexByKind.set(kind, idx + 1);
+    return nodesByKind.get(kind)?.[idx]?.node_id ?? "";
+  });
 }
 
 export function autoMatchField(field: ParamField, analysis: WorkflowAnalysis): FieldResolution {

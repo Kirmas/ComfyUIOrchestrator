@@ -922,10 +922,17 @@ function AddApiInstanceForm({
         if (!hasImageSizeField) {
           newFields.push({ name: IMAGE_SIZE_FIELD, type: "enum", label: "Image size (Gemini)", options: IMAGE_SIZES });
         }
+        // `template` came off the templates list, which no longer carries
+        // `defaults` (see GET /api/node-templates' own docstring) -- fetch
+        // this one type's real defaults fresh so a "fixed" field's baked
+        // bytes (or any other existing default) survive the merge below
+        // instead of being silently dropped by this PATCH's full-dict
+        // replace.
+        const existingDefaults = await nodeTemplatesApi.getDefaults(template.node_type_slug).then((r) => r.defaults);
         await nodeTemplatesApi.update(template.id, {
           param_schema: { ...template.param_schema, fields: newFields },
           defaults: {
-            ...template.defaults,
+            ...existingDefaults,
             ...(needsNewPromptField ? { [PROMPT_FIELD]: masterPrompt } : {}),
             ...(!hasAspectField ? { [ASPECT_FIELD]: "Auto" } : {}),
             ...(!hasImageSizeField ? { [IMAGE_SIZE_FIELD]: "Auto" } : {}),

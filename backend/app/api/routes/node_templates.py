@@ -16,6 +16,7 @@ from app.schemas.schemas import (
     AgentDescriptionWrite,
     ManualDescriptionWrite,
     NodeTemplateCreate,
+    NodeTemplateListRead,
     NodeTemplateRead,
     NodeTemplateUpdate,
     WorkflowAnalysisOut,
@@ -83,20 +84,35 @@ async def analyze_workflow_endpoint(
     return analysis
 
 
-@router.get("", response_model=list[NodeTemplateRead])
+@router.get("", response_model=list[NodeTemplateListRead])
 async def list_node_templates(db: AsyncSession = Depends(get_db)):
     """Merges real DB-backed templates (ComfyUI/API node types, genuinely
     user-created via the wizard) with the native registry (code-only, no DB
     row -- see core/node_types.py) into one list, so the frontend's "choose
-    node type" flow doesn't need to know which is which."""
+    node type" flow doesn't need to know which is which.
+
+    Returns NodeTemplateListRead -- no `defaults` field at all -- rather than
+    the full NodeTemplateRead (see get_defaults below for where that lives).
+    A single "fixed" image/file field bakes its whole value (base64) into
+    NodeTemplate.defaults, and this list is fetched on every grid load (to
+    populate the "choose node type" dropdown, which never reads defaults) and
+    on every MCP list_node_types() call -- one template with a several-
+    megabyte fixed image made every single one of those calls several
+    megabytes too, agent-facing ones included (2026-08-13, the exact thing
+    that made list_node_types() blow an MCP client's response-size limit).
+    response_model_exclude={"defaults"} looked like the obvious fix but
+    turned out not to actually filter fields on a `list[Model]` response in
+    this FastAPI/Pydantic combo -- confirmed with a minimal repro, `defaults`
+    kept showing up in the real JSON regardless -- so this validates into a
+    model that never declares the field instead."""
     result = await db.execute(select(NodeTemplate).order_by(NodeTemplate.created_at))
-    out: list[NodeTemplateRead] = []
+    out: list[NodeTemplateListRead] = []
     for t in result.scalars().all():
-        item = NodeTemplateRead.model_validate(t)
+        item = NodeTemplateListRead.model_validate(t)
         item.node_type = f"template.{t.node_type_slug}"
         out.append(item)
     for native in NATIVE_NODE_TYPES.values():
-        out.append(_native_template_read(native))
+        out.append(NodeTemplateListRead.model_validate(_native_template_read(native)))
 
     resolved = await resolve_descriptions(db, [(item.node_type_slug, item.name) for item in out])
     for item in out:
@@ -158,6 +174,26 @@ async def _resolve_one(db: AsyncSession, slug: str):
         raise HTTPException(404, f"Unknown node type: {slug}")
     resolved = await resolve_descriptions(db, [(slug, name)])
     return resolved[slug]
+
+
+@router.get("/by-slug/{slug}/defaults")
+async def get_defaults(slug: str, db: AsyncSession = Depends(get_db)):
+    """The one place a node type's defaults (including any baked "fixed"
+    image/file bytes) actually live -- split out of list_node_templates on
+    purpose (see that route's own docstring). Fetched only when something
+    genuinely needs them: NodeCell.tsx's chooseTemplate (seeding a freshly
+    assigned node's own params) and Settings.tsx's AddApiInstanceForm
+    (merging new fields into an existing template's defaults) both used to
+    read this off the already-loaded list; now they call here instead, right
+    before they need it."""
+    result = await db.execute(select(NodeTemplate).where(NodeTemplate.node_type_slug == slug))
+    template = result.scalar_one_or_none()
+    if template is not None:
+        return {"node_type_slug": slug, "defaults": template.defaults}
+    native = NATIVE_NODE_TYPES.get(slug)
+    if native is not None:
+        return {"node_type_slug": slug, "defaults": native.defaults}
+    raise HTTPException(404, f"Unknown node type: {slug}")
 
 
 @router.get("/by-slug/{slug}/description")
