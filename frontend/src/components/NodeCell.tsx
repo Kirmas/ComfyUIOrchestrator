@@ -12,7 +12,7 @@ import { useProjectStore } from "../state/projectStore";
 import { defaultInputsForSchema, slotFields } from "../templateUtils";
 import type { Asset, AssetKind, Backend, Capability, Dashboard, InputRef, Job, NodeItem, NodeStatus, NodeTemplate } from "../types";
 import { useT, type TFunc } from "../i18n";
-import { cx, extensionForMimeType } from "../utils";
+import { backendColors, cx, extensionForMimeType, formatDuration } from "../utils";
 import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
 import { capabilityUsesIdeogram4 } from "../ideogram4";
 import { CaptionBoxEditor, type CaptionBgOption } from "./CaptionBoxEditor";
@@ -847,6 +847,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   // ComfyUI backend and still needs one picked.
   const isDeterministic = isNative || !(template?.param_schema.fields ?? []).some((f) => f.type === "seed");
   const [jobs, setJobs] = useState<Job[]>([]);
+  const jobColors = useMemo(() => backendColors(backends), [backends]);
   // The face only shows what's needed to glance at status and hit Generate --
   // template name, plan, and other node's worth of pixels (see NodeCell for
   // BaseAssetNodeView's compact size). Everything else (slot sources, param
@@ -1468,11 +1469,34 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
 
       {jobs.length > 0 && node.status !== "done" && node.status !== "discarded" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 3 }} onClick={(e) => e.stopPropagation()}>
-          {jobs.map((job) => (
-            <div key={job.id} className="progress-bar" title={`${job.status} ${job.progress}%`}>
-              <div className="progress-bar-fill" style={{ width: `${job.status === "error" ? 100 : job.progress}%`, background: job.status === "error" ? "var(--danger)" : undefined }} />
-            </div>
-          ))}
+          {jobs.map((job) => {
+            // Elapsed is recomputed on each render rather than ticked by a timer
+            // of its own: the jobs list is already re-polled every 2.5s while
+            // the node runs (see the effect above), which is exactly when these
+            // bars are on screen, so the number is never more than that stale.
+            const started = job.started_at ? Date.parse(job.started_at) : null;
+            const finished = job.finished_at ? Date.parse(job.finished_at) : null;
+            const elapsed = started === null ? null : ((finished ?? Date.now()) - started) / 1000;
+            const timing =
+              elapsed === null ? null : finished === null ? formatDuration(elapsed) : t("cell.jobTook", { duration: formatDuration(elapsed) });
+            const backendName = job.backend_id ? backends.find((b) => b.id === job.backend_id)?.name : null;
+            return (
+              <div
+                key={job.id}
+                className="progress-bar"
+                title={[backendName, `${job.status} ${job.progress}%`, timing].filter(Boolean).join(" · ")}
+              >
+                <div
+                  className="progress-bar-fill"
+                  style={{
+                    width: `${job.status === "error" ? 100 : job.progress}%`,
+                    // Error wins over the per-agent colour -- red always means failed.
+                    background: job.status === "error" ? "var(--danger)" : job.backend_id ? jobColors[job.backend_id] : undefined,
+                  }}
+                />
+              </div>
+            );
+          })}
         </div>
       )}
 
