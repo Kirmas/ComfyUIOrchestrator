@@ -51,14 +51,17 @@ class JobStatusEnum(str, enum.Enum):
 class AssetKind(str, enum.Enum):
     image = "image"
     mesh = "mesh"
+    mask = "mask"
     other = "other"
 
     @classmethod
     def for_mime(cls, mime_type: str) -> "AssetKind":
         """What every ingest path records for a file it only knows the MIME
-        type of. Never `mesh`: a .glb arrives as application/octet-stream, so
-        that kind is only ever set by the producer that knows it made a 3D
-        output (comfyui_backend.py), never guessed here."""
+        type of. Never `mesh` or `mask`: a .glb arrives as
+        application/octet-stream, and a mask is just an image/png with no
+        MIME-visible distinction from any other picture -- both kinds are
+        only ever set by the producer that knows what it actually made
+        (comfyui_backend.py), never guessed here."""
         return cls.image if mime_type.startswith("image/") else cls.other
 
 

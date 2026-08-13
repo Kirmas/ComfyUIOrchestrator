@@ -2,7 +2,7 @@ export type BackendKind = "comfyui" | "api_provider" | "native";
 export type ExecutionType = "comfyui_workflow" | "api_call" | "native";
 export type NodeStatus = "draft" | "queued" | "running" | "done" | "error" | "discarded";
 export type JobStatus = "pending" | "waiting_for_backend" | "running" | "done" | "error" | "cancelled";
-export type AssetKind = "image" | "mesh" | "other";
+export type AssetKind = "image" | "mesh" | "mask" | "other";
 export type BackendMode = "auto" | "comfyui_only" | "api_only" | "manual";
 export type NodeKind = "asset" | "workflow";
 
@@ -57,6 +57,15 @@ export interface ParamField {
   min?: number;
   max?: number;
   options?: string[];
+  // "image"/"file" slots only: which AssetKind this slot's resolved picture
+  // is semantically expected to be (defaults to "image" when absent) -- e.g.
+  // "mask" for a slot that feeds an ImageToMask inside the workflow. NOT the
+  // same thing as `type: "mask"` above (a painted bilevel PNG stored
+  // directly in Node.params, not a slot at all -- see native.mask). Read
+  // only by defaultInputsForSchema (templateUtils.ts) to smart-default a
+  // fresh slot's cell_index to whatever row already holds a matching kind;
+  // never enforced beyond that default.
+  expects_kind?: AssetKind;
 }
 
 export interface ParamSchema {

@@ -504,11 +504,12 @@ async def enqueue_node_job(node_id: str) -> None:
 
         settings = get_settings()
         variants = min(node.requested_variants, settings.max_variants_per_node)
-        # Native execution is pure/deterministic (no seed field, no stochastic
-        # backend) -- N variants would just be N pixel-identical outputs at
-        # N times the CPU cost, so it's forced to 1 regardless of what the
-        # node/UI requested.
-        if effective and effective.is_native:
+        # Deterministic execution (native, or a comfyui_workflow template
+        # whose graph exposes no seed field at all -- see
+        # EffectiveTemplate.is_deterministic) -- N variants would just be N
+        # pixel-identical outputs at N times the cost, so it's forced to 1
+        # regardless of what the node/UI requested.
+        if effective and effective.is_deterministic:
             variants = 1
 
         # Clicking "Generate" again on a node that already ran (allowed once

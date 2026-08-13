@@ -139,6 +139,21 @@ KNOWN_NODE_LITERAL_FIELDS: dict[str, list[tuple[tuple[str, ...], str, str]]] = {
     # a standalone RandomNoise node instead of a KSampler widget, so it's
     # invisible to SAMPLER_LITERAL_FIELDS same as "easy seed" above.
     "RandomNoise": [(("noise_seed",), "seed", "seed")],
+    # SAM3's text-grounded segmentation node -- a mask-extraction graph has no
+    # sampler at all, so without this entry every one of its widgets is
+    # invisible to the wizard (SAMPLER_LITERAL_FIELDS only looks at
+    # KSampler-family nodes) and it detects nothing to map.
+    "SAM3Grounding": [
+        (("text_prompt",), "text_prompt", "text"),
+        (("max_detections",), "max_detections", "int"),
+        (("confidence_threshold",), "confidence_threshold", "float"),
+    ],
+    # ComfyUI_essentials' batch-slice node -- which detection this instance
+    # picks out of SAM3Grounding's (possibly multi-detection) mask batch.
+    "MaskFromBatch+": [
+        (("start",), "start", "int"),
+        (("length",), "length", "int"),
+    ],
 }
 
 # ComfyUI's own "promoted widget" primitives -> the param_schema field type to expose them as.

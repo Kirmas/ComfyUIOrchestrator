@@ -408,15 +408,38 @@ input, select, textarea {
   bottom: 4px;
   left: 4px;
   right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
   font-size: 9px;
   padding: 1px 4px;
   border-radius: 3px;
   background: rgba(0, 0, 0, 0.6);
   color: white;
+  pointer-events: none;
+}
+
+/* Each line truncates on its own -- the kind tag is short and never needs
+   it, but a long backend name still shouldn't grow the tag past the card. */
+.asset-meta-tag > * {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  pointer-events: none;
+}
+
+/* Flags a non-"image" Asset.kind (mask, mesh, other, ...) on the thumbnail
+   overlay -- otherwise e.g. a mask reads as a perfectly normal generated
+   picture, with nothing on the card distinguishing it. Its own (smaller)
+   line above dims/backend name rather than sharing one row with them --
+   sharing pushed the backend name off the edge into an ellipsis
+   (2026-08-13, reported against a real "MASK 2048×2048 · as..." cell).
+   Fixed overlay color, not a --text/--accent var, same reasoning as
+   .asset-meta-tag's own fixed black/white: it sits on top of arbitrary
+   image content, not page background. */
+.asset-kind-tag {
+  color: var(--warning);
+  font-size: 8px;
+  letter-spacing: 0.03em;
 }
 
 .image-modal-backdrop {

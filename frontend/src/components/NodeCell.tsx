@@ -10,7 +10,7 @@ import { assetFace } from "../assetNodes";
 import { resolveSlotAsset } from "../slotResolution";
 import { useProjectStore } from "../state/projectStore";
 import { defaultInputsForSchema, slotFields } from "../templateUtils";
-import type { Asset, Backend, Capability, Dashboard, InputRef, Job, NodeItem, NodeStatus, NodeTemplate } from "../types";
+import type { Asset, AssetKind, Backend, Capability, Dashboard, InputRef, Job, NodeItem, NodeStatus, NodeTemplate } from "../types";
 import { useT, type TFunc } from "../i18n";
 import { cx, extensionForMimeType } from "../utils";
 import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
@@ -42,12 +42,32 @@ function statusLabel(t: TFunc, status: NodeStatus): string {
 // loaded <img>, not stored anywhere) plus, when known, which backend
 // produced this asset, in one overlay instead of two competing for the same
 // bottom-of-thumbnail spot.
-function AssetMetaTag({ dims, backendName }: { dims: { w: number; h: number } | undefined; backendName: string | undefined }) {
-  if (!dims && !backendName) return null;
+function AssetMetaTag({
+  dims,
+  backendName,
+  kind,
+}: {
+  dims: { w: number; h: number } | undefined;
+  backendName: string | undefined;
+  kind?: AssetKind;
+}) {
+  // "image" is the overwhelming default (every ordinary generated picture),
+  // so it's left unbadged -- anything else (mask, mesh, other, and whatever
+  // AssetKind grows next) is worth flagging, generically, without a new
+  // branch here every time a kind is added. Mesh doesn't actually reach this
+  // component today (it renders via Model3DThumb instead, a whole different
+  // element that's self-evidently not a flat picture), but the check isn't
+  // hand-tied to "mask" either way.
+  const showKind = Boolean(kind) && kind !== "image";
+  if (!dims && !backendName && !showKind) return null;
   const parts = [dims ? `${dims.w}×${dims.h}` : null, backendName ?? null].filter((p): p is string => p !== null);
   return (
-    <span className="asset-meta-tag" title={parts.join(" · ")}>
-      {parts.join(" · ")}
+    <span className="asset-meta-tag" title={[showKind ? kind : null, parts.join(" · ")].filter(Boolean).join(" · ")}>
+      {/* Own line, smaller: sharing one row with dims/backend name pushed the
+          backend name off the edge into an ellipsis (2026-08-13, reported
+          against a real "MASK 2048×2048 · as..." cell). */}
+      {showKind && <span className="asset-kind-tag">{kind!.toUpperCase()}</span>}
+      {parts.length > 0 && <span className="asset-meta-line">{parts.join(" · ")}</span>}
     </span>
   );
 }
@@ -175,6 +195,7 @@ function CandidatesGrid({
               <AssetMetaTag
                 dims={dimsById[asset.id]}
                 backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
+                kind={asset.kind}
               />
             </div>
           )}
@@ -276,7 +297,11 @@ function AssetFaceView({
             >
               ⇄
             </button>
-            <AssetMetaTag dims={dims} backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined} />
+            <AssetMetaTag
+              dims={dims}
+              backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
+              kind={asset.kind}
+            />
           </div>
         )}
       </div>
@@ -813,6 +838,14 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   // server-side regardless of what's requested), so neither control means
   // anything here.
   const isNative = node.node_type?.startsWith("native.") ?? false;
+  // A comfyui_workflow template whose own graph exposes no seed field is
+  // just as deterministic as native (mirrors EffectiveTemplate.is_deterministic,
+  // backend/app/core/node_types.py) -- e.g. a SAM3 mask-extraction graph with
+  // no sampler in it at all. Only the variants question is decided by this;
+  // native's other differences (no backend, no API toggle) stay keyed on
+  // isNative alone, since a deterministic template still runs on a real
+  // ComfyUI backend and still needs one picked.
+  const isDeterministic = isNative || !(template?.param_schema.fields ?? []).some((f) => f.type === "seed");
   const [jobs, setJobs] = useState<Job[]>([]);
   // The face only shows what's needed to glance at status and hit Generate --
   // template name, plan, and other node's worth of pixels (see NodeCell for
@@ -1006,7 +1039,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
 
   const chooseTemplate = async (templateId: string) => {
     const chosen = templates.find((t) => t.id === templateId);
-    const inputs = defaultInputsForSchema(chosen?.param_schema, node.inputs);
+    const inputs = await defaultInputsForSchema(chosen?.param_schema, node.inputs, { node, tracks, nodesById });
     const params = { ...(chosen?.defaults ?? {}), ...node.params };
     const updated = await nodesApi.update(node.id, { node_type: chosen?.node_type, inputs, params });
     setNode(updated);
@@ -1351,7 +1384,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
         <div onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
           {slotSourceSelects}
 
-          {!isNative && (
+          {!isDeterministic && (
             <div className="field-row">
               <label>{t("cell.variants")}</label>
               <input

@@ -158,6 +158,20 @@ class EffectiveTemplate:
     native: NativeNodeType | None = None
     db_template: NodeTemplate | None = None
 
+    @property
+    def is_deterministic(self) -> bool:
+        """True if requesting more than one variant would just produce N
+        pixel-identical results at N times the cost -- native execution
+        always is (no seed concept at all, is_native alone already covered
+        it), and so is any comfyui_workflow template whose baked graph
+        exposes no seed-type field for a variant to vary (e.g. a SAM3
+        mask-extraction graph with no sampler in it at all -- see
+        workflow_analyzer.py's SAMPLER_LITERAL_FIELDS/KNOWN_NODE_LITERAL_FIELDS,
+        the only things that ever produce a "seed" field)."""
+        if self.is_native:
+            return True
+        return not any(f.get("type") == "seed" for f in (self.param_schema or {}).get("fields", []))
+
 
 def parse_node_type(node_type: str | None) -> tuple[str, str] | None:
     if not node_type or "." not in node_type:

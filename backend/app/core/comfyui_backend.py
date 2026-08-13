@@ -18,10 +18,12 @@ import json
 import logging
 import uuid
 from collections.abc import Iterable
+from io import BytesIO
 from typing import Any
 
 import httpx
 import websockets
+from PIL import Image
 
 from app.core.job_backend import AssetRef, CapacityInfo, JobStatus
 from app.core.template_engine import build_workflow
@@ -151,6 +153,41 @@ class ComfyUIBackend:
         data = resp.json()
         return data.get(job_id)
 
+    @staticmethod
+    def _mask_save_node_ids(prompt_graph: dict[str, dict]) -> set[str]:
+        """Which SaveImage node ids are fed directly by a MaskToImage -- those
+        are visualizing a MASK, not a real generated picture (see the "get
+        mask as its own asset" design thread), so result() stores them as
+        AssetKind.mask and shrinks them back to one channel before storage
+        instead of keeping the 3x-duplicated RGB MaskToImage produces just to
+        satisfy SaveImage's IMAGE input. Graph-structural (one hop up the
+        same history["prompt"] graph the save_node_ids filter above already
+        walks), not name/title based -- works regardless of what the node
+        happens to be titled."""
+        ids: set[str] = set()
+        for node_id, node in prompt_graph.items():
+            if not isinstance(node, dict) or node.get("class_type") != "SaveImage":
+                continue
+            source = node.get("inputs", {}).get("images")
+            if isinstance(source, list) and len(source) == 2 and isinstance(source[0], str):
+                upstream = prompt_graph.get(source[0])
+                if isinstance(upstream, dict) and upstream.get("class_type") == "MaskToImage":
+                    ids.add(node_id)
+        return ids
+
+    @staticmethod
+    def _flatten_to_grayscale_png(data: bytes) -> bytes:
+        """Collapses MaskToImage's R/G/B-duplicated PNG back to a single
+        grayscale channel before it ever reaches storage -- same "don't pay
+        for channels the mask never had" instinct as native.mask's own
+        capped bilevel PNGs (core/native_backend.py), just applied to a mask
+        that came out of a ComfyUI graph instead of the frontend's paint
+        canvas."""
+        image = Image.open(BytesIO(data)).convert("L")
+        buf = BytesIO()
+        image.save(buf, format="PNG")
+        return buf.getvalue()
+
     async def result(self, job_id: str) -> list[AssetRef]:
         assets: list[AssetRef] = []
         async with httpx.AsyncClient(base_url=self.base_url, timeout=120) as client:
@@ -172,12 +209,15 @@ class ComfyUIBackend:
             # save-node class_type to allow-list for that branch.
             prompt = history.get("prompt")
             save_node_ids: set[str] | None = None
+            mask_node_ids: set[str] = set()
             if isinstance(prompt, list) and len(prompt) > 2 and isinstance(prompt[2], dict):
+                graph = prompt[2]
                 save_node_ids = {
                     node_id
-                    for node_id, node in prompt[2].items()
+                    for node_id, node in graph.items()
                     if isinstance(node, dict) and node.get("class_type") == "SaveImage"
                 }
+                mask_node_ids = self._mask_save_node_ids(graph)
 
             for node_id, node_output in history.get("outputs", {}).items():
                 is_save_node = save_node_ids is None or node_id in save_node_ids
@@ -192,7 +232,13 @@ class ComfyUIBackend:
                     )
                     resp.raise_for_status()
                     mime_type = resp.headers.get("content-type", "image/png")
-                    assets.append(AssetRef(data=resp.content, mime_type=mime_type, kind="image", meta=image))
+                    data = resp.content
+                    kind = "image"
+                    if node_id in mask_node_ids:
+                        kind = "mask"
+                        data = self._flatten_to_grayscale_png(data)
+                        mime_type = "image/png"
+                    assets.append(AssetRef(data=data, mime_type=mime_type, kind=kind, meta=image))
                 for mesh_key in ("3d", "meshes", "gltf"):
                     for mesh in node_output.get(mesh_key, []):
                         resp = await client.get(
