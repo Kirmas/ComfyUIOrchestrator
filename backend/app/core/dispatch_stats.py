@@ -219,10 +219,25 @@ def plan_dispatch(node_id: str, slots: list[BackendSlot], waiting_jobs: int, job
     # current one: the current estimate shrinks towards zero as the backend gets
     # closer to done, which would otherwise make the deadline tighten under us
     # right when the wait was about to pay off.
-    _deferred_since.pop(job_id, None)
     free = [sim for sim in sims if sim.free_now]
-    logger.info("job %s waited %.0fs for a faster backend that never freed up -- taking any", job_id, waited)
     if not free:
+        # Every backend happens to be busy at this exact instant too -- there
+        # is nothing to fall back to *yet*. Deliberately leave _deferred_since
+        # alone here (don't pop it): popping unconditionally used to re-arm a
+        # brand new expected_wait+_DEFER_GRACE_SECONDS budget on the very next
+        # poll, so a job that kept narrowly missing a free slot could restart
+        # this whole cycle indefinitely -- one job waited 8+ minutes across six
+        # back-to-back ~80s cycles this way (2026-08-14 incident) instead of
+        # just polling every dispatch_poll_interval_seconds from here on. With
+        # deferred_at untouched, `waited` only keeps growing past the grace
+        # deadline, so every future poll re-enters this same branch and takes
+        # the first backend that's actually free, without re-waiting.
+        logger.info(
+            "job %s waited %.0fs for a faster backend that never freed up, and nothing else is free yet either",
+            job_id, waited,
+        )
         return None
+    _deferred_since.pop(job_id, None)
     fallback = min(free, key=lambda s: s.per_job)
+    logger.info("job %s waited %.0fs for a faster backend that never freed up -- taking any", job_id, waited)
     return Plan(fallback.backend_id, f"gave up waiting after {waited:.0f}s")
