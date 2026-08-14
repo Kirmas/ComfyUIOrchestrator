@@ -604,6 +604,27 @@ async def _wait_for_completion(instance: ComfyUIBackend, external_job_id: str, o
 
 
 _STALL_POLL_INTERVAL_SECONDS = 60
+_UNREACHABLE_GRACE_SECONDS = 10
+_UNREACHABLE_RETRY_INTERVAL_SECONDS = 2
+
+
+async def _queue_position_with_grace(instance: ComfyUIBackend, external_job_id: str) -> int | None:
+    """A lone dropped/slow response (the 2026-08-14 asusi9 blip) self-heals
+    almost immediately and shouldn't cost a job the full stall_seconds wait
+    just to notice -- but a backend that's genuinely gone shouldn't get
+    stall_seconds either. Retries queue_position for up to
+    _UNREACHABLE_GRACE_SECONDS before giving up and re-raising, so the caller
+    can tell "one flaky request" (recovers well within the grace window)
+    apart from "backend is actually down" (still failing after it)."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _UNREACHABLE_GRACE_SECONDS
+    while True:
+        try:
+            return await instance.queue_position(external_job_id)
+        except httpx.TransportError:
+            if loop.time() >= deadline:
+                raise
+            await asyncio.sleep(_UNREACHABLE_RETRY_INTERVAL_SECONDS)
 
 
 async def _wait_with_stall_detection(
@@ -615,7 +636,12 @@ async def _wait_with_stall_detection(
     moved for `stall_seconds`. That lets a single generation run for however
     long it actually needs -- minutes or hours -- while still catching a
     genuinely wedged backend (queue frozen, or executing but no progress
-    events) within `stall_seconds` of it happening."""
+    events) within `stall_seconds` of it happening.
+
+    A backend that's stopped answering at all is a different failure mode
+    from one that's merely wedged, and waiting out the full stall_seconds for
+    it is needless -- _queue_position_with_grace gives it
+    _UNREACHABLE_GRACE_SECONDS to come back before this gives up on it."""
     completion_task = asyncio.create_task(_wait_for_completion(instance, external_job_id, on_progress))
     loop = asyncio.get_running_loop()
     last_signal: tuple[int, int | None] | None = None
@@ -627,7 +653,15 @@ async def _wait_with_stall_detection(
             if completion_task in done:
                 return completion_task.result()
 
-            position = await instance.queue_position(external_job_id)
+            try:
+                position = await _queue_position_with_grace(instance, external_job_id)
+            except httpx.TransportError as exc:
+                completion_task.cancel()
+                await asyncio.gather(completion_task, return_exceptions=True)
+                raise TimeoutError(
+                    f"backend unreachable for {_UNREACHABLE_GRACE_SECONDS}s -- considered down"
+                ) from exc
+
             signal = (job.progress, position)
             now = loop.time()
             if signal != last_signal:

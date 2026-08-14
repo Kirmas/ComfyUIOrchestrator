@@ -83,30 +83,42 @@ class ComfyUIBackend:
         return running_ids, pending_ids
 
     async def status(self, job_id: str) -> JobStatus:
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=30) as client:
-            history = await self._get_history_entry(client, job_id)
-            if history is not None:
-                status_info = history.get("status", {})
-                if status_info.get("status_str") == "error" or any(
-                    m[0] == "execution_error" for m in status_info.get("messages", [])
-                ):
-                    return JobStatus.error
-                if history.get("outputs"):
-                    return JobStatus.done
+        # A transient network blip here must not read as "job failed" --
+        # _poll_until_terminal's own loop already retries this call every 2s
+        # regardless, so swallowing a transport error and reporting "still
+        # pending" just lets that natural retry happen instead of blowing up
+        # the whole job over one dropped response. A backend that's actually
+        # gone (not just one flaky request) is caught separately and much
+        # faster by _wait_with_stall_detection's queue_position check in
+        # worker/tasks.py -- this method deliberately doesn't duplicate that.
+        try:
+            async with httpx.AsyncClient(base_url=self.base_url, timeout=30) as client:
+                history = await self._get_history_entry(client, job_id)
+                if history is not None:
+                    status_info = history.get("status", {})
+                    if status_info.get("status_str") == "error" or any(
+                        m[0] == "execution_error" for m in status_info.get("messages", [])
+                    ):
+                        return JobStatus.error
+                    if history.get("outputs"):
+                        return JobStatus.done
 
-            running_ids, pending_ids = await self._queue_snapshot(client)
-            if job_id in running_ids:
-                return JobStatus.running
-            if job_id in pending_ids:
-                return JobStatus.pending
+                running_ids, pending_ids = await self._queue_snapshot(client)
+                if job_id in running_ids:
+                    return JobStatus.running
+                if job_id in pending_ids:
+                    return JobStatus.pending
 
-            # Neither in the queue nor still running/pending there: if we do have
-            # a history entry, the prompt genuinely ran and produced no outputs
-            # (a real failure ComfyUI didn't flag via status_str/execution_error
-            # -- see _poll_until_terminal's docstring in worker/tasks.py for the
-            # observed case). No history at all just means it hasn't been picked
-            # up yet, so treat that as still pending rather than an error.
-            return JobStatus.error if history is not None else JobStatus.pending
+                # Neither in the queue nor still running/pending there: if we do have
+                # a history entry, the prompt genuinely ran and produced no outputs
+                # (a real failure ComfyUI didn't flag via status_str/execution_error
+                # -- see _poll_until_terminal's docstring in worker/tasks.py for the
+                # observed case). No history at all just means it hasn't been picked
+                # up yet, so treat that as still pending rather than an error.
+                return JobStatus.error if history is not None else JobStatus.pending
+        except httpx.TransportError:
+            logger.warning("status check failed for %s on %s", job_id, self.base_url, exc_info=True)
+            return JobStatus.pending
 
     async def error_detail(self, job_id: str) -> str | None:
         """Pulls the "execution_error" message's exception_message/node_type
@@ -134,17 +146,19 @@ class ComfyUIBackend:
         all (done/errored/dropped). Used by the stall watchdog in
         worker/tasks.py to tell "queue is progressing, just slowly" apart from
         "queue is wedged" -- a flat execution-progress check alone would see no
-        movement at all while a job is still waiting its turn behind others."""
-        try:
-            async with httpx.AsyncClient(base_url=self.base_url, timeout=15) as client:
-                running_ids, pending_ids = await self._queue_snapshot(client)
-                if job_id in running_ids:
-                    return 0
-                if job_id in pending_ids:
-                    return pending_ids.index(job_id)
-                return None
-        except Exception:
-            logger.warning("queue_position check failed for %s on %s", job_id, self.base_url, exc_info=True)
+        movement at all while a job is still waiting its turn behind others.
+
+        Deliberately lets httpx.TransportError propagate rather than
+        swallowing it here: the caller (_wait_with_stall_detection) needs to
+        tell "backend didn't answer this one time" apart from "genuinely not
+        in the queue" so it can fail fast on a backend that's actually gone
+        instead of only noticing via the much longer no-progress window."""
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=15) as client:
+            running_ids, pending_ids = await self._queue_snapshot(client)
+            if job_id in running_ids:
+                return 0
+            if job_id in pending_ids:
+                return pending_ids.index(job_id)
             return None
 
     async def _get_history_entry(self, client: httpx.AsyncClient, job_id: str) -> dict | None:
