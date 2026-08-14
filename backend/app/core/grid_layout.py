@@ -85,16 +85,27 @@ async def compute_layout(db, project_id, dashboard_id=None) -> dict:
         # spawned track no longer stretches the card.
         desired = max(slot_count(effective.param_schema if effective else {}), max_output_offset.get(n.id, 0) + 1, 1)
 
-        # Mirrors the OLD frontend rowSpanByNode exactly: grow toward desired,
-        # stopping only at the first row below whose own column is already
-        # occupied by an unrelated node -- NOT capped at the current track
-        # count (it may grow into not-yet-created rows; the auto-expand effect
-        # then materializes them). Deliberately different from the move/split
-        # helpers' _actual_span, which DO cap at the track count.
+        # Grow toward desired, stopping at whichever comes first: the first
+        # row below whose own column is already occupied by an unrelated
+        # node, or simply running out of real tracks. Capped at the real
+        # track count now -- same cap worker/tasks.py's _actual_row_span
+        # already applies for move/split -- because this used to grow into
+        # not-yet-created rows on the theory that a reactive auto-expand
+        # effect would materialize them, but that effect was removed
+        # (feedback_no_reactive_span_effects: it caused infinite track
+        # growth) and growth is imperative now, only ever happening on
+        # demand from _locate_output_row. Left uncapped, the card rendered
+        # taller than any track actually backed -- violating "a node's
+        # rendered position is always exactly its track_id + step_index"
+        # (README/CLAUDE.md) -- so the empty space under a still-short
+        # picker looked like it already belonged to the workflow node, but
+        # claiming a new output there had nothing real to place it on and
+        # created a genuinely new track instead, which read as "why did it
+        # add a track when there was already room?" (2026-08-14 report).
         start = pos.get(n.track_id)
         achieved = 1
         if start is not None:
-            while achieved < desired and (start + achieved, n.step_index) not in occupied:
+            while achieved < desired and start + achieved < len(ordered) and (start + achieved, n.step_index) not in occupied:
                 achieved += 1
         spans[str(n.id)] = {"desired": desired, "achieved": achieved}
 

@@ -770,17 +770,10 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
 
         try:
             resolved_inputs = await resolve_node_inputs(db, node, effective.param_schema, effective.defaults)
-            try:
-                external_job_id = await wait_with_timeout(
-                    choice.instance.submit(choice.capability.config if choice.capability else {}, resolved_inputs),
-                    settings.job_timeout_seconds,
-                )
-            finally:
-                # Release as soon as the backend's real queue reflects this job
-                # (or definitely never will, on failure) -- see dispatcher._reserved.
-                # Native has no reservation to release (no Backend row at all).
-                if choice.backend:
-                    await dispatcher.release_backend(str(choice.backend.id))
+            external_job_id = await wait_with_timeout(
+                choice.instance.submit(choice.capability.config if choice.capability else {}, resolved_inputs),
+                settings.job_timeout_seconds,
+            )
             job.external_job_id = external_job_id
             await db.commit()
 
@@ -860,6 +853,22 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                 dispatch_stats.note_finish(
                     str(choice.backend.id), str(job.id), succeeded=job.status == JobStatusEnum.done
                 )
+                # Used to release right after submit() -- as soon as ComfyUI's
+                # own /queue reflected this job, dispatcher.capacity() could be
+                # trusted again. But capacity() only reads that live /queue, so
+                # it already reports a ComfyUI backend as free the instant
+                # execution finishes server-side -- before result() has
+                # actually downloaded the output (a big one, e.g. an 8K
+                # upscale, can take a while). That let a second job land on the
+                # same backend while the first was still downloading, and the
+                # two competing for the same box's bandwidth/CPU was enough to
+                # trip result()'s own httpx timeout, which then retried the
+                # first job from scratch even though ComfyUI itself had
+                # already finished it (2026-08-14 incident). Releasing here
+                # instead -- once this job is truly done, one way or another --
+                # keeps the backend reserved for the whole submit-through-
+                # download span, not just until submission.
+                await dispatcher.release_backend(str(choice.backend.id))
 
         await _finalize_node_if_done(db, node.id, project_id)
 

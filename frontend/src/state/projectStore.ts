@@ -168,7 +168,17 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (dashboardId === null) storeNavStack(projectId, [{ dashboardId: null, name: "" }]);
 
     for (const node of Object.values(nodesById)) {
-      if (node.status === "done") {
+      // "running" as well as "done" -- a select/candidate node fed by a
+      // still-in-flight multi-variant batch stays "running" (worker/tasks.py's
+      // _finalize_node_if_done only flips it to "done" once every variant in
+      // the batch reaches a terminal state) even though it can already have
+      // real Asset rows for whichever variants finished first. Skipping it
+      // here left it rendering empty after a page reload mid-batch, only
+      // catching up once the whole batch finished and the unconditional
+      // "node" WS handler in applyProgressEvent refreshed it instead (2026-08-14
+      // incident) -- draft/queued/error/discarded nodes genuinely have nothing
+      // to fetch yet, so they're still skipped.
+      if (node.status === "done" || node.status === "running") {
         get()
           .refreshNodeOutputs(node.id)
           .catch(() => undefined);

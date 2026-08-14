@@ -26,8 +26,18 @@ _USAGE_WINDOW = timedelta(hours=24)
 # reads each backend's *live* queue length over HTTP, which doesn't yet include
 # a job this same batch already chose to send but hasn't POSTed /prompt for --
 # so every concurrent caller sees the same "empty" backend and they all pile
-# onto it. This in-memory counter tracks picks that haven't been submitted yet
-# so concurrent selections see each other and spread out instead of racing.
+# onto it. This in-memory counter tracks picks capacity() can't see yet so
+# concurrent selections see each other and spread out instead of racing.
+#
+# It also now covers the tail end of a job, not just its start:
+# worker/tasks.py's run_variant_job only releases a pick (release_backend)
+# once the job is fully done, including result() having downloaded the
+# output -- a ComfyUI backend's own /queue empties as soon as execution
+# finishes there, before that download happens, so without this a second job
+# could land on the same backend while a large result (e.g. an 8K upscale)
+# was still transferring, and the two competing for the same box was enough
+# to make the download itself time out and get retried from scratch even
+# though ComfyUI had already finished the first job (2026-08-14 incident).
 _reservation_lock = asyncio.Lock()
 _reserved: dict[str, int] = {}
 

@@ -16,6 +16,7 @@ from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Dashboard, Job, Node, NodeKind, NodeStatus, Track
 from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeDuplicate, NodeMove, NodeRead, NodeUpdate, PickCandidate
 from app.worker.tasks import (
+    _locate_output_row,
     _splice_after_would_split_a_span,
     enqueue_node_job,
     has_room_for_output,
@@ -407,41 +408,71 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
     # cause its own track was already spawned from, else itself.
     cause_node_id = preceding.id if preceding is not None else (home.spawned_from_node_id or picker.id)
 
-    # Place the leftover picker on a fresh spawned track right AFTER the
-    # producing workflow's current lowest output, so every candidate line stays
-    # contiguous just below the producer -- never flung to the bottom of the
-    # project (the old fallback tail-appended whenever an adjacent insert
-    # "would break an output binding", which in a dense project fired
-    # constantly and sent the line far away; a far output then also bloated the
-    # producer's rendered span over unrelated rows -- 2026-07-22). Inserting
-    # just past the producer's lowest output only shifts whole workflow blocks
-    # below it down as units, so it can't split anyone's input span.
+    # Where the leftover picker goes: prefer a row that already exists and is
+    # already free over ever spawning a fresh track, checked in exactly the
+    # priority _locate_output_row already walks in (it's the same search
+    # _claim_new_output_cell uses to place a workflow's output in the first
+    # place) -- (1) a free cell already inside the producer's own achieved
+    # span, (2) the next row down whose own column is simply unblocked (a
+    # real track that isn't part of the span yet only because nothing had
+    # claimed it), reused with no new track at all, (3) only once neither
+    # exists, splice one in right there -- never a proactive resize-by-one
+    # (that was the reactive auto-expand effect that caused runaway track
+    # growth, feedback_no_reactive_span_effects). Only applies with a genuine
+    # workflow producer to search a column for; a cascade off another picker
+    # (cause_node_id falling back to home.spawned_from_node_id/picker.id
+    # below) has no output column of its own, so it keeps the old placement
+    # straight away. Either way, settling on a candidate must never just
+    # refuse -- these already exist and already cost real compute, unlike a
+    # generation that hasn't run yet -- so _locate_output_row's own refusal
+    # (splicing (3) would split some unrelated node's span apart) falls
+    # through to that same old unconditional insert-after-the-producer's-
+    # lowest-output placement below instead of surfacing as an error
+    # (2026-08-14: an earlier version of this surfaced it as a 409, which
+    # made picking fail far too often to be usable).
     producer = await db.get(Node, picker.created_by_node_id) if picker.created_by_node_id else preceding
-    insert_after = original_row
-    if producer is not None:
-        ppos = pos.get(producer.track_id)
-        if ppos is not None:
-            insert_after = ppos
-            result = await db.execute(
-                select(Node).where(Node.created_by_node_id == producer.id, Node.status != NodeStatus.discarded)
-            )
-            for out in result.scalars().all():
-                opos = pos.get(out.track_id)
-                if opos is not None and opos > insert_after:
-                    insert_after = opos
+    target_track = None
+    if producer is not None and producer.kind == NodeKind.workflow:
+        try:
+            target_track = await _locate_output_row(db, producer, materialize=True)
+        except RuntimeError:
+            # Neither a reuse nor a safe splice was possible -- unlike a
+            # fresh generation (which can just not be dispatched), these
+            # candidates already exist and already cost real compute, so
+            # settling on one must always succeed. Fall through to the old
+            # unconditional placement below instead of refusing the pick.
+            target_track = None
 
-    new_track = Track(
-        project_id=project_id,
-        dashboard_id=dashboard_id,
-        spawned_from_node_id=cause_node_id,
-        spawned_from_output_id=kept.id,
-    )
-    db.add(new_track)
-    await db.flush()
-    anchor = ordered[insert_after] if 0 <= insert_after < len(ordered) else (ordered[-1] if ordered else None)
-    await splice_after(db, project_id, new_track, anchor, dashboard_id=dashboard_id)
-    await db.flush()
-    picker.track_id = new_track.id
+    if target_track is not None:
+        target_track.spawned_from_node_id = cause_node_id
+        target_track.spawned_from_output_id = kept.id
+    else:
+        insert_after = original_row
+        if producer is not None:
+            ppos = pos.get(producer.track_id)
+            if ppos is not None:
+                insert_after = ppos
+                result = await db.execute(
+                    select(Node).where(Node.created_by_node_id == producer.id, Node.status != NodeStatus.discarded)
+                )
+                for out in result.scalars().all():
+                    opos = pos.get(out.track_id)
+                    if opos is not None and opos > insert_after:
+                        insert_after = opos
+
+        target_track = Track(
+            project_id=project_id,
+            dashboard_id=dashboard_id,
+            spawned_from_node_id=cause_node_id,
+            spawned_from_output_id=kept.id,
+        )
+        db.add(target_track)
+        await db.flush()
+        anchor = ordered[insert_after] if 0 <= insert_after < len(ordered) else (ordered[-1] if ordered else None)
+        await splice_after(db, project_id, target_track, anchor, dashboard_id=dashboard_id)
+        await db.flush()
+
+    picker.track_id = target_track.id
     await db.flush()
 
     # The settled node takes over the picker's EXACT cell -- the picker was
@@ -488,6 +519,10 @@ async def pick_candidate(node_id: uuid.UUID, payload: PickCandidate, db: AsyncSe
     kept = await db.get(Asset, payload.kept_asset_id)
     if kept is None or kept.node_id != picker.id:
         raise HTTPException(400, "That asset isn't one of this picker's candidates")
+    # _pick_candidate never raises RuntimeError -- it absorbs
+    # _locate_output_row's refusal itself and falls back to the old
+    # unconditional placement, since a pick (unlike a fresh generation) must
+    # always be able to succeed.
     await _pick_candidate(db, picker, kept)
     await db.commit()
     await db.refresh(picker)
