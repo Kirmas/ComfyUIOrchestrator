@@ -587,20 +587,33 @@ async def _wait_for_completion(instance: ComfyUIBackend, external_job_id: str, o
         await asyncio.gather(listen_task, poll_task, return_exceptions=True)
         raise
 
-    for task in pending:
-        task.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
-
     if poll_task in done:
+        if listen_task in pending:
+            listen_task.cancel()
+        # Either way, retrieve listen_task's outcome so a WS error that lost
+        # the race isn't left as an "exception was never retrieved" warning.
+        await asyncio.gather(listen_task, return_exceptions=True)
         return poll_task.result()
 
     exc = listen_task.exception()
-    if exc is not None:
-        raise exc
-    # listen_progress caught the terminal WS event but doesn't itself carry a
-    # status -- one direct check now that we know execution is over.
-    return await instance.status(external_job_id)
+    if exc is None:
+        # listen_progress caught the terminal WS event but doesn't itself carry a
+        # status -- one direct check now that we know execution is over.
+        poll_task.cancel()
+        await asyncio.gather(poll_task, return_exceptions=True)
+        return await instance.status(external_job_id)
+
+    # The websocket itself dropped (network blip, keepalive ping timeout,
+    # etc -- the 2026-08-17 asusi9 log: ConnectionClosedError mid-job) rather
+    # than the job failing. That must not fail the job outright: poll_task's
+    # HTTP polling is still running right alongside it and is already
+    # resilient to transient blips (status() swallows httpx.TransportError,
+    # see the 2026-08-14 fix), so fall back to it alone instead of treating a
+    # dead websocket as a dead job -- otherwise a generation that finishes
+    # fine on the backend never gets its result fetched, because this task
+    # raised before poll_task got a chance to notice completion itself.
+    logger.warning("progress websocket for %s dropped, falling back to HTTP polling", external_job_id, exc_info=exc)
+    return await poll_task
 
 
 _STALL_POLL_INTERVAL_SECONDS = 60
