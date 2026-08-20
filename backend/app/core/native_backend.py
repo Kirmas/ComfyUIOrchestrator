@@ -17,7 +17,7 @@ import uuid
 from io import BytesIO
 from typing import Any
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageChops, ImageFilter
 
 from app.core.job_backend import AssetRef, CapacityInfo, JobStatus
 
@@ -288,4 +288,35 @@ class MaskBackend(NativeBackend):
 
         buf = BytesIO()
         mask.save(buf, format="PNG")
+        return [AssetRef(data=buf.getvalue(), mime_type="image/png", kind="mask")]
+
+
+class MergeMaskBackend(NativeBackend):
+    """Union (OR) of two mask images into one -- e.g. combining a SAM3-detected
+    mask with a hand-painted native.mask, or two separate detections, into a
+    single mask a downstream inpaint/mask-consuming step can use. Same
+    AssetKind.mask output convention as MaskBackend (single-channel grayscale
+    PNG, lit/white = masked region), so the result is interchangeable with any
+    other mask asset everywhere downstream.
+
+    Both slots are plain "image" fields (like crop's/transplant's own image
+    slots), not mask_png/layer_mask params -- unlike MaskBackend/
+    TransplantBackend, there's nothing painted in this node's own editor:
+    mask_a/mask_b are existing mask assets already sitting in other grid
+    cells, so they arrive already at full resolution and just need combining,
+    not upscaling from a small painted canvas.
+    """
+
+    async def _run(self, execution_config: dict, inputs: dict[str, Any]) -> list[AssetRef]:
+        mask_a = Image.open(BytesIO(inputs["mask_a"])).convert("L")
+        mask_b = Image.open(BytesIO(inputs["mask_b"])).convert("L")
+        if mask_b.size != mask_a.size:
+            # Nearest-neighbor, same reasoning as MaskBackend's own resize:
+            # a mask is bilevel, an interpolated resize would introduce
+            # gradient values along the edge that were never actually there.
+            mask_b = mask_b.resize(mask_a.size, Image.NEAREST)
+        merged = ImageChops.lighter(mask_a, mask_b)
+
+        buf = BytesIO()
+        merged.save(buf, format="PNG")
         return [AssetRef(data=buf.getvalue(), mime_type="image/png", kind="mask")]

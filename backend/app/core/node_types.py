@@ -28,6 +28,7 @@ from app.core.native_backend import (
     CharacterChartBackend,
     CropBackend,
     MaskBackend,
+    MergeMaskBackend,
     NativeBackend,
     TransplantBackend,
 )
@@ -109,6 +110,18 @@ NATIVE_NODE_TYPES: dict[str, NativeNodeType] = {
         },
         defaults={},
         backend_cls=MaskBackend,
+    ),
+    "merge_mask": NativeNodeType(
+        slug="merge_mask",
+        name="Merge Mask",
+        param_schema={
+            "fields": [
+                {"name": "mask_a", "type": "image", "label": "Mask A", "required": True},
+                {"name": "mask_b", "type": "image", "label": "Mask B", "required": True},
+            ]
+        },
+        defaults={},
+        backend_cls=MergeMaskBackend,
     ),
 }
 
