@@ -30,6 +30,7 @@ from app.core.native_backend import (
     MaskBackend,
     MergeMaskBackend,
     NativeBackend,
+    ScaleMaskBackend,
     TransplantBackend,
 )
 from app.db.models import Node, NodeTemplate
@@ -122,6 +123,18 @@ NATIVE_NODE_TYPES: dict[str, NativeNodeType] = {
         },
         defaults={},
         backend_cls=MergeMaskBackend,
+    ),
+    "scale_mask": NativeNodeType(
+        slug="scale_mask",
+        name="Scale Mask",
+        param_schema={
+            "fields": [
+                {"name": "mask", "type": "image", "label": "Mask", "required": True},
+                {"name": "scale_percent", "type": "float", "label": "Scale %", "default": 10.0},
+            ]
+        },
+        defaults={"scale_percent": 10.0},
+        backend_cls=ScaleMaskBackend,
     ),
 }
 

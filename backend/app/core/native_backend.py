@@ -17,6 +17,7 @@ import uuid
 from io import BytesIO
 from typing import Any
 
+import numpy as np
 from PIL import Image, ImageChops, ImageFilter
 
 from app.core.job_backend import AssetRef, CapacityInfo, JobStatus
@@ -319,4 +320,137 @@ class MergeMaskBackend(NativeBackend):
 
         buf = BytesIO()
         merged.save(buf, format="PNG")
+        return [AssetRef(data=buf.getvalue(), mime_type="image/png", kind="mask")]
+
+
+def _label_components(fg: np.ndarray) -> list[np.ndarray]:
+    """Splits a boolean foreground array into its 8-connected components, one
+    boolean array per component (same shape as `fg`, True only where that
+    component's own pixels are).
+
+    No scipy/opencv in this project (see requirements.txt) so there's no
+    `ndimage.label` to reach for -- this is a plain iterative flood fill
+    (explicit stack, not recursion, to avoid Python's recursion limit on a
+    large blob) seeded from each not-yet-visited foreground pixel. Its cost
+    is O(number of foreground pixels) total, each visited once, regardless of
+    the full image's size or the component's shape -- unlike a distance-
+    transform/dilation-based labeling scheme, whose cost tracks a component's
+    *diameter* against the *whole* array on every pass. A painted mask's
+    foreground is normally a small fraction of the canvas, which is the case
+    this bound is actually good for.
+    """
+    visited = np.zeros_like(fg, dtype=bool)
+    h, w = fg.shape
+    components: list[np.ndarray] = []
+    ys, xs = np.nonzero(fg)
+    for sy, sx in zip(ys.tolist(), xs.tolist()):
+        if visited[sy, sx]:
+            continue
+        stack = [(sy, sx)]
+        visited[sy, sx] = True
+        coords: list[tuple[int, int]] = []
+        while stack:
+            y, x = stack.pop()
+            coords.append((y, x))
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dy == 0 and dx == 0:
+                        continue
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < h and 0 <= nx < w and fg[ny, nx] and not visited[ny, nx]:
+                        visited[ny, nx] = True
+                        stack.append((ny, nx))
+        comp = np.zeros_like(fg)
+        comp_ys, comp_xs = zip(*coords)
+        comp[list(comp_ys), list(comp_xs)] = True
+        components.append(comp)
+    return components
+
+
+# Below this, "scale" collapses every foreground pixel of a component onto
+# its own centroid rather than erroring on a division by zero -- shrinking a
+# region past ~0 is still a well-defined (if degenerate) request. A
+# scale_percent <= -100 (factor <= 0) clamps here too, rather than going
+# negative: a negative factor would mirror the region through its own
+# centroid, which "shrink by more than 100%" was never asking for.
+_MIN_SCALE_FACTOR = 0.01
+
+
+def _scale_component(component: np.ndarray, factor: float) -> np.ndarray:
+    """Radially scales one connected component about its own centroid by
+    `factor` (1.0 = unchanged, >1 grows, <1 shrinks) -- a true geometric
+    scale, not a fixed-width boundary dilation, so a component far from its
+    own center moves (and grows) more than one close to it.
+
+    Windowed to the component's own (post-scale) bounding box, the same
+    windowing discipline `transplant()` uses above -- a paint-mask edit
+    shouldn't cost a full-frame array op when only a small region actually
+    changes (memory/memory_tight_box_array_scale.md). Rendered via an inverse
+    warp (for each *output* pixel, nearest-neighbor-sample the *source* pixel
+    that scales onto it) rather than a forward warp, which would leave holes
+    once factor > 1 spreads source pixels further apart than one unit.
+    Nearest-neighbor, not bilinear, to keep the result bilevel -- same
+    reasoning as every other mask resize in this module.
+    """
+    factor = max(factor, _MIN_SCALE_FACTOR)
+    h, w = component.shape
+    ys, xs = np.nonzero(component)
+    cy, cx = float(ys.mean()), float(xs.mean())
+
+    corners_y = np.array([ys.min(), ys.min(), ys.max(), ys.max()], dtype=np.float64)
+    corners_x = np.array([xs.min(), xs.max(), xs.min(), xs.max()], dtype=np.float64)
+    scaled_y = cy + (corners_y - cy) * factor
+    scaled_x = cx + (corners_x - cx) * factor
+    pad = 1  # rounding margin for the nearest-neighbor sampling below
+    top = max(0, int(math.floor(scaled_y.min())) - pad)
+    bottom = min(h, int(math.ceil(scaled_y.max())) + pad + 1)
+    left = max(0, int(math.floor(scaled_x.min())) - pad)
+    right = min(w, int(math.ceil(scaled_x.max())) + pad + 1)
+    out = np.zeros_like(component)
+    if bottom <= top or right <= left:
+        return out
+
+    out_y, out_x = np.mgrid[top:bottom, left:right].astype(np.float64)
+    src_y = np.round(cy + (out_y - cy) / factor).astype(np.int64)
+    src_x = np.round(cx + (out_x - cx) / factor).astype(np.int64)
+    in_bounds = (src_y >= 0) & (src_y < h) & (src_x >= 0) & (src_x < w)
+    sampled = np.zeros(src_y.shape, dtype=bool)
+    sampled[in_bounds] = component[src_y[in_bounds], src_x[in_bounds]]
+    out[top:bottom, left:right] = sampled
+    return out
+
+
+class ScaleMaskBackend(NativeBackend):
+    """Grows (or, for a negative percent, shrinks) a mask's painted region --
+    but as a true geometric scale about each closed region's own center, not
+    a fixed-width boundary dilation: every one of a mask's connected
+    components (8-connectivity) is found separately via `_label_components`
+    and scaled about its *own* centroid via `_scale_component`, independently
+    of every other component in the same mask. A mask with two disjoint
+    blobs therefore grows each blob from its own middle, not from one shared
+    center -- this was specifically requested over a uniform-dilation
+    "grow_mask" design (2026-08-22).
+
+    scale_percent=25 means factor 1.25 (25% larger, linearly, about each
+    component's centroid); -25 means factor 0.75. Same single-channel "L",
+    lit/white=masked-region convention and kind="mask" output as MaskBackend/
+    MergeMaskBackend, so the result is interchangeable with any other mask
+    asset everywhere downstream.
+    """
+
+    async def _run(self, execution_config: dict, inputs: dict[str, Any]) -> list[AssetRef]:
+        mask = Image.open(BytesIO(inputs["mask"])).convert("L")
+        percent = float(inputs.get("scale_percent", 0.0))
+        factor = 1.0 + percent / 100.0
+
+        arr = np.asarray(mask) > 127
+        if arr.any() and abs(factor - 1.0) > 1e-9:
+            out = np.zeros_like(arr)
+            for component in _label_components(arr):
+                out |= _scale_component(component, factor)
+            arr = out
+
+        result = Image.fromarray((arr.astype(np.uint8) * 255), mode="L")
+        buf = BytesIO()
+        result.save(buf, format="PNG")
         return [AssetRef(data=buf.getvalue(), mime_type="image/png", kind="mask")]
