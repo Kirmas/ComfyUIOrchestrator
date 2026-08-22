@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useT } from "../i18n";
-import { PaintMaskToolbar, usePaintMask } from "./paintMask";
+import { MaskZoomViewport, PaintMaskToolbar, useMaskZoom, usePaintMask } from "./paintMask";
 
 /** The editor for native.transplant: two images stacked as layers, the target
  * on top and the source underneath, with a brush that punches holes in the top
@@ -83,6 +83,7 @@ export function TransplantPreview({
     onCommit,
     onChange: redraw,
   });
+  const zoom = useMaskZoom();
 
   // The mask itself only changes through the hook (which calls redraw), but
   // the *rendering* of it also depends on these two.
@@ -90,7 +91,7 @@ export function TransplantPreview({
 
   return (
     <div onClick={(e) => e.stopPropagation()}>
-      <PaintMaskToolbar paint={paint}>
+      <PaintMaskToolbar paint={paint} zoom={zoom}>
         <label style={{ fontSize: 10, display: "flex", alignItems: "center", gap: 4 }}>
           {t("transplant.topOpacity")}
           <input
@@ -102,17 +103,7 @@ export function TransplantPreview({
           />
         </label>
       </PaintMaskToolbar>
-      <div
-        style={{
-          position: "relative",
-          userSelect: "none",
-          lineHeight: 0,
-          width: "100%",
-          aspectRatio: natural ? `${natural.w} / ${natural.h}` : undefined,
-          borderRadius: 4,
-          overflow: "hidden",
-        }}
-      >
+      <MaskZoomViewport natural={natural} zoom={zoom}>
         <img
           src={sourceUrl}
           alt="transplant source"
@@ -136,7 +127,7 @@ export function TransplantPreview({
           }}
           {...paint.handlers}
         />
-      </div>
+      </MaskZoomViewport>
       <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>{t("transplant.hint")}</div>
     </div>
   );

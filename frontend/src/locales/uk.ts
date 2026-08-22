@@ -497,6 +497,7 @@ export const uk: Record<TKey, string> = {
   "mask.erasing": "Стирання",
   "mask.painting": "Малювання",
   "mask.undo": "Скасувати дію",
+  "mask.zoomHint": "Прокрутка — масштаб, перетягування середньою кнопкою миші — панорама",
 
   // --- Transplant editor (native.transplant) ---------------------------
   "transplant.topOpacity": "Верхній шар",

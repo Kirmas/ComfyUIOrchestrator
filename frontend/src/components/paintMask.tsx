@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useT } from "../i18n";
+import { MIN_ZOOM, usePinchPan } from "../usePinchPan";
 
 /** The brush-painting engine behind every "paint a region on this image"
  * editor: the canvas, the stroke/erase/undo/clear behaviour, and the bilevel
@@ -218,6 +219,10 @@ export function usePaintMask({
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
+    // Only the primary button/touch draws -- a middle-click drives useMaskZoom's
+    // pan gesture instead (see below), and without this guard it would also
+    // start a stroke underneath the pan.
+    if (e.button !== 0) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     pushUndo();
@@ -276,11 +281,68 @@ export function usePaintMask({
   };
 }
 
-/** Brush size / paint-erase / undo / clear -- identical controls and identical
- * strings in both editors, so it's one component rather than the same four
- * elements written twice. `children` takes whatever extra control an editor
- * has of its own (the transplant editor's opacity slider). */
-export function PaintMaskToolbar({ paint, children }: { paint: PaintMask; children?: React.ReactNode }) {
+export type MaskZoom = ReturnType<typeof useMaskZoom>;
+
+/** Zoom + pan for a paint-mask viewport, built on the same usePinchPan gesture
+ * math as ZoomableImage/CompareModal/Board (scroll/pinch to zoom, focal-stable
+ * on the cursor). Panning is bound to a middle-mouse drag rather than the
+ * primary drag those other viewers use, because the primary drag here already
+ * means "paint a stroke" (usePaintMask's own handlers ignore any other
+ * button, for the same reason). A two-finger touch pinch still zooms. */
+export function useMaskZoom() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const pan = usePinchPan(containerRef, true, { panButton: "middle" });
+  return { ...pan, containerRef };
+}
+
+/** The outer frame both paint editors zoom/pan inside: a fixed, clipped
+ * viewport sized from the source image's aspect ratio, with an inner layer
+ * (the image + mask canvas(es), passed as `children`) that actually carries
+ * the zoom/pan transform. Shared because the sizing and transform math is
+ * identical for MaskPreview (one canvas) and TransplantPreview (two) -- only
+ * what's inside differs. */
+export function MaskZoomViewport({
+  natural,
+  zoom,
+  children,
+}: {
+  natural: { w: number; h: number } | null;
+  zoom: MaskZoom;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      ref={zoom.containerRef}
+      {...zoom.handlers}
+      style={{
+        position: "relative",
+        overflow: "hidden",
+        userSelect: "none",
+        lineHeight: 0,
+        borderRadius: 4,
+        aspectRatio: natural ? `${natural.w} / ${natural.h}` : undefined,
+        cursor: zoom.grabbing ? "grabbing" : undefined,
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          transform: `translate(${zoom.view.x}px, ${zoom.view.y}px) scale(${zoom.view.zoom})`,
+          transformOrigin: "center",
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** Brush size / paint-erase / undo / clear / zoom -- identical controls and
+ * identical strings in both editors, so it's one component rather than the
+ * same elements written twice. `children` takes whatever extra control an
+ * editor has of its own (the transplant editor's opacity slider). */
+export function PaintMaskToolbar({ paint, zoom, children }: { paint: PaintMask; zoom: MaskZoom; children?: React.ReactNode }) {
   const t = useT();
   return (
     <div style={{ display: "flex", gap: 6, marginBottom: 4, alignItems: "center", flexWrap: "wrap" }}>
@@ -297,6 +359,17 @@ export function PaintMaskToolbar({ paint, children }: { paint: PaintMask; childr
       <button style={{ fontSize: 10, padding: "1px 6px" }} onClick={paint.clear} disabled={!paint.hasStrokes}>
         {t("common.clear")}
       </button>
+      <span style={{ display: "flex", alignItems: "center", gap: 2 }} title={t("mask.zoomHint")}>
+        <button style={{ fontSize: 10, padding: "1px 6px" }} onClick={() => zoom.zoomBy(1 / 1.4)} disabled={zoom.view.zoom <= MIN_ZOOM}>
+          −
+        </button>
+        <button style={{ fontSize: 10, padding: "1px 6px", minWidth: 34 }} onClick={zoom.reset} disabled={zoom.view.zoom <= MIN_ZOOM}>
+          {Math.round(zoom.view.zoom * 100)}%
+        </button>
+        <button style={{ fontSize: 10, padding: "1px 6px" }} onClick={() => zoom.zoomBy(1.4)}>
+          +
+        </button>
+      </span>
       {children}
     </div>
   );

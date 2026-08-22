@@ -14,6 +14,13 @@ export interface PinchPanOptions {
    * every zoom level -- the idea board, where panning at 100% is the primary
    * way to move around. */
   panAtMinZoom?: boolean;
+  /** Which pointer starts a one-finger/one-button pan. "primary" (the
+   * default) is any ordinary drag -- what a view-only surface wants.
+   * "middle" restricts it to the middle mouse button, for a surface where a
+   * plain drag already means something else (the mask/transplant paint
+   * editors, where it draws) -- see paintMask.tsx. A two-finger touch pinch
+   * still zooms either way; only the one-pointer drag gesture is gated. */
+  panButton?: "primary" | "middle";
 }
 
 export type View = { zoom: number; x: number; y: number };
@@ -35,7 +42,7 @@ const mid = (a: Pt, b: Pt): Pt => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
  * container's center; zooming is focal-stable (the content point under the
  * cursor / pinch midpoint stays put). */
 export function usePinchPan(containerRef: RefObject<HTMLDivElement | null>, enabled = true, options: PinchPanOptions = {}) {
-  const { minZoom = MIN_ZOOM, maxZoom = MAX_ZOOM, panAtMinZoom = false } = options;
+  const { minZoom = MIN_ZOOM, maxZoom = MAX_ZOOM, panAtMinZoom = false, panButton = "primary" } = options;
   const clampZoom = (z: number): number => Math.min(maxZoom, Math.max(minZoom, z));
   const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
   const [grabbing, setGrabbing] = useState(false);
@@ -96,7 +103,8 @@ export function usePinchPan(containerRef: RefObject<HTMLDivElement | null>, enab
     if (pts.length >= 2) {
       gestureRef.current = { type: "pinch", startDist: dist(pts[0], pts[1]), startZoom: viewRef.current.zoom };
       setGrabbing(false);
-    } else if (panAtMinZoom || viewRef.current.zoom > minZoom) {
+    } else if ((panButton === "primary" || e.button === 1) && (panAtMinZoom || viewRef.current.zoom > minZoom)) {
+      if (panButton === "middle") e.preventDefault(); // stops the OS middle-click autoscroll cursor
       gestureRef.current = { type: "pan", startX: e.clientX, startY: e.clientY, viewX: viewRef.current.x, viewY: viewRef.current.y };
       setGrabbing(true);
     }
@@ -119,7 +127,7 @@ export function usePinchPan(containerRef: RefObject<HTMLDivElement | null>, enab
   const endPointer = (e: React.PointerEvent) => {
     pointersRef.current.delete(e.pointerId);
     const remaining = [...pointersRef.current.entries()];
-    if (remaining.length === 1 && (panAtMinZoom || viewRef.current.zoom > minZoom)) {
+    if (remaining.length === 1 && panButton === "primary" && (panAtMinZoom || viewRef.current.zoom > minZoom)) {
       // Pinch just dropped to one finger -- hand off to a pan from where that
       // finger currently is, so the content doesn't jump.
       const [, p] = remaining[0];

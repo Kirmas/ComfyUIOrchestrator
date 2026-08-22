@@ -495,6 +495,7 @@ export const en = {
   "mask.erasing": "Erasing",
   "mask.painting": "Painting",
   "mask.undo": "Undo",
+  "mask.zoomHint": "Scroll to zoom, middle-click drag to pan",
 
   // --- Transplant editor (native.transplant) ---------------------------
   "transplant.topOpacity": "Top layer",
