@@ -204,7 +204,7 @@ function CandidatesGrid({
   outputs: Asset[];
   onSelect: (asset: Asset) => void;
   onDiscard: (asset: Asset) => void;
-  onImageOpen: (url: string) => void;
+  onImageOpen: (url: string, asset?: Asset) => void;
   onCompare: (asset: Asset) => void;
 }) {
   const t = useT();
@@ -230,7 +230,7 @@ function CandidatesGrid({
                 // do can't block the main thread mid-interaction.
                 loading="lazy"
                 decoding="async"
-                onDoubleClick={() => onImageOpen(resolveAssetUrl(asset.url))}
+                onDoubleClick={() => onImageOpen(resolveAssetUrl(asset.url), asset)}
                 onLoad={(e) => {
                   const img = e.currentTarget;
                   if (!img) return;
@@ -246,7 +246,7 @@ function CandidatesGrid({
                 className="zoom-button"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onImageOpen(resolveAssetUrl(asset.url));
+                  onImageOpen(resolveAssetUrl(asset.url), asset);
                 }}
                 title={t("cell.openFullSize")}
               >
@@ -318,7 +318,7 @@ function AssetFaceView({
 }: {
   asset: Asset;
   borrowed?: boolean;
-  onImageOpen: (url: string) => void;
+  onImageOpen: (url: string, asset?: Asset) => void;
   onCompare: (asset: Asset) => void;
 }) {
   const t = useT();
@@ -387,8 +387,26 @@ function AssetFaceView({
  * pan/zoom CSS transform (so an inline position:fixed backdrop is no longer
  * viewport-relative), and its wrapper is HTML5 draggable={true} (so a pan
  * gesture started inside a non-portalled modal gets hijacked into a native
- * image-drag). See CLAUDE.md's two 2026-07-21 incidents. */
-function FullSizeModal({ url, onClose }: { url: string; onClose: () => void }) {
+ * image-drag). See CLAUDE.md's two 2026-07-21 incidents.
+ *
+ * onSelect/onDiscard: only supplied when `url` is one candidate of an
+ * asset.select picker (BaseAssetNodeView derives that itself, since this
+ * component only ever sees a bare url) -- same "keep this one"/"reject this
+ * one" actions CandidatesGrid offers inline and CompareModal offers for its
+ * left side, mirrored here so a candidate can be settled right from the zoom
+ * view too instead of having to close it and find the same candidate again
+ * in the grid. */
+function FullSizeModal({
+  url,
+  onClose,
+  onSelect,
+  onDiscard,
+}: {
+  url: string;
+  onClose: () => void;
+  onSelect?: () => void;
+  onDiscard?: () => void;
+}) {
   const t = useT();
   return createPortal(
     <div className="image-modal-backdrop" onClick={onClose}>
@@ -397,6 +415,20 @@ function FullSizeModal({ url, onClose }: { url: string; onClose: () => void }) {
           ×
         </button>
         <ZoomableImage src={url} />
+        {(onSelect || onDiscard) && (
+          <div className="candidate-actions">
+            {onSelect && (
+              <button type="button" className="candidate-select" onClick={onSelect} title={t("cell.selectTitle")}>
+                {t("cell.select")}
+              </button>
+            )}
+            {onDiscard && (
+              <button type="button" className="candidate-discard" onClick={onDiscard} title={t("cell.discardCandidateTitle")}>
+                {t("cell.discardCandidate")}
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>,
     document.body,
@@ -454,9 +486,20 @@ function BaseAssetNodeView({
   const isCandidatesGrid = node.node_type === "asset.select";
 
   const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
+  // Set only when the opened image is one candidate of an asset.select picker
+  // (CandidatesGrid passes it, AssetFaceView never does) -- lets FullSizeModal
+  // offer the same select/discard actions the grid card already does, without
+  // it having to know about candidates itself.
+  const [fullSizeCandidate, setFullSizeCandidate] = useState<Asset | null>(null);
 
-  const openImage = (url: string) => setFullSizeUrl(url);
-  const closeImage = () => setFullSizeUrl(null);
+  const openImage = (url: string, candidate?: Asset) => {
+    setFullSizeUrl(url);
+    setFullSizeCandidate(candidate ?? null);
+  };
+  const closeImage = () => {
+    setFullSizeUrl(null);
+    setFullSizeCandidate(null);
+  };
 
   // Starting a compare here just arms Grid-level state (compareFor) -- the
   // second asset comes from clicking a *different* asset node cell anywhere
@@ -653,6 +696,9 @@ function BaseAssetNodeView({
       await nodesApi.pickCandidate(node.id, asset.id);
       const projectId = tracks.find((t) => t.id === node.track_id)?.project_id;
       if (projectId) await loadProject(projectId, useProjectStore.getState().dashboardId);
+      // Settled -- if this candidate was open in the zoom view, close it too
+      // (a no-op if it wasn't).
+      closeImage();
     } catch (e) {
       alert(e instanceof Error ? e.message : t("cell.keepCandidateFailed"));
     }
@@ -676,6 +722,9 @@ function BaseAssetNodeView({
       await nodesApi.remove(node.id);
       removeNode(node.id);
     }
+    // Discarded -- if this candidate was open in the zoom view, close it too
+    // (a no-op if it wasn't). Only reached once the confirm above was accepted.
+    closeImage();
   };
 
   const discardAll = async () => {
@@ -880,7 +929,14 @@ function BaseAssetNodeView({
         <div style={{ fontSize: 10, color: "var(--warning)" }}>{t("cell.clickToPlaceRef")}</div>
       )}
 
-      {fullSizeUrl && <FullSizeModal url={fullSizeUrl} onClose={closeImage} />}
+      {fullSizeUrl && (
+        <FullSizeModal
+          url={fullSizeUrl}
+          onClose={closeImage}
+          onSelect={fullSizeCandidate ? () => selectCandidate(fullSizeCandidate) : undefined}
+          onDiscard={fullSizeCandidate ? () => discardCandidate(fullSizeCandidate) : undefined}
+        />
+      )}
       {pickingRef && (
         <ReferencePicker
           projectId={tracks.find((tr) => tr.id === node.track_id)?.project_id ?? ""}

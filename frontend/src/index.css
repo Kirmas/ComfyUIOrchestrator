@@ -637,13 +637,14 @@ input, select, textarea {
   right: 8px;
 }
 
-/* Select/discard for an asset.select candidate anchoring the left side
-   (Grid.tsx only supplies the handlers when it is one) -- sits opposite the
-   right-side label, at the bottom so it doesn't compete with the mode
-   toggle/close buttons already pinned to the top corners. Positioned on
-   .compare-modal-content (not .compare-label's own transformed stage), so it
+/* Select/discard for an asset.select candidate -- shared by CompareModal
+   (anchoring its left side only; Grid.tsx supplies the handlers only when
+   that side is one) and FullSizeModal (the single image it shows). Sits at
+   the bottom so it doesn't compete with the mode toggle/close buttons already
+   pinned to the top corners. Positioned on .compare-modal-content/
+   .image-modal-content (not .compare-label's own transformed stage), so it
    stays put regardless of zoom/pan. */
-.compare-left-actions {
+.candidate-actions {
   position: absolute;
   bottom: 10px;
   left: 10px;
@@ -652,7 +653,7 @@ input, select, textarea {
   gap: 8px;
 }
 
-.compare-left-actions button {
+.candidate-actions button {
   background: rgba(0, 0, 0, 0.75);
   color: white;
   border: none;
@@ -661,7 +662,7 @@ input, select, textarea {
   font-size: 13px;
 }
 
-.compare-left-actions button:hover {
+.candidate-actions button:hover {
   background: rgba(0, 0, 0, 0.9);
 }
 
@@ -1076,7 +1077,7 @@ th, td {
      or an in-app browser's own overlay chrome, e.g. opening this from a
      Telegram-shared link) is taller than what's actually visible on screen --
      so a fixed, 100vh-tall box has its bottom edge, and everything anchored
-     to it (image-modal-close, compare-mode-toggle, compare-left-actions),
+     to it (image-modal-close, compare-mode-toggle, candidate-actions),
      sitting underneath that chrome: invisible and untappable, even though the
      image itself (sized to fit, not to the edges) still renders fine. Found
      2026-08-09 via a phone screenshot showing the compare slider and its "1"/

@@ -230,11 +230,11 @@ export function CompareModal({
             CandidatesGrid offers in the grid itself, so a candidate can be
             settled right from the compare view. Never shown for `right`. */}
         {(onSelectLeft || onDiscardLeft) && (
-          <div className="compare-left-actions">
+          <div className="candidate-actions">
             {onSelectLeft && (
               <button
                 type="button"
-                className="compare-select-left"
+                className="candidate-select"
                 onClick={onSelectLeft}
                 onPointerDown={(e) => e.stopPropagation()}
                 onPointerUp={(e) => e.stopPropagation()}
@@ -246,7 +246,7 @@ export function CompareModal({
             {onDiscardLeft && (
               <button
                 type="button"
-                className="compare-discard-left"
+                className="candidate-discard"
                 onClick={onDiscardLeft}
                 onPointerDown={(e) => e.stopPropagation()}
                 onPointerUp={(e) => e.stopPropagation()}
