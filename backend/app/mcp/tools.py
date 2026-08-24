@@ -503,6 +503,15 @@ async def create_node_type(
     must include `seed` -- without a seed to vary, asking for several variants
     would produce the same image several times.
 
+    A LoadImage node's own "image" input can be named here too -- e.g.
+    `"pose_reference": {"node_id": "151", "input_key": "image"}` -- which is
+    the only way to tell two image roles apart on a workflow with more than
+    one LoadImage node; each entry's own `"label"` (falls back to that
+    LoadImage's ComfyUI title) becomes the field's label. Any LoadImage left
+    unnamed still gets an auto-numbered field of its own, so mapping images
+    at all is optional, but every LoadImage in the workflow ends up with
+    exactly one image field either way.
+
     The workflow is checked against the mapping first; on any mismatch nothing
     is created at all, and the error names what's available.
     """

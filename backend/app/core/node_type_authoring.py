@@ -27,20 +27,41 @@ def validate_param_mapping(analysis: WorkflowAnalysis, param_mapping: dict) -> N
 
     param_mapping is {field_name: {"node_id": ..., "input_key": ...}} -- the
     same shape build_workflow() substitutes into at run time.
+
+    A LoadImage's own "image" input is accepted here too (against
+    input_image_nodes, not detected_fields -- analyze_workflow never puts
+    LoadImage in detected_fields, that's the list build_param_schema falls
+    back to for whichever LoadImage nodes *aren't* named here). This is the
+    same thing the human wizard already does (NodeTypeWizard.tsx maps every
+    input slot straight at its LoadImage's "image" input); an agent doing it
+    through create_node_type used to have no way to say which image role is
+    which on a workflow with more than one LoadImage -- every one came out
+    labelled the generic "Image N" regardless of the graph's own node titles.
     """
     if not isinstance(param_mapping, dict) or not param_mapping:
         raise AuthoringError("param_mapping is required: name every field that should be settable per cell")
 
-    known = {(f.node_id, f.input_key) for f in analysis.detected_fields}
+    known_fields = {(f.node_id, f.input_key) for f in analysis.detected_fields}
+    known_images = {(n.node_id, "image") for n in analysis.input_image_nodes}
+    image_field_of: dict[str, str] = {}
     for field_name, target in param_mapping.items():
         if not isinstance(target, dict) or "node_id" not in target or "input_key" not in target:
             raise AuthoringError(f"param_mapping['{field_name}'] must be {{'node_id': ..., 'input_key': ...}}")
         pair = (str(target["node_id"]), str(target["input_key"]))
-        if pair not in known:
+        if pair not in known_fields and pair not in known_images:
             raise AuthoringError(
                 f"param_mapping['{field_name}'] points at {pair[0]}.{pair[1]}, which this workflow doesn't expose. "
-                f"Available: {sorted(f'{f.node_id}.{f.input_key}' for f in analysis.detected_fields)}"
+                f"Available: {sorted(f'{f.node_id}.{f.input_key}' for f in analysis.detected_fields)}; "
+                f"image inputs: {sorted(f'{n.node_id}.image' for n in analysis.input_image_nodes)}"
             )
+        if pair in known_images:
+            node_id = pair[0]
+            if node_id in image_field_of:
+                raise AuthoringError(
+                    f"param_mapping['{field_name}'] and ['{image_field_of[node_id]}'] both target the same "
+                    f"LoadImage node {node_id} -- each image input needs exactly one field."
+                )
+            image_field_of[node_id] = field_name
 
     # Without a seed among the mapped fields there is nothing to vary between
     # variants, so asking for N candidates would return N identical images.
@@ -55,11 +76,33 @@ def validate_param_mapping(analysis: WorkflowAnalysis, param_mapping: dict) -> N
 
 
 def build_param_schema(analysis: WorkflowAnalysis, param_mapping: dict) -> dict:
-    """Derive the param_schema from what the mapping actually names."""
+    """Derive the param_schema from what the mapping actually names.
+
+    A LoadImage explicitly named in param_mapping (validate_param_mapping
+    already confirmed each such node_id is claimed by at most one field)
+    gets its own image field here, labelled from param_mapping's own
+    "label" if given, else the LoadImage node's ComfyUI title -- letting a
+    caller (or the human wizard, which always names its image slots
+    explicitly) distinguish e.g. "Character" from "Pose To Copy" instead of
+    every image role coming out as the generic "Image N". Any LoadImage the
+    caller left out of param_mapping still gets one auto-numbered field each,
+    same as before this function accepted image entries at all -- these are
+    what decide a node's row span, so the count has to match the workflow
+    exactly regardless of which images were named explicitly.
+    """
     by_target = {(f.node_id, f.input_key): f for f in analysis.detected_fields}
+    image_nodes_by_id = {n.node_id: n for n in analysis.input_image_nodes}
     fields = []
+    mapped_image_node_ids: set[str] = set()
     for field_name, target in param_mapping.items():
-        detected = by_target.get((str(target["node_id"]), str(target["input_key"])))
+        node_id, input_key = str(target["node_id"]), str(target["input_key"])
+        image_node = image_nodes_by_id.get(node_id) if input_key == "image" else None
+        if image_node is not None:
+            mapped_image_node_ids.add(node_id)
+            label = target.get("label") or image_node.title or field_name.replace("_", " ").title()
+            fields.append({"name": field_name, "type": "image", "label": label, "required": True})
+            continue
+        detected = by_target.get((node_id, input_key))
         field_type = _FIELD_TYPES.get(detected.type if detected else "text", "text")
         if field_name == "seed":
             field_type = "seed"
@@ -71,10 +114,18 @@ def build_param_schema(analysis: WorkflowAnalysis, param_mapping: dict) -> dict:
                 "default": detected.default if detected else None,
             }
         )
-    # One image field per LoadImage in the graph. These are what decide a
-    # node's row span, so the count has to match the workflow exactly.
-    for index, _ in enumerate(analysis.input_image_nodes):
-        fields.append({"name": f"image_{index + 1}", "type": "image", "label": f"Image {index + 1}", "required": True})
+    used_names = {f["name"] for f in fields}
+    index = 0
+    for node in analysis.input_image_nodes:
+        if node.node_id in mapped_image_node_ids:
+            continue
+        index += 1
+        name = f"image_{index}"
+        while name in used_names:
+            index += 1
+            name = f"image_{index}"
+        fields.append({"name": name, "type": "image", "label": node.title or f"Image {index}", "required": True})
+        used_names.add(name)
     return {"fields": fields}
 
 
