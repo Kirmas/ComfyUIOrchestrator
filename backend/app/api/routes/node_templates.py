@@ -107,9 +107,12 @@ async def list_node_templates(db: AsyncSession = Depends(get_db)):
     model that never declares the field instead."""
     result = await db.execute(select(NodeTemplate).order_by(NodeTemplate.created_at))
     out: list[NodeTemplateListRead] = []
+    overrides: dict[str, str] = {}
     for t in result.scalars().all():
         item = NodeTemplateListRead.model_validate(t)
         item.node_type = f"template.{t.node_type_slug}"
+        if t.category_override:
+            overrides[t.node_type_slug] = t.category_override
         out.append(item)
     for native in NATIVE_NODE_TYPES.values():
         out.append(NodeTemplateListRead.model_validate(_native_template_read(native)))
@@ -121,6 +124,11 @@ async def list_node_templates(db: AsyncSession = Depends(get_db)):
             item.description = entry.description
             item.description_source = entry.source
             item.fingerprint = entry.fingerprint
+            # A hand-set label wins over the derived model family; both are
+            # resolved here rather than stored, so attaching a backend that
+            # runs a different checkpoint re-groups the type on the next read.
+            item.category = overrides.get(item.node_type_slug) or entry.auto_category
+            item.category_source = "manual" if item.node_type_slug in overrides else "auto"
     return out
 
 
@@ -146,7 +154,13 @@ async def update_node_template(template_id: uuid.UUID, payload: NodeTemplateUpda
     template = await db.get(NodeTemplate, template_id)
     if not template:
         raise HTTPException(404, "Node template not found")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    if "category_override" in data:
+        # A cleared input arrives as "" and means the same as null -- back to
+        # the derived category. Storing the empty string instead would read as
+        # "overridden to nothing" everywhere it's checked.
+        data["category_override"] = (data["category_override"] or "").strip() or None
+    for field, value in data.items():
         setattr(template, field, value)
     await db.commit()
     await db.refresh(template)

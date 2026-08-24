@@ -117,6 +117,12 @@ class NodeTemplate(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     param_schema: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
     defaults: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    # Sub-group this type is offered under in the node-type picker, when the
+    # derived one (core/node_category.py: the family of the models its
+    # capabilities load) is a bad label. NULL/empty means "use the derived
+    # one" -- deliberately not denormalized into a stored value, so attaching
+    # a backend that runs a different checkpoint re-groups the type by itself.
+    category_override: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

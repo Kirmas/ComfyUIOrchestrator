@@ -1020,6 +1020,62 @@ function AddApiInstanceForm({
   );
 }
 
+/** The label this node type is grouped under in the node-type picker.
+ *
+ * Derived server-side from the model family its workflows load, so the field
+ * starts out filled in with something sensible and nobody has to categorize
+ * anything to benefit from the grouping -- typing here only overrides that,
+ * and clearing it hands the type back to the derivation (empty is sent as
+ * null; see the PATCH route). Saved on blur/Enter rather than per keystroke,
+ * since every save re-fetches and re-groups the whole list.
+ */
+function NodeTypeCategoryField({ template, onChanged }: { template: NodeTemplate; onChanged: () => void }) {
+  const t = useT();
+  const current = template.category ?? "";
+  const [draft, setDraft] = useState(current);
+  const [busy, setBusy] = useState(false);
+  // Someone else's edit (or a re-derivation after attaching a backend) should
+  // show up here; a draft being typed right now shouldn't be thrown away.
+  useEffect(() => setDraft(current), [current]);
+
+  const save = async () => {
+    if (draft.trim() === current) return;
+    setBusy(true);
+    try {
+      await nodeTemplatesApi.update(template.id, { category_override: draft.trim() || null });
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="inline-form" style={{ alignItems: "center" }}>
+      <label style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("nodetype.category")}</label>
+      <input
+        value={draft}
+        disabled={busy}
+        placeholder={t("nodetype.categoryNone")}
+        title={t("nodetype.categoryTitle")}
+        style={{ width: 160 }}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          if (e.key === "Escape") setDraft(current);
+        }}
+      />
+      {(template.category_source ?? "auto") === "auto" ? (
+        <span className="status-pill">{t("nodetype.categoryAuto")}</span>
+      ) : (
+        <button onClick={() => { setDraft(""); nodeTemplatesApi.update(template.id, { category_override: null }).then(onChanged); }}>
+          {t("nodetype.categoryReset")}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function NodeTypeCard({
   template,
   backends,
@@ -1112,6 +1168,7 @@ function NodeTypeCard({
       </div>
 
       <NodeTypeDescription template={template} onChanged={reloadTemplates} />
+      <NodeTypeCategoryField template={template} onChanged={reloadTemplates} />
 
       <table>
         <thead>

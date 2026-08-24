@@ -10,7 +10,7 @@ import { assetClipboard, subgraphClipboard, useClipboardSlot } from "../clipboar
 import { assetFace } from "../assetNodes";
 import { resolveSlotAsset } from "../slotResolution";
 import { useProjectStore } from "../state/projectStore";
-import { defaultInputsForSchema, slotFields } from "../templateUtils";
+import { defaultInputsForSchema, groupTemplatesByCategory, slotFields } from "../templateUtils";
 import type { Asset, AssetKind, Backend, Capability, Dashboard, InputRef, Job, NodeItem, NodeStatus, NodeTemplate } from "../types";
 import { useT, type TFunc } from "../i18n";
 import { backendColors, cx, extensionForMimeType, formatDuration } from "../utils";
@@ -1502,15 +1502,22 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                 </option>
               ))}
           </optgroup>
-          <optgroup label={t("cell.groupTemplates")}>
-            {templates
-              .filter((t) => !t.node_type.startsWith("native."))
-              .map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
+          {groupTemplatesByCategory(templates).map(([category, items, only]) => (
+            <optgroup
+              key={category}
+              label={
+                only
+                  ? t("cell.groupTemplates")
+                  : `${t("cell.groupTemplates")} · ${category || t("cell.categoryOther")}`
+              }
+            >
+              {items.map((tpl) => (
+                <option key={tpl.id} value={tpl.id}>
+                  {tpl.name}
                 </option>
               ))}
-          </optgroup>
+            </optgroup>
+          ))}
         </select>
       )}
 

@@ -1,15 +1,22 @@
-"""Resolving what to show as a node type's description.
+"""Resolving what to show for a node type: its description, and the category
+the picker sub-groups it under.
 
-Priority, highest first:
+Description priority, highest first:
   1. what a person wrote      (frozen until they reset it)
   2. what an agent distilled  (only while the config it was written against is unchanged)
   3. auto, derived from the workflows themselves
+
+The category is derived here rather than in its own pass because it comes off
+the same capabilities this already loads (core/node_category.py). Only the
+derived value is resolved here -- the manual override lives on the
+NodeTemplate row itself, and the route picks between them.
 """
 from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.node_category import category_for_capabilities
 from app.core.node_fingerprint import build_fingerprint, compute_config_hash, describe_fingerprint
 from app.db.models import Backend, Capability, DescriptionSource, NodeTypeDescription
 
@@ -20,6 +27,10 @@ class ResolvedDescription:
     source: str  # manual | agent | auto
     fingerprint: dict[str, str]
     config_hash: str
+    # The *derived* category (model family) only -- "" when nothing about this
+    # type says which model it runs on. NodeTemplate.category_override wins
+    # over it where set; see api/routes/node_templates.py.
+    auto_category: str = ""
 
 
 async def _backend_names(db: AsyncSession) -> dict:
@@ -49,18 +60,21 @@ async def resolve_descriptions(db: AsyncSession, slugs_and_names: list[tuple[str
         capabilities = by_slug.get(slug, [])
         fingerprint = build_fingerprint(capabilities, names)
         config_hash = compute_config_hash(capabilities)
+        category = category_for_capabilities(capabilities)
         row = stored.get(slug)
 
         if row is not None and row.description_source == DescriptionSource.manual and row.manual_description:
-            out[slug] = ResolvedDescription(row.manual_description, "manual", fingerprint, config_hash)
+            out[slug] = ResolvedDescription(row.manual_description, "manual", fingerprint, config_hash, category)
             continue
         # A cached agent description only counts while the configuration it was
         # written against still matches -- otherwise it describes something
         # that no longer exists.
         if row is not None and row.agent_description and row.config_hash == config_hash:
-            out[slug] = ResolvedDescription(row.agent_description, "agent", fingerprint, config_hash)
+            out[slug] = ResolvedDescription(row.agent_description, "agent", fingerprint, config_hash, category)
             continue
-        out[slug] = ResolvedDescription(describe_fingerprint(display_name, fingerprint), "auto", fingerprint, config_hash)
+        out[slug] = ResolvedDescription(
+            describe_fingerprint(display_name, fingerprint), "auto", fingerprint, config_hash, category
+        )
     return out
 
 

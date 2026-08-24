@@ -91,6 +91,12 @@ export interface NodeTemplate {
   description?: string;
   description_source?: "auto" | "manual" | "agent";
   fingerprint?: Record<string, string>;
+  // Sub-group this type is listed under in the node-type picker. Derived
+  // server-side from the family of the models its capabilities load, unless
+  // someone set a label by hand -- category_source says which. Empty means
+  // nothing about the type says which model it runs on.
+  category?: string;
+  category_source?: "auto" | "manual";
   // "template.<slug>" for a real DB-backed type, "native.<slug>" for one
   // synthesized from the backend's native registry (no DB row behind it).
   node_type: string;

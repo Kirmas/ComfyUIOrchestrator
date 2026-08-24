@@ -181,6 +181,11 @@ export const uk: Record<TKey, string> = {
   "nodetype.delete": "видалити тип вузла",
   "nodetype.sectionTitle": "Типи вузлів",
   "nodetype.new": "+ Новий тип вузла",
+  "nodetype.category": "Категорія:",
+  "nodetype.categoryNone": "без категорії",
+  "nodetype.categoryAuto": "авто",
+  "nodetype.categoryReset": "скинути",
+  "nodetype.categoryTitle": "Підкатегорія у списку типів вузлів. За замовчуванням — сімейство моделі з воркфлоу; очистіть поле, щоб повернути автоматичне значення.",
 
   // --- Node type wizard -----------------------------------------------
   "wizard.choose": "— оберіть —",
@@ -380,6 +385,7 @@ export const uk: Record<TKey, string> = {
   "cell.selectNodeType": "Оберіть тип вузла…",
   "cell.groupNative": "Нативні",
   "cell.groupTemplates": "Шаблони",
+  "cell.categoryOther": "Інше",
   "cell.variants": "Варіанти",
   "cell.backend": "Бекенд",
   "cell.backendAuto": "Авто (балансування)",

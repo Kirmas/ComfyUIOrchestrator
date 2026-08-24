@@ -182,6 +182,11 @@ export const en = {
   "nodetype.delete": "delete node type",
   "nodetype.sectionTitle": "Node types",
   "nodetype.new": "+ New node type",
+  "nodetype.category": "Category:",
+  "nodetype.categoryNone": "uncategorized",
+  "nodetype.categoryAuto": "auto",
+  "nodetype.categoryReset": "reset",
+  "nodetype.categoryTitle": "Sub-group in the node type picker. Defaults to the model family the workflows load; clear the field to go back to that.",
 
   // --- Node type wizard -----------------------------------------------
   "wizard.choose": "— choose —",
@@ -379,6 +384,7 @@ export const en = {
   "cell.selectNodeType": "Select node type…",
   "cell.groupNative": "Native",
   "cell.groupTemplates": "Templates",
+  "cell.categoryOther": "Other",
   "cell.variants": "Variants",
   "cell.backend": "Backend",
   "cell.backendAuto": "Auto (balance)",

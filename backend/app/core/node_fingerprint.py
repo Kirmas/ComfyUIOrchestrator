@@ -19,6 +19,32 @@ from app.core.workflow_analyzer import analyze_workflow
 from app.db.models import Capability, ExecutionType
 
 
+def _api_model(config: dict) -> str | None:
+    """The model an api_call capability is bound to. `model_id` is the key
+    dispatcher.py actually passes to build_api_backend; `model`/`provider` are
+    only read as fallbacks for older/hand-written configs."""
+    value = config.get("model") or config.get("model_id") or config.get("provider")
+    return value if isinstance(value, str) and value else None
+
+
+def capability_models(capability: Capability) -> list[str]:
+    """Every model this capability loads, by raw name -- the ComfyUI graph's
+    own loaders, or the API instance's model id.
+
+    Shared with core/node_category.py so the picker's grouping and the
+    description's "model:" line can't end up stating different things.
+    """
+    config = capability.config or {}
+    workflow = config.get("workflow_json")
+    if isinstance(workflow, dict) and workflow:
+        try:
+            return analyze_workflow(workflow).models
+        except ValueError:
+            return []
+    api_model = _api_model(config)
+    return [api_model] if api_model else []
+
+
 def _capability_attributes(capability: Capability) -> dict[str, str]:
     """Reduce one capability to a flat name -> readable value map."""
     config = capability.config or {}
@@ -62,9 +88,9 @@ def _capability_attributes(capability: Capability) -> dict[str, str]:
             mapping = config.get("param_mapping") or {}
             if mapping:
                 attrs["api params"] = ", ".join(sorted(mapping))
-        provider = config.get("model") or config.get("provider")
-        if isinstance(provider, str):
-            attrs["model"] = provider
+        api_model = _api_model(config)
+        if api_model:
+            attrs["model"] = api_model
     return attrs
 
 

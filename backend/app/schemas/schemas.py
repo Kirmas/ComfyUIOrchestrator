@@ -117,6 +117,9 @@ class NodeTemplateUpdate(BaseModel):
     name: str | None = None
     param_schema: dict[str, Any] | None = None
     defaults: dict[str, Any] | None = None
+    # Null/empty clears the override and puts the type back under its derived
+    # (model-family) category -- there's no separate "reset" route.
+    category_override: str | None = None
 
 
 class NodeTemplateListRead(ORMModel):
@@ -138,6 +141,13 @@ class NodeTemplateListRead(ORMModel):
     description: str = ""
     description_source: str = "auto"
     fingerprint: dict[str, str] = {}
+    # Sub-group for the node-type picker: NodeTemplate.category_override if
+    # one is set, otherwise the family of the models this type's capabilities
+    # load. category_source says which, so an editor can show "(auto)"
+    # instead of implying the derived label was typed by someone. Neither is
+    # a plain column read -- both are filled in by the route.
+    category: str = ""
+    category_source: str = "auto"
 
 
 class NodeTemplateRead(ORMModel):

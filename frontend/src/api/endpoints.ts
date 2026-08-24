@@ -63,7 +63,11 @@ export const capabilitiesApi = {
 export const nodeTemplatesApi = {
   list: () => api.get<NodeTemplate[]>("/api/node-templates"),
   create: (data: Partial<NodeTemplate>) => api.post<NodeTemplate>("/api/node-templates", data),
-  update: (id: string, data: Partial<NodeTemplate>) => api.patch<NodeTemplate>(`/api/node-templates/${id}`, data),
+  // category_override isn't part of NodeTemplate: the read side exposes the
+  // *resolved* category (override or derived model family), while this writes
+  // the override alone -- null clears it, back to the derived one.
+  update: (id: string, data: Partial<NodeTemplate> & { category_override?: string | null }) =>
+    api.patch<NodeTemplate>(`/api/node-templates/${id}`, data),
   remove: (id: string) => api.delete(`/api/node-templates/${id}`),
   // Descriptions are addressed by slug, not template id: native node types
   // have no template row but still have a description.

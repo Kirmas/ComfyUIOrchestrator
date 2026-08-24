@@ -1,6 +1,6 @@
 import { assetFace, storeOutputsFor, type OutputsFor } from "./assetNodes";
 import { assetNodeAtRowOffset } from "./slotResolution";
-import type { InputRef, NodeItem, ParamSchema, Track } from "./types";
+import type { InputRef, NodeItem, NodeTemplate, ParamSchema, Track } from "./types";
 
 // Mirrors core/node_types.py's is_slot_field/slot_fields: a "fixed" image/file
 // field's value is a constant baked onto the node type (NodeTemplate.defaults),
@@ -79,4 +79,28 @@ export async function defaultInputsForSchema(
   }
 
   return inputs;
+}
+
+/** The template.* node types split into the picker's sub-groups, in display
+ * order: named categories alphabetically, uncategorized last.
+ *
+ * A `<select>` can't nest optgroups, so a sub-group is a group of its own with
+ * a compound label -- which also means the split has to disappear entirely
+ * when there's only one group, or every list would grow a redundant "Templates
+ * · Other" header. That's what the third tuple element says.
+ *
+ * Order within a group stays the server's (creation order), so a type doesn't
+ * move around in the list beyond the one grouping.
+ */
+export function groupTemplatesByCategory(templates: NodeTemplate[]): [string, NodeTemplate[], boolean][] {
+  const byCategory = new Map<string, NodeTemplate[]>();
+  for (const template of templates) {
+    if (template.node_type.startsWith("native.")) continue;
+    const category = template.category?.trim() ?? "";
+    const bucket = byCategory.get(category);
+    if (bucket) bucket.push(template);
+    else byCategory.set(category, [template]);
+  }
+  const groups = [...byCategory.entries()].sort(([a], [b]) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b)));
+  return groups.map(([category, items]) => [category, items, groups.length === 1]);
 }
