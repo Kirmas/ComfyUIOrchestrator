@@ -1,4 +1,3 @@
-import copy
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
@@ -11,6 +10,7 @@ from app.api.routes.dashboards import enforce_pointer_deletion
 from app.core.grid_scope import scope_start_kind, set_scope_start_kind
 from app.core.queue import job_queue
 from app.core.track_order import ordered_tracks, scope_of, splice_after
+from app.core.subgraph_copy import workflow_node_copy
 from app.core.storage import build_asset_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Dashboard, Job, Node, NodeKind, NodeStatus, Track
@@ -1056,23 +1056,9 @@ async def duplicate_node(node_id: uuid.UUID, payload: NodeDuplicate, db: AsyncSe
     target_track = ordered[payload.target_row]
     await _ensure_slot_free(db, target_track.id, payload.target_step)
 
-    new_node = Node(
-        track_id=target_track.id,
-        step_index=payload.target_step,
-        kind=NodeKind.workflow,
-        node_type=old.node_type,
-        # deepcopy, not the same list/dict object: inputs/params are JSON columns
-        # held as plain Python structures, so handing both nodes the SAME object
-        # would make an in-place edit of one node's params (updateParam in
-        # NodeCell.tsx builds a new dict, but nothing guarantees every writer
-        # does) surface on the other too.
-        inputs=copy.deepcopy(old.inputs),
-        params=copy.deepcopy(old.params),
-        requested_variants=old.requested_variants,
-        backend_mode=old.backend_mode,
-        manual_backend_id=old.manual_backend_id,
-        use_api=old.use_api,
-    )
+    # Shared with the whole-grid copy (core/subgraph_copy.py), so "every local
+    # setting, none of the results" means one thing in both.
+    new_node = workflow_node_copy(old, track_id=target_track.id, step_index=payload.target_step)
     db.add(new_node)
     await db.flush()
     # Same as create_node: a workflow that already carries a template needs its

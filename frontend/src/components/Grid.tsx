@@ -1090,6 +1090,27 @@ export function Grid({ projectId }: { projectId: string }) {
     }
   };
 
+  /** Same two-step as placePointerAt, for the other thing the clipboard entry
+   * can become here: the owner of a *copy* of that subgraph instead of a second
+   * pointer at it. Structure and workflow settings are copied, pictures come
+   * across as references and generated outputs aren't reproduced at all -- see
+   * core/subgraph_copy.py, which decides all of that per node kind. */
+  const placeSubgraphCopyAt = async (row: number, step: number) => {
+    const entry = subgraphClipboard.read();
+    const targetTrack = trackByRowIndex.get(row);
+    if (!entry || !targetTrack) return;
+    const name = prompt(t("subgraph.copyPrompt"), t("subgraph.copyDefaultName", { name: entry.name }));
+    if (name === null) return;
+    const created = await nodesApi.create({ track_id: targetTrack.id, step_index: step, kind: "asset" });
+    try {
+      await dashboardsApi.copy(entry.dashboardId, created.id, name);
+      addNode(await nodesApi.get(created.id));
+    } catch (err) {
+      await nodesApi.remove(created.id).catch(() => undefined);
+      alert(err instanceof Error ? err.message : t("subgraph.copyFailed"));
+    }
+  };
+
   /** "from references" + "paste ref" buttons for an empty asset cell -- shared
    * by emptyReachableCells (a gap inside an existing workflow's span) and the
    * still-empty-track bootstrap buttons below. Those two callers create the
@@ -1109,13 +1130,22 @@ export function Grid({ projectId }: { projectId: string }) {
           </button>
         )}
         {copiedSubgraph && (
-          <button
-            style={style}
-            onClick={() => void placePointerAt(row, step)}
-            title={t("subgraph.pastePointerTitle", { name: copiedSubgraph.name })}
-          >
-            {t("subgraph.pastePointer")}
-          </button>
+          <>
+            <button
+              style={style}
+              onClick={() => void placePointerAt(row, step)}
+              title={t("subgraph.pastePointerTitle", { name: copiedSubgraph.name })}
+            >
+              {t("subgraph.pastePointer")}
+            </button>
+            <button
+              style={style}
+              onClick={() => void placeSubgraphCopyAt(row, step)}
+              title={t("subgraph.pasteCopyTitle", { name: copiedSubgraph.name })}
+            >
+              {t("subgraph.pasteCopy")}
+            </button>
+          </>
         )}
       </>
     );

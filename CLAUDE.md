@@ -52,6 +52,26 @@ grid. This is *organisational decomposition*, not a performance trick.
   ownership to a pointer reachable solely *through* that dashboard, which would
   close the chain into a ring cut off from the main grid. Legitimate cross-links
   are unaffected.
+- **Copying a subgraph is split three ways, by what the thing is**
+  (`POST /api/dashboards/{id}/copy` -> `core/subgraph_copy.py`). *Structure*
+  (tracks, their order, step indices) is copied, and that IS the wiring --
+  slot inputs are positional (`cell_index`), so nothing needs remapping.
+  *Settings* (a workflow's template/params/slot refs/variants/backend/use_api)
+  are genuinely copied, by the same `workflow_node_copy` the single-cell "⧉"
+  gesture uses. *Content* is never copied: an asset cell that owns a picture
+  comes across as a refasset on that same picture, a nested pointer as a second
+  pointer at the same dashboard (no recursion), and each kind answers for
+  itself via `AssetNodeBackend.copy_spec` -- the third member of that
+  interface. And a workflow's own materialized output (`created_by_node_id`
+  set, written in exactly one place, so it's precisely the "this is a generated
+  result" flag) is **not reproduced at all**: it leaves a hole, deliberately,
+  to be re-generated or re-wired left to right. A hole costs nothing because
+  positional resolution tolerates an empty cell and picks up whatever is
+  generated there later. The new dashboard inherits `start_kind` (column parity
+  is per scope and step indices are copied verbatim) but not `result_asset_id`.
+  Contents are copied *before* the target cell becomes a pointer, or a copy
+  placed inside the dashboard being copied comes out holding a pointer at
+  itself.
 - **Cross-scope single-node moves are rejected outright.** Positions only mean
   something inside one grid, so relocating one node across scopes would strand
   its creator/output binding. Moving finished work between dashboards is meant

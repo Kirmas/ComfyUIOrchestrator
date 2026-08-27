@@ -119,6 +119,13 @@ export const dashboardsApi = {
   create: (nodeId: string, name: string) => api.post<Dashboard>("/api/dashboards", { node_id: nodeId, name }),
   addPointer: (dashboardId: string, nodeId: string) =>
     api.post<Dashboard>(`/api/dashboards/${dashboardId}/pointers`, { node_id: nodeId }),
+  // Same gesture as create(), except the new dashboard starts out holding a
+  // reproduction of `dashboardId` instead of being empty. What that reproduces
+  // is decided per node kind on the backend (core/subgraph_copy.py): structure
+  // and workflow settings are copied, pictures come across as references, and
+  // a workflow's own output is left as a hole to generate into.
+  copy: (dashboardId: string, nodeId: string, name: string) =>
+    api.post<Dashboard>(`/api/dashboards/${dashboardId}/copy`, { node_id: nodeId, name }),
   rename: (id: string, name: string) => api.patch<Dashboard>(`/api/dashboards/${id}`, { name }),
   setAssetOnlyView: (id: string, value: boolean) => api.patch<Dashboard>(`/api/dashboards/${id}`, { asset_only_view: value }),
   setResult: (id: string, assetId: string | null) =>

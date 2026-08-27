@@ -476,6 +476,7 @@ function BaseAssetNodeView({
   // If this cell's own output is the sub-dashboard's chosen result, download
   // it under the dashboard's own name instead of its opaque storage filename.
   const [isDashboardResult, setIsDashboardResult] = useState(false);
+  const [copying, setCopying] = useState(false);
   useEffect(() => {
     if (dashboardId && outputs[0]) dashboardsApi.get(dashboardId).then((d) => setIsDashboardResult(d.result_asset_id === outputs[0].id));
   }, [dashboardId, outputs[0]?.id]);
@@ -580,6 +581,34 @@ function BaseAssetNodeView({
       setNode(await nodesApi.get(node.id));
     } catch (err) {
       alert(err instanceof Error ? err.message : t("subgraph.pointerFailed"));
+    }
+  };
+
+  /** The other thing the same clipboard entry can do here: make this cell the
+   * owner of a *copy* of that subgraph rather than a second pointer at it.
+   *
+   * The two sit side by side because the choice is the whole point -- one
+   * subgraph seen from two places, or a second subgraph that starts out looking
+   * like the first. What "a copy" reproduces is decided per node kind on the
+   * backend (core/subgraph_copy.py): no picture is ever duplicated, and the
+   * workflows come across configured but unrun, with their output cells left
+   * empty to generate into. */
+  const pasteSubgraphCopy = async () => {
+    const entry = subgraphClipboard.read();
+    if (!entry) return;
+    const name = prompt(t("subgraph.copyPrompt"), t("subgraph.copyDefaultName", { name: entry.name }));
+    if (name === null) return;
+    // Copying a whole grid is one request that creates a lot of rows, so the
+    // button holds until it's back rather than letting a second click start a
+    // second copy.
+    setCopying(true);
+    try {
+      await dashboardsApi.copy(entry.dashboardId, node.id, name);
+      setNode(await nodesApi.get(node.id));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : t("subgraph.copyFailed"));
+    } finally {
+      setCopying(false);
     }
   };
 
@@ -873,9 +902,18 @@ function BaseAssetNodeView({
               {t("subgraph.create")}
             </button>
             {copiedSubgraph && (
-              <button onClick={pasteSubgraphPointer} title={t("subgraph.pastePointerTitle", { name: copiedSubgraph.name })}>
-                {t("subgraph.pastePointer")}
-              </button>
+              <>
+                <button onClick={pasteSubgraphPointer} title={t("subgraph.pastePointerTitle", { name: copiedSubgraph.name })}>
+                  {t("subgraph.pastePointer")}
+                </button>
+                <button
+                  onClick={pasteSubgraphCopy}
+                  disabled={copying}
+                  title={t("subgraph.pasteCopyTitle", { name: copiedSubgraph.name })}
+                >
+                  {t("subgraph.pasteCopy")}
+                </button>
+              </>
             )}
           </>
         )}

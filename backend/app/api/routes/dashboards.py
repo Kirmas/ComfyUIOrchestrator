@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import get_db
 from app.core.asset_types import SUBGRAPH_NODE_TYPE
+from app.core.subgraph_copy import copy_dashboard_contents
 from app.core.storage import build_asset_url
 from app.db.models import Asset, Dashboard, Node, NodeKind, NodeStatus, Track
 from app.schemas.schemas import (
@@ -109,15 +110,16 @@ def _read(dashboard: Dashboard, node_count: int, pointer_count: int) -> Dashboar
     return item
 
 
-@router.post("/dashboards", response_model=DashboardRead, status_code=201)
-async def create_dashboard(payload: DashboardCreate, db: AsyncSession = Depends(get_db)):
-    """Turn an existing asset cell into a smart pointer on a brand-new,
-    empty dashboard, and make it that dashboard's owner.
+async def _claim_pointer_cell(db: AsyncSession, node_id) -> tuple[Node, Track]:
+    """The checks shared by every path that turns an existing asset cell into
+    the *owner* pointer of a brand-new dashboard (create_dashboard and
+    copy_dashboard). Returns the cell and its track.
 
-    Done in one call rather than "create node, then create dashboard" so a
-    dashboard can never exist without the pointer that keeps it reachable.
+    Not used by add_pointer: that one attaches an *extra* pointer to a
+    dashboard that already has an owner, and has its own same-project check
+    instead -- deliberately left as it is rather than folded in here.
     """
-    node = await db.get(Node, payload.node_id)
+    node = await db.get(Node, node_id)
     if node is None:
         raise HTTPException(404, "Node not found")
     if node.kind != NodeKind.asset:
@@ -126,10 +128,21 @@ async def create_dashboard(payload: DashboardCreate, db: AsyncSession = Depends(
         raise HTTPException(409, "This cell already points at a dashboard.")
     if node.created_by_node_id is not None:
         raise HTTPException(409, "A workflow's own output can't become a subgraph pointer -- use a free asset cell.")
-
     track = await db.get(Track, node.track_id)
     if track is None:
         raise HTTPException(409, "Node has no track.")
+    return node, track
+
+
+@router.post("/dashboards", response_model=DashboardRead, status_code=201)
+async def create_dashboard(payload: DashboardCreate, db: AsyncSession = Depends(get_db)):
+    """Turn an existing asset cell into a smart pointer on a brand-new,
+    empty dashboard, and make it that dashboard's owner.
+
+    Done in one call rather than "create node, then create dashboard" so a
+    dashboard can never exist without the pointer that keeps it reachable.
+    """
+    node, track = await _claim_pointer_cell(db, payload.node_id)
 
     dashboard = Dashboard(project_id=track.project_id, name=payload.name or "")
     db.add(dashboard)
@@ -168,6 +181,59 @@ async def add_pointer(dashboard_id: uuid.UUID, payload: PointerCreate, db: Async
     await db.commit()
     await db.refresh(dashboard)
     return _read(dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
+
+
+@router.post("/dashboards/{dashboard_id}/copy", response_model=DashboardRead, status_code=201)
+async def copy_dashboard(dashboard_id: uuid.UUID, payload: DashboardCreate, db: AsyncSession = Depends(get_db)):
+    """Turn an existing asset cell into a smart pointer on a *copy* of an
+    existing dashboard -- create_dashboard, except the new grid starts out
+    holding a reproduction of another one instead of being empty.
+
+    What "a copy" means is decided in core/subgraph_copy.py, one rule per kind:
+    structure and workflow settings are genuinely copied, pictures come across
+    as references (no file is ever duplicated), nested pointers stay pointers
+    at the same sub-dashboards, and a workflow's own materialized output is not
+    reproduced at all -- it's left as a hole to generate into.
+
+    The new dashboard inherits `start_kind` because step indices are copied
+    verbatim and column parity is per scope: a differing origin would put every
+    copied workflow node in an asset column. It deliberately does NOT inherit
+    `result_asset_id` -- a dashboard's result is one of its outputs, and the
+    copy has none yet, so the new pointer shows no face until something is
+    generated inside it and chosen.
+
+    Placing the pointer inside the very dashboard being copied is allowed --
+    which is exactly why the contents are copied BEFORE this cell is turned
+    into a pointer. The other order snapshots the cell after it already points
+    at the new dashboard, so the copy comes out holding a pointer at itself.
+    Harmless (pointer loops are legal, and a non-owner pointer is always safe
+    to delete) but not what anyone asked for. Copying never recurses into
+    nested grids either way.
+    """
+    source = await db.get(Dashboard, dashboard_id)
+    if source is None:
+        raise HTTPException(404, "Dashboard not found")
+    node, track = await _claim_pointer_cell(db, payload.node_id)
+    if track.project_id != source.project_id:
+        raise HTTPException(409, "A pointer must live in the same project as the dashboard it opens.")
+
+    dashboard = Dashboard(
+        project_id=source.project_id,
+        name=payload.name or "",
+        start_kind=source.start_kind,
+        asset_only_view=source.asset_only_view,
+    )
+    db.add(dashboard)
+    await db.flush()
+    await copy_dashboard_contents(db, source, dashboard)
+
+    node.node_type = SUBGRAPH_NODE_TYPE
+    node.subgraph_dashboard_id = dashboard.id
+    dashboard.owner_node_id = node.id
+
+    await db.commit()
+    await db.refresh(dashboard)
+    return _read(dashboard, await _live_node_count(db, dashboard.id), 1)
 
 
 @router.get("/dashboards/{dashboard_id}", response_model=DashboardRead)

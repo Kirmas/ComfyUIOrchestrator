@@ -10,7 +10,7 @@ grew a refasset branch but never a subgraph one, so a smart pointer reported
 zero outputs and silently couldn't be compared -- which is the failure mode
 this module exists to prevent.
 
-The four kinds differ in exactly two things, and this is the whole interface:
+The four kinds differ in exactly three things, and this is the whole interface:
 
   * **face** -- which single Asset the cell stands for. Only `asset.single`
     and `asset.select` own `Asset` rows (`Asset.node_id`); `asset.refasset`
@@ -20,6 +20,12 @@ The four kinds differ in exactly two things, and this is the whole interface:
     face, never the raw `Asset.node_id` query.
   * **whether it owns those rows at all** (`owns_assets`) -- which is what
     deletion, storage GC and "list this node's outputs" actually key on.
+  * **how the cell is reproduced in a copy of its grid** (`copy_spec`, see
+    core/subgraph_copy.py). Content is never duplicated: a cell that owns a
+    picture comes across as a *reference* to that same picture, and a smart
+    pointer as a second pointer at the same sub-dashboard. This is the asset
+    half of "copying vs referencing is split by kind" (CLAUDE.md) -- the
+    workflow half is a genuine independent copy of the settings.
 
 Deliberately NOT a plugin framework: it's a closed four-element set that only
 grows when someone writes a new asset node type by hand, same as
@@ -34,7 +40,7 @@ from typing import ClassVar
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Asset, Dashboard, Node, NodeKind
+from app.db.models import Asset, Dashboard, Node, NodeKind, NodeStatus
 
 
 async def explicit_ref_asset(db: AsyncSession, ref: dict) -> Asset | None:
@@ -72,6 +78,28 @@ class AssetNodeBackend:
             return None
         selected = [a for a in assets if a.selected]
         return selected[0] if selected else assets[-1]
+
+    async def copy_spec(self, db: AsyncSession, node: Node) -> dict:
+        """The fields this cell's counterpart carries in a copy of the grid it
+        lives in (core/subgraph_copy.py builds the Node from them).
+
+        A cell that owns a picture is reproduced as a *reference* to that same
+        picture, never as a second copy of the file -- the same rule as "+ ref
+        elsewhere", applied in bulk. An empty cell stays an empty cell of its
+        own kind. No `node_id` goes into the ref (unlike Grid.tsx's own
+        "+ ref elsewhere", which adds one for the provenance arrow): the source
+        cell is in a different grid, where no arrow can be drawn to it, so this
+        is shaped like a board-library reference instead -- resolved by asset
+        id alone on both ends (explicit_ref_asset above, resolveSlotAsset in
+        slotResolution.ts)."""
+        face = await self.face(db, node)
+        if face is None:
+            return {"node_type": node.node_type, "inputs": [], "status": NodeStatus.draft}
+        return {
+            "node_type": RefAssetNode.node_type,
+            "inputs": [{"type": "explicit", "output_id": str(face.id)}],
+            "status": NodeStatus.done,
+        }
 
 
 class _BorrowedFaceAssetNode(AssetNodeBackend):
@@ -126,6 +154,18 @@ class SubgraphAssetNode(_BorrowedFaceAssetNode):
         if dashboard is None or dashboard.result_asset_id is None:
             return None
         return await db.get(Asset, dashboard.result_asset_id)
+
+    async def copy_spec(self, db: AsyncSession, node: Node) -> dict:
+        """A second pointer at the *same* sub-dashboard -- copying a grid never
+        recurses into the grids it points at. The copy is an extra pointer, not
+        an owner (a non-tree edge, hence always safe to delete), so the nested
+        dashboard keeps the owner it already had."""
+        return {
+            "node_type": self.node_type,
+            "inputs": [],
+            "subgraph_dashboard_id": node.subgraph_dashboard_id,
+            "status": node.status,
+        }
 
 
 # Stateless singletons -- these carry no per-node state, so there's nothing to
