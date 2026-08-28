@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.idea_macros import resolve_macros, strip_markdown
 from app.core.storage import build_asset_url, get_storage
+from app.api.routes.assets import to_asset_read
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Board, BoardItem, BoardItemKind, Project
 from app.schemas.schemas import (
@@ -215,8 +216,7 @@ async def list_project_assets(project_id: uuid.UUID, tag: str | None = None, db:
         assets = [a for a in assets if tag in (a.tags or [])]
     reads = []
     for asset in assets:
-        read = AssetRead.model_validate(asset)
-        read.url = build_asset_url(asset.id)
+        read = to_asset_read(asset)
         reads.append(read)
     return reads
 
@@ -232,13 +232,12 @@ async def upload_project_asset(project_id: uuid.UUID, file: UploadFile, db: Asyn
     data = await file.read()
     mime_type = file.content_type or "application/octet-stream"
     kind = AssetKind.for_mime(mime_type)
-    key = get_storage().put_object(data, mime_type, prefix=f"projects/{project_id}")
+    key = await get_storage().put_object(data, mime_type, prefix=f"projects/{project_id}", kind=kind)
     asset = Asset(project_id=project_id, storage_key=key, mime_type=mime_type, kind=kind, selected=False, tags=[], meta={})
     db.add(asset)
     await db.commit()
     await db.refresh(asset)
-    read = AssetRead.model_validate(asset)
-    read.url = build_asset_url(asset.id)
+    read = to_asset_read(asset)
     return read
 
 
@@ -283,6 +282,5 @@ async def set_asset_tags(asset_id: uuid.UUID, payload: AssetTagsUpdate, db: Asyn
     asset.tags = list(dict.fromkeys(t.strip() for t in payload.tags if t.strip()))
     await db.commit()
     await db.refresh(asset)
-    read = AssetRead.model_validate(asset)
-    read.url = build_asset_url(asset.id)
+    read = to_asset_read(asset)
     return read

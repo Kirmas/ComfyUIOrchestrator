@@ -434,6 +434,13 @@ class AssetRead(ORMModel):
     meta: dict
     created_at: datetime
     url: str | None = None
+    # The grid-sized thumbnail; always safe to use as an <img src>, since the
+    # route falls back to the original for anything that has no preview.
+    preview_url: str | None = None
+    # The original's pixel dimensions, read straight off the file's prefix
+    # block. None until that file has been migrated -- see assets.py::_to_read.
+    width: int | None = None
+    height: int | None = None
 
 
 class AssetTagsUpdate(BaseModel):

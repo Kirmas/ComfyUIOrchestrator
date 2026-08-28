@@ -26,8 +26,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.asset_types import REFERENCING_ASSET_NODE_TYPES
+from app.core import asset_prefix
 from app.core.storage import get_storage
 from app.db.models import Asset, AssetKind, Dashboard, Node
+
+
+# Only for a file with no Asset row left to read mime_type from -- the prefix
+# records a kind, not a media type, and every raster we write is a PNG or JPEG
+# whose own header Pillow would have identified anyway.
+_KIND_MIME = {AssetKind.image: "image/png", AssetKind.mask: "image/png", AssetKind.mesh: "model/gltf-binary"}
 
 
 def guess_mime_type(path: Path) -> str:
@@ -37,7 +44,14 @@ def guess_mime_type(path: Path) -> str:
     the browser's Content-Type at upload time. Peeking at the actual header
     bytes via Pillow (already a hard dependency, see native_backend.py) is
     cheap: Image.open only reads enough of the file to identify the format,
-    it doesn't decode pixel data until .load()/.convert() is called."""
+    it doesn't decode pixel data until .load()/.convert() is called.
+
+    A migrated file answers for itself without Pillow at all: its prefix block
+    records the asset kind, so an orphan report can say what a file is even
+    though no Asset row is left to ask."""
+    header = asset_prefix.read_header(path)
+    if header:
+        return _KIND_MIME.get(header.kind, "application/octet-stream")
     try:
         with Image.open(path) as img:
             mime = img.get_format_mimetype()

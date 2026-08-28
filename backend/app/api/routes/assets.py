@@ -1,11 +1,10 @@
-import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.storage import build_asset_url, get_storage
+from app.core import asset_response
+from app.core.storage import build_asset_url, build_preview_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Node, NodeKind, NodeStatus
 from app.schemas.schemas import AssetMoveUpdate, AssetRead, AssetSelectUpdate
@@ -13,9 +12,20 @@ from app.schemas.schemas import AssetMoveUpdate, AssetRead, AssetSelectUpdate
 router = APIRouter(prefix="/api/assets", tags=["assets"])
 
 
-def _to_read(asset: Asset) -> AssetRead:
+def to_asset_read(asset: Asset) -> AssetRead:
+    """The one place an Asset becomes an AssetRead. Every route that returns one
+    goes through here -- the url/preview_url/dimension fields were previously
+    re-derived at eight call sites, which is exactly how `list_node_outputs` and
+    `isPickable` drifted apart over the asset kinds (see core/asset_types.py)."""
     item = AssetRead.model_validate(asset)
     item.url = build_asset_url(asset.id)
+    item.preview_url = build_preview_url(asset.id)
+    # Dimensions come off the prefix block rather than out of the loaded <img>:
+    # naturalWidth stops being the original's size the moment that <img> points
+    # at a 384x384 preview.
+    size = get_storage().dimensions(asset.storage_key)
+    if size:
+        item.width, item.height = size
     return item
 
 
@@ -25,12 +35,12 @@ async def upload_asset(file: UploadFile, db: AsyncSession = Depends(get_db)):
     mime_type = file.content_type or "application/octet-stream"
     kind = AssetKind.for_mime(mime_type)
     storage = get_storage()
-    key = storage.put_object(data, mime_type, prefix="uploads")
+    key = await storage.put_object(data, mime_type, prefix="uploads", kind=kind)
     asset = Asset(node_id=None, storage_key=key, mime_type=mime_type, kind=kind, selected=False, meta={})
     db.add(asset)
     await db.commit()
     await db.refresh(asset)
-    return _to_read(asset)
+    return to_asset_read(asset)
 
 
 @router.get("/{asset_id}", response_model=AssetRead)
@@ -38,7 +48,7 @@ async def get_asset(asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     asset = await db.get(Asset, asset_id)
     if not asset:
         raise HTTPException(404, "Asset not found")
-    return _to_read(asset)
+    return to_asset_read(asset)
 
 
 @router.get("/{asset_id}/file")
@@ -46,39 +56,67 @@ async def get_asset_file(request: Request, asset_id: uuid.UUID, db: AsyncSession
     """Serves the raw bytes -- this is what <img src>/<model-viewer src> point at.
     Auth is the normal shared-token check, just via ?token= since browsers don't
     attach a custom Authorization header for these requests (see app/core/auth.py,
-    which already falls back to the query param when there's no header)."""
+    which already falls back to the query param when there's no header).
+
+    Streams from `payload_offset` onward: the file on disk carries a 64 KiB
+    prefix block, and nobody outside core/storage.py should ever see it. See
+    core/asset_response.py for why the caching had to be re-implemented rather
+    than inherited from FileResponse."""
     asset = await db.get(Asset, asset_id)
     if not asset:
         raise HTTPException(404, "Asset not found")
     storage = get_storage()
-    # FileResponse (not Response(content=...)): streams from disk through the
-    # threadpool and sets ETag/Last-Modified itself, so repeat loads get a 304
-    # instead of the full body.
-    #
-    # An asset URL is keyed on Asset.id and is genuinely immutable: storage keys
-    # are always a fresh uuid4 (storage.put_object) and a regenerate never
-    # rewrites an existing row -- native re-runs delete the old Asset rows and
-    # files outright (_clear_asset_node_outputs in worker/tasks.py) and insert
-    # new ones with new ids. So a given id serves the same bytes for its whole
-    # life, or 404s once deleted; it can never serve *different* bytes.
-    # "private" rather than "public" because the URL carries the shared token.
     path = storage.path_of(asset.storage_key)
-    try:
-        stat_result = os.stat(path)
-    except OSError:
+    if not path.is_file():
+        raise HTTPException(404, "Asset file missing")
+    return asset_response.stream_payload(
+        request,
+        path,
+        storage.payload_offset(asset.storage_key),
+        asset.mime_type,
+        asset_response.payload_etag(asset.storage_key),
+    )
+
+
+@router.get("/{asset_id}/preview")
+async def get_asset_preview(request: Request, asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """The 384x384 WebP out of the asset's prefix block -- what the grid's cells
+    and the reference picker point at instead of a 40 MB, 33-megapixel original
+    that they render at 118 CSS px.
+
+    Files written before this shipped get their prefix built here, on first
+    read, and the request waits for it. That costs roughly two seconds the one
+    time each file is touched; afterwards this is a ~16 KB read. The decode runs
+    in a thread pool (three at a time), so it never blocks the event loop and
+    other API calls don't queue behind it.
+
+    Anything with no preview -- a picture already smaller than one, a mesh, a
+    file we can't decode -- falls back to the original, so an <img> pointed here
+    always gets something renderable."""
+    asset = await db.get(Asset, asset_id)
+    if not asset:
+        raise HTTPException(404, "Asset not found")
+    storage = get_storage()
+    path = storage.path_of(asset.storage_key)
+    if not path.is_file():
         raise HTTPException(404, "Asset file missing")
 
-    cache_headers = {"Cache-Control": "private, max-age=31536000, immutable"}
-    response = FileResponse(path, media_type=asset.mime_type, headers=cache_headers, stat_result=stat_result)
+    await storage.ensure_prefix(asset.storage_key, asset.kind)
+    preview = storage.read_preview(asset.storage_key)
+    if preview is None:
+        return asset_response.stream_payload(
+            request,
+            path,
+            storage.payload_offset(asset.storage_key),
+            asset.mime_type,
+            asset_response.payload_etag(asset.storage_key),
+        )
 
-    # FileResponse sets ETag/Last-Modified but, unlike StaticFiles, never acts
-    # on If-None-Match itself -- without this a hard refresh still drags the
-    # whole multi-MB body back. Compare against the etag it just computed rather
-    # than deriving one here, so this can't drift from starlette's own scheme.
-    etag = response.headers.get("etag", "")
-    if etag and etag in {t.strip() for t in request.headers.get("if-none-match", "").split(",")}:
-        return Response(status_code=304, headers={**cache_headers, "ETag": etag})
-    return response
+    etag = asset_response.bytes_etag(preview)
+    headers = {"Cache-Control": asset_response.REVALIDATE_CACHE, "ETag": etag}
+    if etag in {tag.strip() for tag in request.headers.get("if-none-match", "").split(",")}:
+        return Response(status_code=304, headers=headers)
+    return Response(preview, media_type="image/webp", headers=headers)
 
 
 @router.delete("/{asset_id}", status_code=204)
@@ -103,7 +141,7 @@ async def select_asset(asset_id: uuid.UUID, payload: AssetSelectUpdate, db: Asyn
     asset.selected = payload.selected
     await db.commit()
     await db.refresh(asset)
-    return _to_read(asset)
+    return to_asset_read(asset)
 
 
 @router.post("/{asset_id}/move", response_model=AssetRead)
@@ -128,4 +166,4 @@ async def move_asset(asset_id: uuid.UUID, payload: AssetMoveUpdate, db: AsyncSes
     target.error = None
     await db.commit()
     await db.refresh(asset)
-    return _to_read(asset)
+    return to_asset_read(asset)

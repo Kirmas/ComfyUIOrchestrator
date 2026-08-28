@@ -32,6 +32,14 @@ export function resolveAssetUrl(path: string | null | undefined): string {
   return `${getApiBaseUrl()}${path}`;
 }
 
+/** What a grid-sized <img> should point at: the asset's thumbnail when the
+ * backend has one, the original otherwise. Kept next to resolveAssetUrl so the
+ * "which URL does a cell use" decision lives in exactly one place -- full-size
+ * views (zoom, compare, download) deliberately keep calling resolveAssetUrl. */
+export function resolveAssetPreviewUrl(asset: { url: string | null; preview_url?: string | null }): string {
+  return resolveAssetUrl(asset.preview_url ?? asset.url);
+}
+
 class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {

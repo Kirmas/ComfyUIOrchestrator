@@ -1,13 +1,14 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core import storage_gc, storage_migration
+from app.core import asset_prefix, asset_response
 from app.core.storage import build_asset_url
+from app.api.routes.assets import to_asset_read
 from app.db.base import get_db
 from app.db.models import Asset, Project
 from app.schemas.schemas import AssetRead
@@ -77,7 +78,7 @@ async def get_orphans(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/storage/orphans/preview")
-async def preview_orphan(path: str):
+async def preview_orphan(request: Request, path: str):
     """Raw bytes for an orphan file that has no Asset row (and so no
     /api/assets/{id}/file URL) -- used as an <img src> in the orphan list,
     same ?token= auth fallback as that route (core/auth.py)."""
@@ -87,11 +88,22 @@ async def preview_orphan(path: str):
         raise HTTPException(400, str(exc)) from exc
     if not file_path.is_file():
         raise HTTPException(404, "File not found")
+    # An orphan that still carries its prefix block already holds a thumbnail,
+    # which is all this list needs -- no reason to send the 40 MB original.
+    preview = asset_prefix.read_preview(file_path)
+    if preview is not None:
+        return Response(preview, media_type="image/webp")
     # storage_key files have no extension (storage.py::put_object), so the
     # Content-Type Starlette would otherwise guess from the filename is
     # always wrong -- pass the same header-sniffed mime type the scan result
-    # already reported.
-    return FileResponse(file_path, media_type=storage_gc.guess_mime_type(file_path))
+    # already reported. Streamed past the prefix block, if any.
+    return asset_response.stream_payload(
+        request,
+        file_path,
+        asset_prefix.payload_offset(file_path),
+        storage_gc.guess_mime_type(file_path),
+        asset_response.payload_etag(path),
+    )
 
 
 @router.post("/storage/orphans/delete", status_code=204)
@@ -118,8 +130,7 @@ async def adopt_orphan(body: dict, db: AsyncSession = Depends(get_db)):
         asset = await storage_gc.adopt_orphan(db, path, project.id)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    read = AssetRead.model_validate(asset)
-    read.url = build_asset_url(asset.id)
+    read = to_asset_read(asset)
     return read
 
 
@@ -152,6 +163,5 @@ async def adopt_unowned_asset(body: dict, db: AsyncSession = Depends(get_db)):
         asset = await storage_gc.adopt_unowned_asset(db, uuid.UUID(asset_id), project.id)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    read = AssetRead.model_validate(asset)
-    read.url = build_asset_url(asset.id)
+    read = to_asset_read(asset)
     return read

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { resolveAssetUrl } from "../api/client";
+import { resolveAssetPreviewUrl } from "../api/client";
 import { boardApi } from "../api/endpoints";
 import { useT } from "../i18n";
 import type { Asset } from "../types";
@@ -71,7 +71,9 @@ export function ReferencePicker({ projectId, onPick, onClose }: Props) {
           <div className="reference-grid">
             {shown.map((asset) => (
               <button key={asset.id} className="reference-item" onClick={() => void onPick(asset)} title={(asset.tags ?? []).join(", ")}>
-                <img src={resolveAssetUrl(asset.url)} alt="" />
+                {/* Thumbnails in a flat scrolling list -- the one place on the board
+                    side that wants previews rather than originals. */}
+                <img src={resolveAssetPreviewUrl(asset)} alt="" loading="lazy" decoding="async" />
               </button>
             ))}
           </div>

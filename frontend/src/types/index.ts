@@ -251,6 +251,15 @@ export interface Asset {
   meta: Record<string, unknown>;
   created_at: string;
   url: string | null;
+  /** Grid-sized thumbnail out of the asset file's own prefix block. Always safe
+   * to use as an <img src>: the route falls back to the original for anything
+   * that has no preview (a picture already smaller than one, a mesh). */
+  preview_url?: string | null;
+  /** The *original's* pixel size, read server-side off that prefix block --
+   * naturalWidth on a loaded <img> can't answer this once the <img> is showing
+   * a 384x384 preview. */
+  width?: number | null;
+  height?: number | null;
 }
 
 // ---------- Idea board ----------

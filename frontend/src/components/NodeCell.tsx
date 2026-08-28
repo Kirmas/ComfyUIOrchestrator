@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { createPortal } from "react-dom";
-import { resolveAssetUrl } from "../api/client";
+import { resolveAssetPreviewUrl, resolveAssetUrl } from "../api/client";
 import { assetsApi, dashboardsApi, jobsApi, nodesApi, nodeTemplatesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
 import { isFileDrag } from "../dragUtils";
@@ -109,10 +109,22 @@ function NumericExprInput({
   );
 }
 
-// Shared by CandidatesGrid and SingleOutput -- resolution (read off the
-// loaded <img>, not stored anywhere) plus, when known, which backend
-// produced this asset, in one overlay instead of two competing for the same
-// bottom-of-thumbnail spot.
+/** The *original's* dimensions for the size tag.
+ *
+ * Prefers what the server read off the asset file's own prefix block: the old
+ * fallback -- a loaded <img>'s naturalWidth -- now measures the 384x384
+ * preview, not the picture. That fallback still earns its place for anything
+ * the backend can't measure (a mesh), where the <img> is showing the original
+ * anyway and so is still telling the truth. */
+function assetDims(asset: Asset, loaded: { w: number; h: number } | undefined) {
+  if (asset.width && asset.height) return { w: asset.width, h: asset.height };
+  return loaded;
+}
+
+// Shared by CandidatesGrid and SingleOutput -- resolution (from the asset's
+// prefix block, or the loaded <img> as a fallback) plus, when known, which
+// backend produced this asset, in one overlay instead of two competing for the
+// same bottom-of-thumbnail spot.
 function AssetMetaTag({
   dims,
   backendName,
@@ -222,12 +234,14 @@ function CandidatesGrid({
           ) : (
             <div className="output-thumb">
               <img
-                src={resolveAssetUrl(asset.url)}
+                src={resolveAssetPreviewUrl(asset)}
                 alt="output"
-                // The grid renders every cell at once (no virtualization) and
-                // these are full-size originals, several MB each -- lazy so
-                // off-screen cells don't fetch, async-decoded so the ones that
-                // do can't block the main thread mid-interaction.
+                // A 384x384 thumbnail out of the asset's own file, not the
+                // original: the grid renders every cell at once (no
+                // virtualization) and an original here is 40+ MB and 33
+                // megapixels for a box drawn at 118 CSS px. Still lazy so
+                // off-screen cells don't fetch, still async-decoded.
+                // Full size stays one click away (the 🔍 button, below).
                 loading="lazy"
                 decoding="async"
                 onDoubleClick={() => onImageOpen(resolveAssetUrl(asset.url), asset)}
@@ -264,7 +278,7 @@ function CandidatesGrid({
                 ⇄
               </button>
               <AssetMetaTag
-                dims={dimsById[asset.id]}
+                dims={assetDims(asset, dimsById[asset.id])}
                 backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
                 kind={asset.kind}
               />
@@ -323,7 +337,10 @@ function AssetFaceView({
 }) {
   const t = useT();
   const [dims, setDims] = useState<{ w: number; h: number } | undefined>(undefined);
+  // Two different URLs on purpose: the cell shows the thumbnail, every
+  // full-size affordance (zoom here, and compare downstream) keeps the original.
   const url = resolveAssetUrl(asset.url);
+  const previewUrl = resolveAssetPreviewUrl(asset);
   return (
     <div className="output-grid">
       <div className="output-item">
@@ -332,7 +349,7 @@ function AssetFaceView({
         ) : (
           <div className="output-thumb">
             <img
-              src={url}
+              src={previewUrl}
               alt="output"
               loading="lazy"
               decoding="async"
@@ -369,7 +386,7 @@ function AssetFaceView({
               ⇄
             </button>
             <AssetMetaTag
-              dims={dims}
+              dims={assetDims(asset, dims)}
               backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
               kind={asset.kind}
             />

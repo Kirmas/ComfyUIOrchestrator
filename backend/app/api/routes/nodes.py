@@ -12,6 +12,7 @@ from app.core.queue import job_queue
 from app.core.track_order import ordered_tracks, scope_of, splice_after
 from app.core.subgraph_copy import workflow_node_copy
 from app.core.storage import build_asset_url, get_storage
+from app.api.routes.assets import to_asset_read
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Dashboard, Job, Node, NodeKind, NodeStatus, Track
 from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeDuplicate, NodeMove, NodeRead, NodeUpdate, PickCandidate
@@ -709,8 +710,7 @@ async def list_node_outputs(node_id: uuid.UUID, db: AsyncSession = Depends(get_d
         assets = result.scalars().all()
     out = []
     for asset in assets:
-        item = AssetRead.model_validate(asset)
-        item.url = build_asset_url(asset.id)
+        item = to_asset_read(asset)
         out.append(item)
     return out
 
@@ -742,15 +742,14 @@ async def upload_asset_to_node(node_id: uuid.UUID, file: UploadFile, db: AsyncSe
     # projects/<id> subtree (2026-08-07, see core/node_path_migration.py for
     # the one-off reorg of pre-existing rows).
     track = await db.get(Track, node.track_id)
-    key = storage.put_object(data, mime_type, prefix=f"projects/{track.project_id}/nodes/{node.id}")
+    key = await storage.put_object(data, mime_type, prefix=f"projects/{track.project_id}/nodes/{node.id}", kind=kind)
     asset = Asset(node_id=node.id, storage_key=key, mime_type=mime_type, kind=kind, selected=True, meta={})
     db.add(asset)
     node.status = NodeStatus.done
     node.error = None
     await db.commit()
     await db.refresh(asset)
-    item = AssetRead.model_validate(asset)
-    item.url = build_asset_url(asset.id)
+    item = to_asset_read(asset)
     return item
 
 
