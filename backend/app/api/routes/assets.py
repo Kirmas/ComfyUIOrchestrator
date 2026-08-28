@@ -84,12 +84,6 @@ async def get_asset_preview(request: Request, asset_id: uuid.UUID, db: AsyncSess
     and the reference picker point at instead of a 40 MB, 33-megapixel original
     that they render at 118 CSS px.
 
-    Files written before this shipped get their prefix built here, on first
-    read, and the request waits for it. That costs roughly two seconds the one
-    time each file is touched; afterwards this is a ~16 KB read. The decode runs
-    in a thread pool (three at a time), so it never blocks the event loop and
-    other API calls don't queue behind it.
-
     Anything with no preview -- a picture already smaller than one, a mesh, a
     file we can't decode -- falls back to the original, so an <img> pointed here
     always gets something renderable."""
@@ -101,7 +95,6 @@ async def get_asset_preview(request: Request, asset_id: uuid.UUID, db: AsyncSess
     if not path.is_file():
         raise HTTPException(404, "Asset file missing")
 
-    await storage.ensure_prefix(asset.storage_key, asset.kind)
     preview = storage.read_preview(asset.storage_key)
     if preview is None:
         return asset_response.stream_payload(

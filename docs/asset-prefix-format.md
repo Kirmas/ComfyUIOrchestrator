@@ -66,22 +66,29 @@ un-migrated files need anyway. That is also the answer for a picture already
 smaller than a preview (`min(w, h) <= 384`), which is the skip rule; it lives in
 the producer, not as a global constant.
 
-## Migration
+## Where a prefix comes from
 
-Files written before this shipped get their prefix built on first `/preview`
-read, and the request waits (~1.2 s for a 49 MB file). Decodes run in a thread
-pool, three at a time, so the event loop stays free and other API calls do not
-queue behind them. A per-key lock stops two requests rewriting the same file.
+`storage.put_object` — and only there. **There is deliberately no lazy "build it
+on read" path**: one existed for the initial rollout, was used to migrate the
+whole library in 46.7 s, and was then deleted rather than left in the request
+path as a branch that could never fire again.
 
-Rewrites go through a temporary in the same directory and are renamed into
-place; a response already streaming the old file keeps its descriptor on the old
-inode, so replacing it mid-download is safe.
+Reading tolerates a file without one: `payload_offset()` answers 0 and
+everything works, just without a preview. That is a real state, not a leftover —
+one asset in the library is legitimately too small to be worth a preview.
 
-`put_object` writes the prefix at creation time, so nothing new ever needs the
-retrofit. **Once every file has been touched, `ensure_prefix` and its one caller
-can simply be deleted.**
+Out of band, in `scripts/asset_prefix.py`:
 
-Rollback: `backend/.venv/bin/python scripts/strip_asset_prefix.py --apply`.
+| | |
+|---|---|
+| `--status` | how many files have a prefix |
+| `--backfill` | build one for any file lacking it — what a media directory restored from a pre-format backup needs |
+| `--strip` | the rollback: remove the block, leaving the original file exactly as it was |
+
+Both write through a temporary in the same directory and rename into place; the
+media here is not reproducible and a torn write over an original would lose it.
+A response already streaming the old file keeps its descriptor on the old inode,
+so replacing it mid-download is safe.
 
 ## Serving (`core/asset_response.py`)
 
