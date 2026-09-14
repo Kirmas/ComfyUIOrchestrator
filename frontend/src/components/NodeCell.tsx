@@ -7,7 +7,7 @@ import { isFileDrag } from "../dragUtils";
 import { detectLayerMaskGroups, detectMaskGroups, resolveMaskImageField } from "../maskUtils";
 import { evaluateMathExpression } from "../mathExpr";
 import { assetClipboard, subgraphClipboard, useClipboardSlot } from "../clipboard";
-import { assetFace } from "../assetNodes";
+import { assetFace, getDashboardFaceCached, invalidateDashboardFace } from "../assetNodes";
 import { resolveSlotAsset } from "../slotResolution";
 import { useProjectStore } from "../state/projectStore";
 import { defaultInputsForSchema, groupTemplatesByCategory, slotFields } from "../templateUtils";
@@ -277,6 +277,15 @@ function CandidatesGrid({
               >
                 ⇄
               </button>
+              <a
+                className="zoom-button download-button"
+                href={resolveAssetUrl(asset.url)}
+                download
+                onClick={(e) => e.stopPropagation()}
+                title={t("cell.download")}
+              >
+                ⬇
+              </a>
               <AssetMetaTag
                 dims={assetDims(asset, dimsById[asset.id])}
                 backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
@@ -327,11 +336,16 @@ function CandidatesGrid({
 function AssetFaceView({
   asset,
   borrowed = false,
+  downloadName,
   onImageOpen,
   onCompare,
 }: {
   asset: Asset;
   borrowed?: boolean;
+  // Filename (with extension) to save the download as, when this container
+  // has a meaningful name of its own -- e.g. a subgraph's dashboard name.
+  // Left unset falls back to whatever name the storage URL itself carries.
+  downloadName?: string;
   onImageOpen: (url: string, asset?: Asset) => void;
   onCompare: (asset: Asset) => void;
 }) {
@@ -385,6 +399,15 @@ function AssetFaceView({
             >
               ⇄
             </button>
+            <a
+              className="zoom-button download-button"
+              href={url}
+              download={downloadName ?? true}
+              onClick={(e) => e.stopPropagation()}
+              title={t("cell.download")}
+            >
+              ⬇
+            </a>
             <AssetMetaTag
               dims={assetDims(asset, dims)}
               backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
@@ -495,13 +518,21 @@ function BaseAssetNodeView({
   const [isDashboardResult, setIsDashboardResult] = useState(false);
   const [copying, setCopying] = useState(false);
   useEffect(() => {
-    if (dashboardId && outputs[0]) dashboardsApi.get(dashboardId).then((d) => setIsDashboardResult(d.result_asset_id === outputs[0].id));
+    if (dashboardId && outputs[0]) {
+      const outputId = outputs[0].id;
+      getDashboardFaceCached(dashboardId).then((d) => setIsDashboardResult(d?.result_asset_id === outputId));
+    }
   }, [dashboardId, outputs[0]?.id]);
   const copiedSubgraph = useClipboardSlot(subgraphClipboard);
   const tracks = useProjectStore((s) => s.tracks);
   const loadProject = useProjectStore((s) => s.loadProject);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isCandidatesGrid = node.node_type === "asset.select";
+  // Named after the dashboard when this cell's output IS that dashboard's
+  // marked result -- shared by the text download button below and the
+  // overlay one AssetFaceView renders on the thumbnail itself.
+  const downloadName =
+    isDashboardResult && dashboardName && outputs[0] ? `${dashboardName}.${extensionForMimeType(outputs[0].mime_type)}` : undefined;
 
   const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
   // Set only when the opened image is one candidate of an asset.select picker
@@ -564,6 +595,11 @@ function BaseAssetNodeView({
     if (!asset) return;
     try {
       await dashboardsApi.setResult(dashboardId, asset.id);
+      // The only thing that ever changes a dashboard's result_asset_id --
+      // every asset.subgraph pointer's cached face (assetNodes.ts) is now
+      // stale and must re-fetch, or every pointer into this dashboard keeps
+      // showing the old picture until a full page reload.
+      invalidateDashboardFace(dashboardId);
       alert(t("subgraph.resultSet"));
     } catch (err) {
       alert(err instanceof Error ? err.message : t("subgraph.resultSetFailed"));
@@ -855,7 +891,7 @@ function BaseAssetNodeView({
             className="primary"
             style={{ textDecoration: "none", padding: "4px 8px" }}
             href={resolveAssetUrl(outputs[0].url)}
-            download={isDashboardResult && dashboardName ? `${dashboardName}.${extensionForMimeType(outputs[0].mime_type)}` : true}
+            download={downloadName ?? true}
           >
             {t("cell.download")}
           </a>
@@ -973,7 +1009,7 @@ function BaseAssetNodeView({
       {isCandidatesGrid ? (
         <CandidatesGrid outputs={outputs} onSelect={selectCandidate} onDiscard={discardCandidate} onImageOpen={openImage} onCompare={startCompare} />
       ) : outputs.length === 1 ? (
-        <AssetFaceView asset={outputs[0]} onImageOpen={openImage} onCompare={startCompare} />
+        <AssetFaceView asset={outputs[0]} downloadName={downloadName} onImageOpen={openImage} onCompare={startCompare} />
       ) : null}
 
       {isComparingSource && (
@@ -2080,7 +2116,12 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
       </div>
 
       {face ? (
-        <AssetFaceView asset={face} onImageOpen={setFullSizeUrl} onCompare={(asset) => onStartCompare(node, asset)} />
+        <AssetFaceView
+          asset={face}
+          downloadName={info?.name ? `${info.name}.${extensionForMimeType(face.mime_type)}` : undefined}
+          onImageOpen={setFullSizeUrl}
+          onCompare={(asset) => onStartCompare(node, asset)}
+        />
       ) : (
         <div className="subgraph-empty">{t("subgraph.noFace")}</div>
       )}

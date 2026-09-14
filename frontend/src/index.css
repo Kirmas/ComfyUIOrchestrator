@@ -408,6 +408,13 @@ input, select, textarea {
   left: 4px;
 }
 
+/* Sits between zoom (right) and compare (left) so all three overlay
+   buttons stay evenly spaced across the top edge of the thumbnail. */
+.download-button {
+  right: 30px;
+  text-decoration: none;
+}
+
 /* Resolution (read client-side off the loaded <img>) and, when known,
    which backend generated this asset (Asset.meta.backend_name, stamped by
    worker/tasks.py's _materialize_job_result) -- UI-only overlay, never
@@ -960,6 +967,10 @@ th, td {
     width: 34px;
     height: 34px;
     font-size: 15px;
+  }
+
+  .download-button {
+    right: 42px;
   }
 
   .zoom-controls {
