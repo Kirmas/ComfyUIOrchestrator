@@ -137,6 +137,15 @@ async def project_recipe(project_id: uuid.UUID, dashboard_id: uuid.UUID | None =
         effective = await resolve_effective_template(db, node)
         schema_fields = (effective.param_schema if effective else {}).get("fields", [])
         declared = {f.get("name") for f in schema_fields}
+        # "mask"/"layer_mask" fields (native.mask's mask_png, native.transplant's
+        # transplant_png) store a base64 PNG straight in node.params -- see
+        # CLAUDE.md's grid domain section. Inlining that here the same way as
+        # any other param let a project with many painted cells blow the
+        # recipe response past several megabytes (2026-09-14 gap report on
+        # Faceless's main grid). Mirrors the same exclusion list_node_types
+        # already applies to a type's baked defaults, for the same reason:
+        # report that a mask is *set*, never its bytes.
+        bulky = {f.get("name") for f in schema_fields if f.get("type") in ("mask", "layer_mask")}
         slug = node.node_type.split(".", 1)[1] if node.node_type and "." in node.node_type else None
         steps.setdefault(node.step_index, []).append(
             {
@@ -149,7 +158,11 @@ async def project_recipe(project_id: uuid.UUID, dashboard_id: uuid.UUID | None =
                 "status": node.status.value if isinstance(node.status, NodeStatus) else node.status,
                 # Only params the type actually declares -- raw node.params can
                 # also hold leftovers from a previous type assignment.
-                "params": {k: v for k, v in (node.params or {}).items() if k in declared},
+                "params": {
+                    k: (bool(v) if k in bulky else v)
+                    for k, v in (node.params or {}).items()
+                    if k in declared
+                },
                 "slot_count": len([f for f in schema_fields if f.get("type") in ("image", "file")]),
                 "prompt_link": prompt_links.get(slug),
                 "created_by_node_id": str(node.created_by_node_id) if node.created_by_node_id else None,

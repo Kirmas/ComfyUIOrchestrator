@@ -18,7 +18,59 @@
  */
 import { assetsApi, dashboardsApi } from "./api/endpoints";
 import { useProjectStore } from "./state/projectStore";
-import type { Asset, NodeItem } from "./types";
+import type { Asset, Dashboard, NodeItem } from "./types";
+
+/** `face()` for the two "borrowed" kinds below used to hit the network on
+ * every single call, uncached -- fine when there were a couple of these on
+ * screen, catastrophic once a project accumulates many (nine Chart_
+ * sub-dashboards plus their own copied-in refasset cells, 2026-09-14
+ * incident): NodeCell.tsx's useAssetFace effect re-fires on almost any store
+ * update (its deps include the whole `outputsByNode` map and `node.inputs`,
+ * both prone to a fresh reference on an unrelated reload), so every reload
+ * re-fired one real fetch per pointer cell, all at once. With enough pointer
+ * cells on screen and a reload loop feeding itself (a WS progress tick
+ * updating the store retriggers every cell's effect, which piles on more
+ * fetches, some of which then fail from sheer request volume and get
+ * retried), that turns into thousands of "Failed to fetch" rejections a
+ * second and a fully frozen tab -- not a bug in the reload logic itself, just
+ * nothing here ever remembering an answer it already had.
+ *
+ * Assets are immutable once created (a fresh id is minted on every write --
+ * see deploy/root-deploy.sh's backup notes), so asset lookups cache forever,
+ * no invalidation path needed. A dashboard's `result_asset_id` is NOT
+ * immutable (set_dashboard_result changes it), so that cache is explicitly
+ * invalidated at the one call site that does -- NodeCell.tsx's markAsResult.
+ */
+const dashboardCache = new Map<string, Promise<Dashboard | null>>();
+const assetCache = new Map<string, Promise<Asset | null>>();
+
+/** Exported for NodeCell.tsx's own "is this cell the dashboard's chosen
+ * result" check -- same cache, so the two don't each hold a separate stale
+ * copy of the same dashboard. */
+export function getDashboardFaceCached(id: string): Promise<Dashboard | null> {
+  let entry = dashboardCache.get(id);
+  if (!entry) {
+    entry = dashboardsApi.get(id).catch(() => null);
+    dashboardCache.set(id, entry);
+  }
+  return entry;
+}
+
+function getAssetCached(id: string): Promise<Asset | null> {
+  let entry = assetCache.get(id);
+  if (!entry) {
+    entry = assetsApi.get(id).catch(() => null);
+    assetCache.set(id, entry);
+  }
+  return entry;
+}
+
+/** Call after anything that actually changes a dashboard's `result_asset_id`
+ * (currently just set_dashboard_result) -- the next face() lookup re-fetches
+ * instead of serving the now-stale cached one. */
+export function invalidateDashboardFace(dashboardId: string): void {
+  dashboardCache.delete(dashboardId);
+}
 
 /** Reads a node's own Asset rows, cache-first (the caller supplies the store's
  * `outputsByNode` lookup -- the grid deliberately avoids re-fetching images it
@@ -84,7 +136,7 @@ class RefAssetNode extends BorrowedFaceAssetNode {
   override async face(node: NodeItem): Promise<Asset | null> {
     const ref = node.inputs[0];
     if (!ref || ref.type !== "explicit" || !ref.output_id) return null;
-    return assetsApi.get(ref.output_id).catch(() => null);
+    return getAssetCached(ref.output_id);
   }
 }
 
@@ -96,9 +148,9 @@ class SubgraphAssetNode extends BorrowedFaceAssetNode {
 
   override async face(node: NodeItem): Promise<Asset | null> {
     if (!node.subgraph_dashboard_id) return null;
-    const dashboard = await dashboardsApi.get(node.subgraph_dashboard_id).catch(() => null);
+    const dashboard = await getDashboardFaceCached(node.subgraph_dashboard_id);
     if (!dashboard?.result_asset_id) return null;
-    return assetsApi.get(dashboard.result_asset_id).catch(() => null);
+    return getAssetCached(dashboard.result_asset_id);
   }
 }
 

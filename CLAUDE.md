@@ -21,6 +21,7 @@ Product overview & architecture: [README.md](README.md) — the source of truth 
 - **Nothing creates a grid cell the user didn't ask for.** Settling a candidate used to also create the empty workflow cell after it (`_ensure_next_workflow_step`, removed 2026-07-29 — it was deleted by hand ~90% of the time). Every asset cell with a free next column already offers its own "+ step" (`assetNextStepCells`), so continuation is one click when it's actually wanted; don't reintroduce speculative auto-creation.
 - **Any modal opened from `NodeCell.tsx` must render via `createPortal(..., document.body)`**, never inline in the cell's own JSX. A cell sits inside Grid's pan/zoom CSS transform (`Grid.tsx`); per the CSS transform spec, any ancestor transform (even a no-op `scale(1)`) establishes a new containing block for `position: fixed` descendants, so an inline (non-portaled) `.image-modal-backdrop` silently stops being viewport-relative and can open hundreds of pixels off-screen — only reproduces once the modal's content is tall enough to need `.params-modal-content`'s own scroll area, which is why it went unnoticed until `native.mask`'s paint canvas hit it (2026-07-21 incident; the params-modal `paramsOpen` block was the one `.image-modal-backdrop` usage in the file that wasn't portaled, unlike the other three).
 - **Portaling a modal to `document.body` does *not* remove it from Grid's drag-to-pan event handling.** `onBackgroundPointerDown` (Grid.tsx) arms a `window`-level pan drag on any pointerdown that bubbles up to the grid container without matching its exclusion selector — and React's *synthetic* event bubbling follows the React tree, not the real DOM tree, so a portaled child (still a React descendant of Grid) bubbles a pointerdown up to it regardless of where it actually sits in the DOM. Interactive content inside any modal (e.g. `MaskPreview.tsx`'s paint canvas) must therefore be covered by the `.image-modal-backdrop` entry already in `onBackgroundPointerDown`'s `closest()` exclusion list, or a pointerdown inside the modal visibly pans/drags the grid underneath it (2026-07-21 incident, found right after the createPortal fix above while testing `native.mask`'s paint canvas).
+- **A dead end worth recording so it isn't re-chased:** 2026-09-14, dragging a node made the whole tab stop responding to everything (not just the app) -- DevTools' own pause button did nothing until an unrelated click delivered a pointerup, meaning no page JS was running at all during the "freeze". That rules out a render loop by definition; a real CPU profile from the same session did point at one genuine (separate, now-fixed) cost — `ArrowsOverlay`'s 500ms poll unconditionally calling `setSize`/`setPaths` even with zero edges to draw, forcing a reflow for nothing — but fixing that didn't end the freeze either. The leading theory was a transformed ancestor wedging native HTML5 drag-and-drop at the browser level (`grid-wrapper` always carries `transform: scale(zoomScale)`, even `scale(1)`, and Chromium has known quirks with DnD hit-testing under a transformed ancestor); an experimental build that omitted the transform at 1:1 zoom was deployed to test it, then reverted unconfirmed once a full **browser restart** (not just F5) cleared the freeze on its own -- meaning the wedged state lived in the browser process itself, not in this app's code, and there was nothing left here to fix. If this recurs, the transform-ancestor theory is still the best lead and the experimental patch is easy to redo, but don't assume it's the same bug without checking "does pausing the debugger do anything" first.
 
 ## Sub-dashboards & smart pointers (`backend/app/api/routes/dashboards.py`)
 
@@ -88,6 +89,29 @@ grid. This is *organisational decomposition*, not a performance trick.
   (`get_board`, `list_board_items`) are unrelated -- a dashboard is a grid
   scope, not a `Board` row, and never accepts a dashboard id (2026-08-09
   gap report; fixed same day).
+- **Until 2026-09-14, MCP had no tool that actually created a sub-dashboard.**
+  `create_node(node_type="asset.subgraph")` made a node, but its
+  `subgraph_dashboard_id` stayed permanently null -- a dead pointer, since the
+  only thing that ever creates the nested `Dashboard` row is `POST
+  /api/dashboards` (dashboards.py), which nothing in `mcp/tools.py` wrapped.
+  Fixed by adding `create_dashboard`/`get_dashboard`/`rename_dashboard`/
+  `copy_dashboard`/`add_pointer`/`set_dashboard_result`/`transfer_ownership` as
+  thin wrappers over the existing routes, same pattern as every other tool
+  here -- no new backend logic, just the missing surface. `create_dashboard`'s
+  `name` also happens to be the only place in this app a grid *container* gets
+  a name at all (a `Node`/`Track` has no name column); naming an individual
+  node or track is a real gap, not an MCP one, and remains unsolved.
+  Deliberately still no `delete_dashboard`/`delete_node`/`delete_track` tool --
+  not attempted, at the user's own instruction (an agent that creates the
+  wrong thing here flags it or leaves it for a human, it doesn't clean up
+  after itself). Found and fixed same day: `get_project_recipe` also used to
+  inline `native.mask`/`native.transplant`'s `mask_png`/`transplant_png`
+  base64 blobs (params of schema type `"mask"`/`"layer_mask"`) straight into
+  every node's `params`, which is exactly the megabyte-blowup
+  `list_node_types` already excludes baked defaults to avoid (see its
+  docstring) -- a project with many painted cells could push one `recipe` read
+  past several million characters. The route now reports only whether such a
+  field is set, never its bytes.
 
 ## Idea board (`backend/app/api/routes/boards.py`, `frontend/src/components/Board.tsx`)
 

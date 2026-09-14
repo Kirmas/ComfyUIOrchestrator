@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.asset_types import ASSET_NODE_TYPES, SingleAssetNode, resolve_asset_node
+from app.core.asset_types import ASSET_NODE_TYPES, RefAssetNode, SUBGRAPH_NODE_TYPE, SingleAssetNode, resolve_asset_node
 from app.core.node_types import resolve_effective_template, slot_count
 from app.api.routes.dashboards import enforce_pointer_deletion
 from app.core.grid_scope import scope_start_kind, set_scope_start_kind
@@ -725,12 +725,42 @@ async def list_node_jobs(node_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 async def upload_asset_to_node(node_id: uuid.UUID, file: UploadFile, db: AsyncSession = Depends(get_db)):
     """Manual fill for an asset-kind node (the grid's start cell) -- no
     workflow/backend involved. Can be called repeatedly to add more lines to
-    the same asset cell."""
+    the same asset cell.
+
+    A cell that's currently a pointer (`asset.refasset`, from "+ ref
+    elsewhere" or a subgraph copy's `AssetNodeBackend.copy_spec`) converts to
+    a plain owned `asset.single` here rather than silently gaining an Asset
+    row nothing would ever display: a refasset's face resolves through its
+    "explicit" input (core/asset_types.py's `RefAssetNode.face`), never
+    through `Asset.node_id` -- so without this, the uploaded picture would
+    just sit there orphaned while the cell kept showing the old referenced
+    image. That's exactly the stuck state a copied dashboard's source-image
+    cell hit in practice (2026-09-14): `copy_dashboard` deliberately makes
+    that cell a reference to the original picture (CLAUDE.md's subgraph-copy
+    section), and swapping in each chart's own original is the very next
+    step. API-only on purpose -- the UI's own upload control was never
+    offered on a refasset cell to begin with, so there's no matching frontend
+    change; this is for a caller (MCP, curl) that wants "point this cell at a
+    fresh image" to just work regardless of what the cell was before.
+
+    A subgraph pointer (`asset.subgraph`) is left alone: its face comes from
+    its own nested dashboard's result, not anything a direct upload here
+    could sensibly replace -- see set_dashboard_result, or upload inside the
+    sub-dashboard itself.
+    """
     node = await db.get(Node, node_id)
     if not node:
         raise HTTPException(404, "Node not found")
     if node.kind != NodeKind.asset:
         raise HTTPException(400, "Only asset-kind nodes accept manual uploads")
+    if node.node_type == SUBGRAPH_NODE_TYPE:
+        raise HTTPException(
+            409, "This cell opens a sub-dashboard -- upload inside it, or use set_dashboard_result, not a direct upload here."
+        )
+
+    if node.node_type == RefAssetNode.node_type:
+        node.node_type = SingleAssetNode.node_type
+        node.inputs = []
 
     data = await file.read()
     mime_type = file.content_type or "application/octet-stream"

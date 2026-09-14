@@ -11,7 +11,9 @@ instead of being mirrored (and drifting) here.
 """
 import asyncio
 import base64
+import mimetypes
 import uuid
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -198,13 +200,62 @@ async def set_node_params(node_id: str, params: dict) -> dict:
 
 
 @mcp_server.tool()
-async def upload_reference_image(node_id: str, image_base64: str, filename: str = "upload.png", mime_type: str = "image/png") -> dict:
+async def upload_reference_image(
+    node_id: str,
+    image_base64: str | None = None,
+    file_path: str | None = None,
+    filename: str = "upload.png",
+    mime_type: str = "image/png",
+) -> dict:
     """Upload image bytes as a brand-new asset owned by an asset-kind node.
 
-    To point a cell at an image that already exists elsewhere, use
-    link_reference_asset instead -- that stores a pointer rather than a copy.
+    For anything but a small/thumbnail-sized file, don't call this tool at
+    all -- multipart-POST it yourself, directly, to
+    `/api/nodes/{node_id}/upload-asset` (form field name `file`) on the exact
+    same host:port you reached this MCP server through, with the same bearer
+    token you're already using for this call. This app's REST API and its MCP
+    server are one process on one port (see CLAUDE.md's MCP section) -- there
+    is no separate host, port, or credential to go find first, on this
+    machine or any other one on the network. Bytes sent that way never pass
+    through this tool call, or any MCP call, at all -- so there's no context
+    cost regardless of file size or how many you're sending.
+    Example: `curl -X POST -H "Authorization: Bearer <token>" -F "file=@Chart_Gambeson.png" http://<same-host>/api/nodes/<node_id>/upload-asset`
+
+    This tool exists for the two cases where that isn't the better option:
+    - `image_base64` -- bytes that only exist in the caller's own context
+      (e.g. freshly generated pixels with nothing written to disk anywhere).
+      Inlining a real file this way costs the *caller's* own tokens: a 2 MB
+      PNG is ~2.9 MB of base64 text, easily hundreds of thousands of tokens
+      for one image -- fine for something small, a real mistake for a batch
+      of full-resolution source images.
+    - `file_path` -- only if whatever is calling this tool happens to share a
+      filesystem with this orchestrator process itself (e.g. both running on
+      its own box). This server reads that path directly; only the path
+      string crosses into the call. Not useful, and will just fail with a
+      "does not exist" error, if the file actually lives on a different
+      machine than this server -- use the direct POST above in that case, not
+      this parameter.
+
+    `filename`/`mime_type` only apply to the `image_base64` path; `file_path`
+    uses its own name and a sniffed content type instead.
+
+    To point a cell at an image that already exists elsewhere *in this app*,
+    use link_reference_asset instead -- that stores a pointer rather than a
+    copy either way.
     """
-    data = base64.b64decode(image_base64)
+    if (file_path is None) == (image_base64 is None):
+        raise RuntimeError("Pass exactly one of file_path or image_base64, not both and not neither.")
+
+    if file_path is not None:
+        path = Path(file_path)
+        if not path.is_file():
+            raise RuntimeError(f"file_path does not exist or is not a file: {file_path}")
+        data = path.read_bytes()
+        filename = path.name
+        mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    else:
+        data = base64.b64decode(image_base64)
+
     async with get_client() as client:
         r = await client.post(
             f"/api/nodes/{node_id}/upload-asset",
@@ -288,6 +339,137 @@ async def list_prompt_fields(capability_id: str) -> list[dict]:
     time; see CLAUDE.md's MCP section.)
     """
     return await _get(f"/api/capabilities/{capability_id}/text-fields")
+
+
+# ---------- sub-dashboards (smart pointers, see api/routes/dashboards.py) ----------
+# These were a pure gap, not a design choice: dashboards.py's REST routes have
+# existed since sub-dashboards shipped, but nothing in this file ever wrapped
+# them, so create_node(node_type="asset.subgraph") could produce a node whose
+# subgraph_dashboard_id stays permanently null -- a dead pointer with no nested
+# grid behind it, and no MCP path to attach one. Fixed 2026-09-14. There is
+# still deliberately no delete_dashboard/delete_node/delete_track tool here --
+# not attempted, at the user's own instruction.
+async def _resolve_or_create_pointer_cell(node_id: str | None, track_id: str | None, step_index: int | None) -> str:
+    """Shared by every tool below that needs a free asset cell to turn into a
+    pointer: reuse an existing one (`node_id`) or create a fresh empty one at
+    (`track_id`, `step_index`) -- the same call the UI's own "+ asset" button
+    makes (kind="asset", no node_type yet) -- so the common case doesn't need
+    a separate create_node round trip first."""
+    if node_id is not None:
+        return node_id
+    if track_id is None or step_index is None:
+        raise RuntimeError("Pass either node_id, or both track_id and step_index, to name the pointer cell.")
+    node = await _post("/api/nodes", {"track_id": track_id, "step_index": step_index, "kind": "asset"})
+    return node["id"]
+
+
+@mcp_server.tool()
+async def create_dashboard(
+    track_id: str | None = None,
+    step_index: int | None = None,
+    name: str = "",
+    node_id: str | None = None,
+) -> dict:
+    """Create a brand-new, empty sub-dashboard (its own nested grid) and the
+    pointer cell that opens it, in one call.
+
+    Common case: pass `track_id`/`step_index` for a fresh cell there -- no
+    need to call create_node first. Pass `node_id` instead to reuse an
+    *existing* free asset cell: it must not be a workflow's own materialized
+    output and must not already point at a dashboard. Don't upload a picture
+    into that cell beforehand either way -- a subgraph node's face is
+    Dashboard.result_asset_id (see set_dashboard_result), not whatever asset
+    the cell held before it became a pointer; anything uploaded there first
+    would just go orphaned.
+
+    `name` is the only place in this app a container gets a name at all --
+    individual nodes and tracks have none. Pass the chart/picture name here,
+    e.g. "Chart_Gambeson". The response's `id` is the new dashboard: pass it as
+    `dashboard_id` to create_track / create_node / get_project_recipe to build
+    out its contents (an asset cell for the source image, a workflow cell next
+    to it, etc.).
+    """
+    resolved_node_id = await _resolve_or_create_pointer_cell(node_id, track_id, step_index)
+    return await _post("/api/dashboards", {"node_id": resolved_node_id, "name": name})
+
+
+@mcp_server.tool()
+async def get_dashboard(dashboard_id: str) -> dict:
+    """Read one sub-dashboard: its name, live node/pointer counts, owner node,
+    and result_asset_id (the picture every pointer into it shows)."""
+    return await _get(f"/api/dashboards/{dashboard_id}")
+
+
+@mcp_server.tool()
+async def rename_dashboard(dashboard_id: str, name: str | None = None, asset_only_view: bool | None = None) -> dict:
+    """Rename a sub-dashboard and/or toggle its asset-only view. Omit whichever
+    of the two you're not changing -- only the ones passed are touched."""
+    payload = {k: v for k, v in {"name": name, "asset_only_view": asset_only_view}.items() if v is not None}
+    return await _patch(f"/api/dashboards/{dashboard_id}", payload)
+
+
+@mcp_server.tool()
+async def copy_dashboard(
+    dashboard_id: str,
+    track_id: str | None = None,
+    step_index: int | None = None,
+    name: str = "",
+    node_id: str | None = None,
+) -> dict:
+    """Copy an existing sub-dashboard's structure and workflow settings into a
+    brand-new one, and turn a pointer cell (fresh at track_id/step_index, or
+    an existing free one via node_id -- same rules as create_dashboard) into
+    that copy's owner.
+
+    Useful for a batch of near-identical charts: build one dashboard fully
+    (source image, upscale workflow with the right params, result cell), then
+    copy_dashboard it for each of the others instead of re-entering the same
+    template/params by hand. What actually copies (core/subgraph_copy.py):
+    structure and a workflow node's own settings (template, params, slot refs,
+    variants, backend, use_api) -- yes, including the numbers, so identical
+    source dimensions mean nothing to re-tune per copy. What does NOT copy:
+    any workflow's own materialized output (left as a hole to regenerate), and
+    the source *picture* itself -- the copy's asset cell comes across as a
+    reference to the same original file, not a new upload, so for a batch
+    where every chart is a different picture you still need to point that
+    cell at (or upload) the correct image for the new one afterward.
+    """
+    resolved_node_id = await _resolve_or_create_pointer_cell(node_id, track_id, step_index)
+    return await _post(f"/api/dashboards/{dashboard_id}/copy", {"node_id": resolved_node_id, "name": name})
+
+
+@mcp_server.tool()
+async def add_pointer(
+    dashboard_id: str,
+    track_id: str | None = None,
+    step_index: int | None = None,
+    node_id: str | None = None,
+) -> dict:
+    """Point an additional free asset cell (fresh at track_id/step_index, or
+    an existing free one via node_id) at an existing sub-dashboard -- a second
+    way in to the same nested grid, not a copy of it. Unlike the dashboard's
+    owner (the one create_dashboard/copy_dashboard makes), this pointer is a
+    non-tree edge and is always safe to leave in place or discard later
+    without affecting the dashboard's contents."""
+    resolved_node_id = await _resolve_or_create_pointer_cell(node_id, track_id, step_index)
+    return await _post(f"/api/dashboards/{dashboard_id}/pointers", {"node_id": resolved_node_id})
+
+
+@mcp_server.tool()
+async def set_dashboard_result(dashboard_id: str, asset_id: str | None = None) -> dict:
+    """Choose which asset generated inside this sub-dashboard is its result --
+    the face every pointer into it (including the one sitting in the parent
+    grid) shows from then on. The asset must actually live inside this
+    dashboard's own scope. Pass asset_id=None to clear it back to blank."""
+    return await _post(f"/api/dashboards/{dashboard_id}/result", {"asset_id": asset_id})
+
+
+@mcp_server.tool()
+async def transfer_ownership(dashboard_id: str, node_id: str) -> dict:
+    """Hand the main-pointer role to another existing pointer at the same
+    dashboard. Rarely needed by an agent -- mainly here for parity with the UI
+    -- since create_dashboard already makes its own pointer the owner."""
+    return await _post(f"/api/dashboards/{dashboard_id}/transfer-ownership", {"node_id": node_id})
 
 
 # ---------- running ----------

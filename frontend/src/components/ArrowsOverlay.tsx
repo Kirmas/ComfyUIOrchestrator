@@ -17,16 +17,39 @@ interface Props {
   deps: unknown[];
 }
 
+function samePaths(a: { d: string; kind: Edge["kind"] }[], b: { d: string; kind: Edge["kind"] }[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((p, i) => p.d === b[i].d && p.kind === b[i].kind);
+}
+
 export function ArrowsOverlay({ edges, cellRefs, containerRef, deps }: Props) {
   const [paths, setPaths] = useState<{ d: string; kind: Edge["kind"] }[]>([]);
   const [size, setSize] = useState({ width: 0, height: 0 });
 
   useEffect(() => {
+    // Every 500ms tick used to call setSize/setPaths unconditionally --
+    // forcing a fresh layout read (getBoundingClientRect/scrollWidth/
+    // scrollHeight) and a re-render even when nothing had actually moved.
+    // Measured hot during an HTML5 drag (2026-09-14 incident, profiled via a
+    // sourcemapped production build): dragging fires native pointerover/
+    // style-recalc work continuously, and this component's own unconditional
+    // reflow-on-every-tick piled straight on top of it. Two independent
+    // guards now: skip the whole pass when there's nothing to draw (no edges
+    // means nothing here depends on the container's size either), and only
+    // commit state when a value actually differs from what's already shown.
+    if (edges.length === 0) {
+      setSize((prev) => (prev.width === 0 && prev.height === 0 ? prev : { width: 0, height: 0 }));
+      setPaths((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
+
     const compute = () => {
       const container = containerRef.current;
       if (!container) return;
       const containerRect = container.getBoundingClientRect();
-      setSize({ width: container.scrollWidth, height: container.scrollHeight });
+      const nextWidth = container.scrollWidth;
+      const nextHeight = container.scrollHeight;
+      setSize((prev) => (prev.width === nextWidth && prev.height === nextHeight ? prev : { width: nextWidth, height: nextHeight }));
 
       const next: { d: string; kind: Edge["kind"] }[] = [];
       for (const edge of edges) {
@@ -44,7 +67,7 @@ export function ArrowsOverlay({ edges, cellRefs, containerRef, deps }: Props) {
         const midX = (x1 + x2) / 2;
         next.push({ d: `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`, kind: edge.kind });
       }
-      setPaths(next);
+      setPaths((prev) => (samePaths(prev, next) ? prev : next));
     };
 
     compute();
