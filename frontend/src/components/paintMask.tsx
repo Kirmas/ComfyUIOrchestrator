@@ -33,6 +33,18 @@ function emptyMaskImageData(ctx: CanvasRenderingContext2D, width: number, height
  * transparent where unmasked, translucent red where masked. Alpha (not RGB)
  * is what carries the "is this painted" signal, so painting can use
  * "destination-out" to erase regardless of stroke color. */
+// Alpha a *reloaded* (previously-saved) stroke is redrawn at -- deliberately
+// translucent, not the full 255 a fresh stroke paints at (see strokeTo),
+// purely so MaskPreview's overlay reads as an annotation on top of the photo
+// rather than a solid block once you reopen it. Exported, because a consumer
+// that reads this canvas's alpha *quantitatively* rather than as a plain
+// masked/unmasked flag -- TransplantPreview's destination-out reveal -- has
+// to correct for it, or a reloaded mask only ever punches a
+// LOADED_STROKE_ALPHA/255 hole instead of a full one (2026-09-14: exactly
+// this made a reopened transplant editor show noticeably less "revealed"
+// than the actual baked result, for the same underlying mask).
+export const LOADED_STROKE_ALPHA = 160;
+
 function decodeMaskPngToImageData(maskPng: string, width: number, height: number): Promise<ImageData> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -50,7 +62,7 @@ function decodeMaskPngToImageData(maskPng: string, width: number, height: number
         out.data[i] = 255;
         out.data[i + 1] = 60;
         out.data[i + 2] = 60;
-        out.data[i + 3] = masked ? 160 : 0;
+        out.data[i + 3] = masked ? LOADED_STROKE_ALPHA : 0;
       }
       resolve(out);
     };

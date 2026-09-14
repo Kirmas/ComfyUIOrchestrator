@@ -42,6 +42,20 @@ from app.db.models import (
 
 logger = logging.getLogger(__name__)
 
+# job id -> the asyncio.Task actually running that job's submit/wait/result
+# cycle inside run_variant_job. cancel_job() cancels this directly instead of
+# only marking the DB row and hoping the backend's own /interrupt call (which
+# a wedged or merely slow-to-react backend can simply not honor) eventually
+# makes status() polling notice. Without this, a cancelled-but-still-running
+# job kept occupying one of job_queue's worker_concurrency slots for up to
+# stall_timeout_seconds (30 min) -- and with several such zombies (e.g. every
+# job cancelled while still queued-but-not-started on a slow backend, which
+# status() can't ever distinguish from "not picked up yet", see its
+# docstring) the whole queue stopped dispatching anything at all (2026-09-14
+# incident). Populated right before the network/poll work starts, popped in
+# the same `finally` that already releases the dispatch_stats sample.
+_running_job_tasks: dict[str, asyncio.Task] = {}
+
 # ComfyUI seed widgets -- including custom ones like ComfyUI-Easy-Use's "easy
 # seed" node -- reject values above 2**50 (1125899906842624): seen in
 # practice as "Value ... bigger than max of 1125899906842624: seed" prompt
@@ -817,7 +831,7 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
             {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "running", "progress": 0},
         )
 
-        try:
+        async def _run() -> None:
             resolved_inputs = await resolve_node_inputs(db, node, effective.param_schema, effective.defaults)
             external_job_id = await wait_with_timeout(
                 choice.instance.submit(choice.capability.config if choice.capability else {}, resolved_inputs),
@@ -863,6 +877,55 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                 db.add(ApiUsageLog(backend_id=choice.backend.id, node_id=node.id))
                 await db.commit()
 
+        # Run as its own Task (registered in _running_job_tasks) rather than
+        # awaited inline, so cancel_job() can cancel *this specific job's*
+        # work without touching the worker-loop task that's running it --
+        # cancelling that instead would propagate into _worker_loop's own
+        # `except asyncio.CancelledError: raise` and permanently cost one of
+        # worker_concurrency's slots per cancellation.
+        exec_task = asyncio.create_task(_run())
+        _running_job_tasks[job_id] = exec_task
+        try:
+            await exec_task
+        except asyncio.CancelledError:
+            # Two different things land here identically: cancel_job()
+            # cancelling exec_task directly (the case this exists for), and
+            # job_queue.stop() cancelling the *worker-loop* task while it's
+            # sitting right here awaiting exec_task -- asyncio propagates a
+            # task's own cancellation into whatever inner task/future it's
+            # currently awaiting, so both raise the same CancelledError at
+            # this same line (verified empirically, not documented behavior
+            # to take on faith). They must be told apart: a real cancel_job()
+            # call already committed job.status = cancelled, from its own
+            # session, before ever calling task.cancel() -- so re-checking
+            # that from a fresh session (this session's own `job` is stale
+            # from before the cancellation and must not be trusted here) is
+            # an unambiguous way to know which one this was.
+            async with async_session_maker() as check_db:
+                fresh_job = await check_db.get(Job, job_id)
+            if fresh_job is not None and fresh_job.status == JobStatusEnum.cancelled:
+                # cancel_job() already committed job.status = cancelled and
+                # already called _finalize_node_if_done, both from its own
+                # session -- nothing left to record here. Deliberately not
+                # re-raised (unlike the branch below): re-raising would
+                # propagate into _worker_loop's own
+                # `except asyncio.CancelledError: raise` and kill that loop
+                # over an ordinary per-job cancel. Also deliberately skips
+                # this function's own _finalize_node_if_done call further
+                # down: this session's `job`/`node` were loaded before the
+                # cancellation, so a query run through this same session's
+                # identity map would still see this job as "running" and
+                # wrongly conclude the node isn't finalized yet.
+                logger.info("job %s cancelled mid-execution", job_id)
+                return
+            # Not cancel_job() -- most likely job_queue.stop() shutting the
+            # worker loop down for a restart/deploy. Must propagate so
+            # _worker_loop's own `except asyncio.CancelledError: raise`
+            # actually stops it; swallowing here would leave that loop
+            # spinning forever instead of shutting down, and
+            # InProcessQueue.stop()'s own `gather` would then hang waiting
+            # for a worker that was never going to finish.
+            raise
         except Exception as exc:
             logger.exception("job %s failed", job_id)
             job.retries += 1
@@ -893,6 +956,12 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                 {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "error", "error": str(exc)},
             )
         finally:
+            # Always pop, on every exit including cancellation -- otherwise a
+            # completed/cancelled job_id would keep pointing at a dead Task
+            # object forever, and a later job that happens to land on the
+            # same job_id (shouldn't happen, but this is cheap insurance)
+            # would find a stale, already-finished entry.
+            _running_job_tasks.pop(job_id, None)
             # Closes the timing sample the next variant of this same batch gets
             # placed against (core/dispatch_stats.py). In a finally, and on
             # every exit including the retry `return` above, so a backend can
@@ -1144,6 +1213,22 @@ async def cancel_job(job_id: str) -> None:
         node = await db.get(Node, job.node_id)
         track = await db.get(Track, node.track_id)
 
+        job.status = JobStatusEnum.cancelled
+        job.finished_at = datetime.now(UTC)
+        await db.commit()
+        await ws_manager.broadcast(str(track.project_id), {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "cancelled"})
+
+        # Stop run_variant_job's own in-flight Task directly, rather than only
+        # hoping the /interrupt call below (best-effort, and simply ignored by
+        # a wedged or merely slow-to-react backend) eventually makes status()
+        # polling notice -- see _running_job_tasks' docstring for the incident
+        # this fixes. Done before that possibly-slow HTTP call so the
+        # worker_concurrency slot this job was holding frees up immediately
+        # rather than waiting on it too.
+        task = _running_job_tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
+
         if job.backend_id and job.external_job_id:
             backend = await db.get(Backend, job.backend_id)
             if backend and backend.base_url:
@@ -1152,8 +1237,4 @@ async def cancel_job(job_id: str) -> None:
                 except Exception:
                     logger.warning("cancel failed for job %s on backend %s", job_id, backend.id, exc_info=True)
 
-        job.status = JobStatusEnum.cancelled
-        job.finished_at = datetime.now(UTC)
-        await db.commit()
-        await ws_manager.broadcast(str(track.project_id), {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "cancelled"})
         await _finalize_node_if_done(db, node.id, str(track.project_id))
