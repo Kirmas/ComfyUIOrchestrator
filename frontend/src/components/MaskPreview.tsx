@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { MaskZoomViewport, PaintMaskToolbar, useMaskZoom, usePaintMask } from "./paintMask";
+import { BrushCursorDot, MaskZoomViewport, PaintMaskToolbar, useBrushCursor, useMaskZoom, usePaintMask } from "./paintMask";
 
 /** Freehand binary mask painter: brush over the source image, committed as a
  * bilevel PNG in node.params (see native.mask / MaskBackend). The painting
@@ -20,11 +20,15 @@ export function MaskPreview({
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
   const paint = usePaintMask({ maskPng, natural, resetKey: imageUrl, onCommit });
   const zoom = useMaskZoom();
+  // Same canvas serves as both the paint storage and the visible/interactive
+  // one here (unlike TransplantPreview, which paints onto a hidden one),
+  // so it's passed for both of useBrushCursor's ref params.
+  const cursor = useBrushCursor(paint.brushRadius, paint.canvasRef, zoom.containerRef);
 
   return (
     <div onClick={(e) => e.stopPropagation()}>
       <PaintMaskToolbar paint={paint} zoom={zoom} />
-      <MaskZoomViewport natural={natural} zoom={zoom}>
+      <MaskZoomViewport natural={natural} zoom={zoom} overlay={<BrushCursorDot cursor={cursor} />}>
         <img
           src={imageUrl}
           alt="mask source"
@@ -35,7 +39,14 @@ export function MaskPreview({
         <canvas
           ref={paint.canvasRef}
           style={{ position: "absolute", inset: 0, width: "100%", height: "100%", cursor: "crosshair", touchAction: "none" }}
-          {...paint.handlers}
+          onPointerDown={paint.handlers.onPointerDown}
+          onPointerMove={(e) => {
+            paint.handlers.onPointerMove(e);
+            cursor.handlers.onPointerMove(e);
+          }}
+          onPointerUp={paint.handlers.onPointerUp}
+          onPointerCancel={paint.handlers.onPointerCancel}
+          onPointerLeave={cursor.handlers.onPointerLeave}
         />
       </MaskZoomViewport>
     </div>

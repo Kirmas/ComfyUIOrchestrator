@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useT } from "../i18n";
-import { MaskZoomViewport, PaintMaskToolbar, useMaskZoom, usePaintMask } from "./paintMask";
+import { BrushCursorDot, MaskZoomViewport, PaintMaskToolbar, useBrushCursor, useMaskZoom, usePaintMask } from "./paintMask";
 
 /** The editor for native.transplant: two DOM layers, not two images.
  *
@@ -143,6 +143,10 @@ export function TransplantPreview({
     onChange: redraw,
   });
   const zoom = useMaskZoom();
+  // brushRadius lives in paint.canvasRef's (the hidden storage canvas's) own
+  // pixel space, not viewRef's (the visible one, sized from the target's
+  // native resolution -- see redraw()) -- see useBrushCursor's docstring.
+  const cursor = useBrushCursor(paint.brushRadius, paint.canvasRef, zoom.containerRef);
 
   // The mask itself only changes through the hook (which calls redraw), but
   // the *rendering* of it also depends on these two.
@@ -162,7 +166,7 @@ export function TransplantPreview({
           />
         </label>
       </PaintMaskToolbar>
-      <MaskZoomViewport natural={natural} zoom={zoom}>
+      <MaskZoomViewport natural={natural} zoom={zoom} overlay={<BrushCursorDot cursor={cursor} />}>
         {/* Bottom layer: the mode-appropriate compare reference. Plain <img>,
          * no compositing of its own -- see the component docstring. */}
         <img
@@ -195,7 +199,14 @@ export function TransplantPreview({
               cursor: "crosshair",
               touchAction: "none",
             }}
-            {...paint.handlers}
+            onPointerDown={paint.handlers.onPointerDown}
+            onPointerMove={(e) => {
+              paint.handlers.onPointerMove(e);
+              cursor.handlers.onPointerMove(e);
+            }}
+            onPointerUp={paint.handlers.onPointerUp}
+            onPointerCancel={paint.handlers.onPointerCancel}
+            onPointerLeave={cursor.handlers.onPointerLeave}
           />
         </div>
       </MaskZoomViewport>

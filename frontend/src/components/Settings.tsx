@@ -572,7 +572,21 @@ function BackendsSection({ items, reload }: { items: Backend[]; reload: () => vo
                     {b.has_api_key ? t("backends.keySet") : <span className="error-text">{t("backends.noKey")}</span>}
                   </>
                 ) : (
-                  b.base_url
+                  // Editable in place (same onBlur-save pattern as daily_limit
+                  // below) so a machine's IP/hostname changing -- a laptop
+                  // switching wifi/ethernet, say -- doesn't mean deleting and
+                  // re-adding the whole backend row (and every Capability
+                  // pointed at it).
+                  <input
+                    defaultValue={b.base_url ?? ""}
+                    style={{ width: 200 }}
+                    onBlur={async (e) => {
+                      const v = e.target.value.trim();
+                      if (v === (b.base_url ?? "")) return;
+                      await backendsApi.update(b.id, { base_url: v });
+                      reload();
+                    }}
+                  />
                 )}
               </td>
               <td>

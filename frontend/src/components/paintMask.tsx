@@ -293,6 +293,108 @@ export function usePaintMask({
   };
 }
 
+export interface BrushCursor {
+  /** Pass to MaskZoomViewport's `overlay` prop -- must render *outside* its
+   * pan/zoom transform (see useBrushCursor's docstring for why), which
+   * MaskZoomViewport's own `children` slot does not do. */
+  cursorRef: React.RefObject<HTMLDivElement>;
+  /** Merge into the element carrying PaintMask's own handlers (same
+   * onPointerMove target) -- tracked separately because this needs to run on
+   * *every* hover, not just while a stroke is down. */
+  handlers: {
+    onPointerMove: (e: React.PointerEvent) => void;
+    onPointerLeave: (e: React.PointerEvent) => void;
+  };
+}
+
+/** A circle that tracks the cursor at the brush's actual on-screen size, so
+ * "how much will this stroke touch" doesn't have to be guessed -- especially
+ * once a stroke reaches into an already-feathered/holed region where the
+ * effect isn't obvious until after the fact.
+ *
+ * Positioned and sized by mutating the DOM node directly (a ref, not React
+ * state) -- pointermove fires far more often than a component tree wants to
+ * re-render for, and a state-driven circle would visibly lag the cursor.
+ *
+ * Two ref parameters, deliberately not just read from the pointer event's
+ * own currentTarget/rect (2026-09-15: the first version did exactly that and
+ * broke both size and position):
+ *
+ * - `maskCanvasRef` is the canvas brushRadius's own pixel space actually
+ *   belongs to (the strokes/storage one, capped at MASK_MAX_DIM -- see
+ *   usePaintMask). In MaskPreview that's the same element pointer events
+ *   fire on, but TransplantPreview paints onto a hidden storage canvas while
+ *   the *visible*, differently-sized one (native target resolution, see
+ *   TransplantPreview's redraw()) is what actually receives the pointer --
+ *   sizing off the visible canvas's own width there would divide by the
+ *   wrong resolution entirely.
+ * - `containerRef` is MaskZoomViewport's own outer, untransformed element
+ *   (`useMaskZoom()`'s `containerRef`). The circle has to render as a child
+ *   of *that*, not of the inner div MaskZoomViewport actually scales/pans
+ *   (which is where a plain `children` prop would put it) -- a `left/top`
+ *   computed in real screen pixels gets scaled *again* by that inner div's
+ *   own `transform: scale(zoom)` if the circle sits inside it, which is
+ *   exactly what sent it drifting away from the cursor at any zoom other
+ *   than 100%. Sizing is unaffected by this split: a ratio of two rects
+ *   (`canvasRect.width / maskCanvas.width`) is scale-invariant regardless of
+ *   which coordinate space the *result* is later placed in. */
+export function useBrushCursor(
+  brushRadius: number,
+  maskCanvasRef: React.RefObject<HTMLCanvasElement>,
+  containerRef: React.RefObject<HTMLDivElement>
+): BrushCursor {
+  const cursorRef = useRef<HTMLDivElement>(null);
+  // A ref, not read from a closure -- onPointerMove is passed straight
+  // through as a DOM handler and shouldn't need re-binding on every brush
+  // size change just to see the latest value.
+  const radiusRef = useRef(brushRadius);
+  radiusRef.current = brushRadius;
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    const el = cursorRef.current;
+    const visibleCanvas = e.currentTarget as HTMLCanvasElement;
+    const maskCanvas = maskCanvasRef.current;
+    const container = containerRef.current;
+    if (!el || !maskCanvas?.width || !container) return;
+    const canvasRect = visibleCanvas.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const size = radiusRef.current * 2 * (canvasRect.width / maskCanvas.width);
+    el.style.display = "block";
+    el.style.left = `${e.clientX - containerRect.left}px`;
+    el.style.top = `${e.clientY - containerRect.top}px`;
+    el.style.width = `${size}px`;
+    el.style.height = `${size}px`;
+  };
+  const onPointerLeave = () => {
+    const el = cursorRef.current;
+    if (el) el.style.display = "none";
+  };
+
+  return { cursorRef, handlers: { onPointerMove, onPointerLeave } };
+}
+
+/** The circle itself -- pass to MaskZoomViewport's `overlay` prop (not
+ * `children`, see useBrushCursor). Hidden until the first pointermove sets a
+ * position, so it never flashes at (0,0). */
+export function BrushCursorDot({ cursor }: { cursor: BrushCursor }) {
+  return (
+    <div
+      ref={cursor.cursorRef}
+      style={{
+        position: "absolute",
+        left: 0,
+        top: 0,
+        display: "none",
+        borderRadius: "50%",
+        border: "1.5px solid rgba(255,255,255,0.9)",
+        boxShadow: "0 0 0 1px rgba(0,0,0,0.6)",
+        transform: "translate(-50%, -50%)",
+        pointerEvents: "none",
+      }}
+    />
+  );
+}
+
 export type MaskZoom = ReturnType<typeof useMaskZoom>;
 
 /** Zoom + pan for a paint-mask viewport, built on the same usePinchPan gesture
@@ -317,10 +419,16 @@ export function MaskZoomViewport({
   natural,
   zoom,
   children,
+  overlay,
 }: {
   natural: { w: number; h: number } | null;
   zoom: MaskZoom;
   children: React.ReactNode;
+  /** Rendered as a sibling of the pan/zoom-transformed inner div, inside the
+   * same outer container `zoom.containerRef` points at -- for content that
+   * must track the viewport in real screen pixels rather than being panned
+   * and scaled along with `children` (see useBrushCursor's docstring). */
+  overlay?: React.ReactNode;
 }) {
   return (
     <div
@@ -346,6 +454,7 @@ export function MaskZoomViewport({
       >
         {children}
       </div>
+      {overlay}
     </div>
   );
 }
