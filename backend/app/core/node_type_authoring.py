@@ -89,6 +89,13 @@ def build_param_schema(analysis: WorkflowAnalysis, param_mapping: dict) -> dict:
     same as before this function accepted image entries at all -- these are
     what decide a node's row span, so the count has to match the workflow
     exactly regardless of which images were named explicitly.
+
+    Either kind of image field also carries expects_kind when
+    analyze_workflow's per-node likely_kind flagged it (currently only
+    "mask", for a LoadImage feeding an ImageToMask) -- this used to be a
+    manual param_schema edit after creation; every node type built through
+    this function (MCP's create_node_type/add_capability, and POST
+    /api/node-types generally) now gets it automatically.
     """
     by_target = {(f.node_id, f.input_key): f for f in analysis.detected_fields}
     image_nodes_by_id = {n.node_id: n for n in analysis.input_image_nodes}
@@ -100,7 +107,10 @@ def build_param_schema(analysis: WorkflowAnalysis, param_mapping: dict) -> dict:
         if image_node is not None:
             mapped_image_node_ids.add(node_id)
             label = target.get("label") or image_node.title or field_name.replace("_", " ").title()
-            fields.append({"name": field_name, "type": "image", "label": label, "required": True})
+            image_field = {"name": field_name, "type": "image", "label": label, "required": True}
+            if image_node.likely_kind:
+                image_field["expects_kind"] = image_node.likely_kind
+            fields.append(image_field)
             continue
         detected = by_target.get((node_id, input_key))
         field_type = _FIELD_TYPES.get(detected.type if detected else "text", "text")
@@ -124,7 +134,10 @@ def build_param_schema(analysis: WorkflowAnalysis, param_mapping: dict) -> dict:
         while name in used_names:
             index += 1
             name = f"image_{index}"
-        fields.append({"name": name, "type": "image", "label": node.title or f"Image {index}", "required": True})
+        auto_field = {"name": name, "type": "image", "label": node.title or f"Image {index}", "required": True}
+        if node.likely_kind:
+            auto_field["expects_kind"] = node.likely_kind
+        fields.append(auto_field)
         used_names.add(name)
     return {"fields": fields}
 

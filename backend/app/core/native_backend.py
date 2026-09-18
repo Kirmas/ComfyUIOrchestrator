@@ -367,72 +367,84 @@ def _label_components(fg: np.ndarray) -> list[np.ndarray]:
     return components
 
 
-# Below this, "scale" collapses every foreground pixel of a component onto
-# its own centroid rather than erroring on a division by zero -- shrinking a
-# region past ~0 is still a well-defined (if degenerate) request. A
-# scale_percent <= -100 (factor <= 0) clamps here too, rather than going
-# negative: a negative factor would mirror the region through its own
-# centroid, which "shrink by more than 100%" was never asking for.
-_MIN_SCALE_FACTOR = 0.01
-
-
 def _scale_component(component: np.ndarray, factor: float) -> np.ndarray:
-    """Radially scales one connected component about its own centroid by
-    `factor` (1.0 = unchanged, >1 grows, <1 shrinks) -- a true geometric
-    scale, not a fixed-width boundary dilation, so a component far from its
-    own center moves (and grows) more than one close to it.
+    """Grows (factor>1) or shrinks (factor<1) one connected component by
+    dilating/eroding it locally from its own boundary -- not the original
+    (2026-08-22) design, which scaled every pixel radially away from the
+    component's mass centroid in proportion to that pixel's own distance
+    from it. For a convex, roughly centroid-symmetric blob the two are
+    indistinguishable. For a concave/L ("Г") shape they aren't: the
+    centroid sits off in the shape's corner, so a point far from it (the
+    tip of a Г's stick) gets dragged a large absolute distance along the
+    centroid->tip ray -- it visibly *moves* instead of the stroke just
+    thickening in place (2026-09-18 bug report). Dilation/erosion has no
+    such displacement: every boundary pixel grows outward by exactly
+    `radius`, everywhere, regardless of the shape's convexity.
 
-    Windowed to the component's own (post-scale) bounding box, the same
+    `radius` is derived from the component's own *equivalent-area* radius
+    (sqrt(area / pi)) so scale_percent keeps the old design's proportional
+    intent -- percent=100 still doubles a circular blob's radius either
+    way -- rather than a fixed pixel amount that would grow a large and a
+    tiny blob by the same absolute width. It's a same-order-of-magnitude
+    stand-in for non-circular shapes, not an exact one.
+
+    Windowed to the component's own bbox padded by `radius`, same
     windowing discipline `transplant()` uses above -- a paint-mask edit
     shouldn't cost a full-frame array op when only a small region actually
-    changes (memory/memory_tight_box_array_scale.md). Rendered via an inverse
-    warp (for each *output* pixel, nearest-neighbor-sample the *source* pixel
-    that scales onto it) rather than a forward warp, which would leave holes
-    once factor > 1 spreads source pixels further apart than one unit.
-    Nearest-neighbor, not bilinear, to keep the result bilevel -- same
-    reasoning as every other mask resize in this module.
+    changes (memory/memory_tight_box_array_scale.md). Implemented via
+    PIL's Max/MinFilter (a square, not circular, structuring element) since
+    this project has no scipy/opencv for a true Euclidean distance
+    transform -- same accepted-approximation spirit as every other mask
+    resize in this module already being nearest-neighbor, not bilinear.
     """
-    factor = max(factor, _MIN_SCALE_FACTOR)
-    h, w = component.shape
     ys, xs = np.nonzero(component)
-    cy, cx = float(ys.mean()), float(xs.mean())
+    if ys.size == 0:
+        return component
+    area = int(ys.size)
+    equiv_radius = math.sqrt(area / math.pi)
+    delta = equiv_radius * (factor - 1.0)
+    radius = int(round(abs(delta)))
+    if radius == 0:
+        return component.copy()
 
-    corners_y = np.array([ys.min(), ys.min(), ys.max(), ys.max()], dtype=np.float64)
-    corners_x = np.array([xs.min(), xs.max(), xs.min(), xs.max()], dtype=np.float64)
-    scaled_y = cy + (corners_y - cy) * factor
-    scaled_x = cx + (corners_x - cx) * factor
-    pad = 1  # rounding margin for the nearest-neighbor sampling below
-    top = max(0, int(math.floor(scaled_y.min())) - pad)
-    bottom = min(h, int(math.ceil(scaled_y.max())) + pad + 1)
-    left = max(0, int(math.floor(scaled_x.min())) - pad)
-    right = min(w, int(math.ceil(scaled_x.max())) + pad + 1)
+    h, w = component.shape
+    top = max(0, int(ys.min()) - radius)
+    bottom = min(h, int(ys.max()) + radius + 1)
+    left = max(0, int(xs.min()) - radius)
+    right = min(w, int(xs.max()) + radius + 1)
+    window = component[top:bottom, left:right]
+
+    img = Image.fromarray(window.astype(np.uint8) * 255, mode="L")
+    kernel = ImageFilter.MaxFilter(2 * radius + 1) if delta > 0 else ImageFilter.MinFilter(2 * radius + 1)
+    grown = np.asarray(img.filter(kernel)) > 127
+
     out = np.zeros_like(component)
-    if bottom <= top or right <= left:
-        return out
-
-    out_y, out_x = np.mgrid[top:bottom, left:right].astype(np.float64)
-    src_y = np.round(cy + (out_y - cy) / factor).astype(np.int64)
-    src_x = np.round(cx + (out_x - cx) / factor).astype(np.int64)
-    in_bounds = (src_y >= 0) & (src_y < h) & (src_x >= 0) & (src_x < w)
-    sampled = np.zeros(src_y.shape, dtype=bool)
-    sampled[in_bounds] = component[src_y[in_bounds], src_x[in_bounds]]
-    out[top:bottom, left:right] = sampled
+    out[top:bottom, left:right] = grown
     return out
 
 
 class ScaleMaskBackend(NativeBackend):
-    """Grows (or, for a negative percent, shrinks) a mask's painted region --
-    but as a true geometric scale about each closed region's own center, not
-    a fixed-width boundary dilation: every one of a mask's connected
-    components (8-connectivity) is found separately via `_label_components`
-    and scaled about its *own* centroid via `_scale_component`, independently
-    of every other component in the same mask. A mask with two disjoint
-    blobs therefore grows each blob from its own middle, not from one shared
-    center -- this was specifically requested over a uniform-dilation
-    "grow_mask" design (2026-08-22).
+    """Grows (or, for a negative percent, shrinks) a mask's painted region,
+    each connected component (8-connectivity, via `_label_components`)
+    independently of every other one in the same mask -- so a mask with two
+    disjoint blobs grows each blob on its own, not from one shared point.
 
-    scale_percent=25 means factor 1.25 (25% larger, linearly, about each
-    component's centroid); -25 means factor 0.75. Same single-channel "L",
+    Each component grows via local dilation/erosion from its own boundary
+    (`_scale_component`), by a radius derived from that component's own
+    size so scale_percent keeps a proportional "N% bigger" meaning rather
+    than a fixed pixel amount. This replaced (2026-09-18) an earlier design
+    that scaled every pixel radially away from the component's mass
+    centroid -- deliberately chosen (2026-08-22) over a uniform-dilation
+    "grow_mask" design at the time, but that centroid scale displaces any
+    concave/L-shaped ("Г") region instead of just thickening it in place
+    (off-centroid mass pulls the centroid away from the shape's far end,
+    which then gets dragged toward/away from it) -- see `_scale_component`'s
+    own docstring for the full story. Local dilation has no such
+    displacement and still satisfies the original per-component-independent
+    requirement.
+
+    scale_percent=25 means factor 1.25 (each component's own equivalent-area
+    radius grows 25%); -25 means factor 0.75. Same single-channel "L",
     lit/white=masked-region convention and kind="mask" output as MaskBackend/
     MergeMaskBackend, so the result is interchangeable with any other mask
     asset everywhere downstream.

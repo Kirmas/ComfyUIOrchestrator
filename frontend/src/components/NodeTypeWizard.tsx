@@ -351,12 +351,13 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
       if (!node) throw new Error(`Input slot "${slot.label}" has no assigned node.`);
       if (!node.title) throw new Error(`The LoadImage node assigned to "${slot.label}" has no title in ComfyUI -- rename it and re-export.`);
       const fieldName = `image_${i + 1}`;
+      const expectsKind = node.likely_kind ? { expects_kind: node.likely_kind as ParamField["expects_kind"] } : {};
       if (slot.fixed) {
         if (!slot.fixedImage) throw new Error(`"${slot.label}" is marked fixed but has no uploaded image.`);
-        paramFields.push({ name: fieldName, type: "image", label: slot.label, fixed: true });
+        paramFields.push({ name: fieldName, type: "image", label: slot.label, fixed: true, ...expectsKind });
         defaults[fieldName] = slot.fixedImage.dataBase64;
       } else {
-        paramFields.push({ name: fieldName, type: "image", label: slot.label, required: true });
+        paramFields.push({ name: fieldName, type: "image", label: slot.label, required: true, ...expectsKind });
       }
       paramMapping[fieldName] = { node_id: node.node_id, title: node.title, input_key: "image" };
     });
