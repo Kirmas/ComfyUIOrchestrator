@@ -396,6 +396,8 @@ export const en = {
   "cell.useApiTitle": "Explicit opt-in: even 'Auto'/'API only' backend modes never make a paid call unless this is checked.",
   "cell.moreParams": "⚙ for more parameters",
   "cell.jobTook": "took {duration}",
+  "cell.jobStep": "step {step}/{max}",
+  "cell.jobEta": "~{duration} left",
   "cell.clickToPlaceCopy": "click an empty workflow cell to place the copy…",
   "cell.expand": "⛶ expand",
   "cell.expandTitle": "Show this chain's cells individually again, unlocking generate/re-roll/discard",

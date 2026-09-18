@@ -330,6 +330,10 @@ export interface Job {
   retries: number;
   error: string | null;
   progress: number;
+  // Raw ComfyUI step counters behind `progress` -- null until the first
+  // progress ws message of a run arrives, or for a non-comfyui_workflow job.
+  progress_step: number | null;
+  progress_max: number | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;

@@ -346,6 +346,15 @@ class Job(Base):
     # (0-100); the wider Python type is just so callers doing pct math don't
     # need an explicit int() cast, not a hint that fractional values persist.
     progress: Mapped[float] = mapped_column(Integer, default=0, nullable=False)
+    # Raw ComfyUI step counters behind `progress` above (data["value"]/["max"]
+    # off its own "progress" ws message) -- kept alongside the collapsed
+    # percent so the frontend can show "23/40" and derive a remaining-time
+    # estimate from elapsed-so-far, the way ComfyUI's own tqdm bar does.
+    # NULL until the first progress message of a run arrives (nothing to show
+    # yet), and for anything that isn't a comfyui_workflow job at all (api_call
+    # backends never call on_progress, so these just stay NULL for those).
+    progress_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    progress_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

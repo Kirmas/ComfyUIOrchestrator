@@ -1705,12 +1705,24 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
             const elapsed = started === null ? null : ((finished ?? Date.now()) - started) / 1000;
             const timing =
               elapsed === null ? null : finished === null ? formatDuration(elapsed) : t("cell.jobTook", { duration: formatDuration(elapsed) });
+            // Same rate-estimate a tqdm-style bar uses: elapsed-so-far divided
+            // by steps-so-far, projected onto the steps still left. Only while
+            // still running and only once at least one step has actually
+            // completed -- extrapolating from 0 steps is a division by zero,
+            // and a finished job has nothing left to wait for anyway.
+            const step = job.progress_step;
+            const max = job.progress_max;
+            const stepLabel = step != null && max != null ? t("cell.jobStep", { step, max }) : null;
+            const eta =
+              finished === null && elapsed != null && step != null && max != null && step > 0
+                ? t("cell.jobEta", { duration: formatDuration((elapsed / step) * (max - step)) })
+                : null;
             const backendName = job.backend_id ? backends.find((b) => b.id === job.backend_id)?.name : null;
             return (
               <div
                 key={job.id}
                 className="progress-bar"
-                title={[backendName, `${job.status} ${job.progress}%`, timing].filter(Boolean).join(" · ")}
+                title={[backendName, `${job.status} ${job.progress}%`, stepLabel, timing, eta].filter(Boolean).join(" · ")}
               >
                 <div
                   className="progress-bar-fill"

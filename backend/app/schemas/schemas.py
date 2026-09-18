@@ -466,6 +466,8 @@ class JobRead(ORMModel):
     retries: int
     error: str | None
     progress: float
+    progress_step: int | None
+    progress_max: int | None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None

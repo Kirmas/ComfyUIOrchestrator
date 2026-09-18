@@ -846,13 +846,24 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                     if message.get("type") != "progress":
                         return
                     data = message.get("data", {})
+                    step = data.get("value", 0)
                     total = data.get("max") or 1
-                    pct = min(100, int(100 * data.get("value", 0) / total))
+                    pct = min(100, int(100 * step / total))
                     job.progress = pct
+                    job.progress_step = step
+                    job.progress_max = total
                     await db.commit()
                     await ws_manager.broadcast(
                         project_id,
-                        {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "running", "progress": pct},
+                        {
+                            "type": "job",
+                            "job_id": str(job.id),
+                            "node_id": str(node.id),
+                            "status": "running",
+                            "progress": pct,
+                            "progress_step": step,
+                            "progress_max": total,
+                        },
                     )
 
                 status = await _wait_with_stall_detection(
