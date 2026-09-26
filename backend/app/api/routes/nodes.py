@@ -207,46 +207,20 @@ async def _actual_span(db: AsyncSession, node: Node, ordered: list[Track], pos: 
     return span
 
 
-async def ensure_span_rows(db: AsyncSession, workflow_node: Node) -> None:
-    """Imperative backend growth (replaces Grid.tsx's reactive auto-expand
-    useEffect): make sure the empty input-slot rows a workflow needs actually
-    exist as tracks right below it. Called when a workflow's template is
-    assigned/changed (create/update_node), so a multi-input node (e.g.
-    native.character_chart, 8 image slots) gets its 7 rows created up front
-    instead of rendering tall into non-existent rows the user can't fill.
+async def _ensure_rows_up_to(db: AsyncSession, workflow_node: Node, desired: int) -> None:
+    """For each offset 1..desired-1 below workflow_node's own row: if a track
+    already sits there with this workflow's own column free, it's fine;
+    otherwise splice a fresh empty track in at that position -- unless doing
+    so would tear some OTHER workflow's span apart (then stop, best-effort).
+    Idempotent: re-running when the rows already exist splices nothing. Does
+    not commit -- the caller does.
 
-    desired = max(image/file input slots, 1 + spawned tracks). For each offset
-    1..desired-1 below the node's own row: if a track already sits there with
-    this workflow's own column free, it's fine; otherwise splice a fresh empty
-    track in at that position -- unless doing so would tear some OTHER
-    workflow's span apart (then stop, best-effort). Idempotent: re-running when
-    the rows already exist splices nothing. Does not commit -- the caller does.
-
-    Every row up to the template's true max is still reserved here regardless
-    of any OPTIONAL slots among them -- deleting/recreating tracks every time
-    one gets filled is exactly the reactive-effect trap this function itself
-    was written to replace. What's new is Node.visible_slot_count: if it's
-    still unset (None -- callers that (re)assign a template null it out
-    first, see update_node), it's seeded here to required_count +
-    filled_optional_count + 1 rather than the full declared max, so a fresh
-    node with e.g. 10 optional slots starts showing just the ones actually in
-    use (+1 spare to drop the next reference into) instead of 10 rows to
-    manually shrink. Purely cosmetic -- every row above is still materialized
-    and reserved exactly as before; see this value's own docstring in
-    db/models.py."""
-    effective = await resolve_effective_template(db, workflow_node)
-    if effective is None:
-        return
-    spawned = await db.execute(select(func.count()).select_from(Track).where(Track.spawned_from_node_id == workflow_node.id))
-    max_slots = slot_count(effective.param_schema)
-    desired = max(max_slots, 1 + spawned.scalar_one(), 1)
-    if workflow_node.visible_slot_count is None:
-        required_count, filled_optional = await _count_filled_optional_slots(db, workflow_node, effective.param_schema)
-        if max_slots > required_count:
-            workflow_node.visible_slot_count = min(max_slots, max(required_count + filled_optional + 1, required_count, 1))
+    Shared by ensure_span_rows (seeding a fresh node's initial visible span)
+    and recompute_span (growing visible_slot_count back up later) -- both are
+    "make sure this many rows physically exist", the only difference is what
+    `desired` gets computed from."""
     if desired <= 1:
         return
-
     home = await db.get(Track, workflow_node.track_id)
     if home is None:
         return
@@ -283,6 +257,38 @@ async def ensure_span_rows(db: AsyncSession, workflow_node: Node) -> None:
         offset += 1
 
 
+async def ensure_span_rows(db: AsyncSession, workflow_node: Node) -> None:
+    """Imperative backend growth (replaces Grid.tsx's reactive auto-expand
+    useEffect): make sure the rows a freshly (re)assigned workflow needs right
+    now actually exist as tracks right below it. Called when a workflow's
+    template is assigned/changed (create/update_node).
+
+    Node.visible_slot_count is the authoritative reservation target for
+    OPTIONAL image/file slots as of 2026-09-26 (see grid_layout.py's
+    compute_layout docstring for why) -- so this only splices up to
+    required_count + filled_optional_count + 1 spare, not the template's full
+    declared max: a fresh node with e.g. 10 optional slots (Qwen Image 2.1
+    Edit) gets only the 2-3 rows it's actually going to show, not all 10.
+    Growing further later (recompute_span, the "⤢" button) reuses
+    _ensure_rows_up_to the same way. Spawned-track count is a separate,
+    unrelated reservation need (candidate-picker tracks) and stays uncapped by
+    the optional-slot logic. If visible_slot_count was already seeded (not
+    None -- e.g. re-running this on a node that already has one), it's left
+    alone; only a fresh/reset (None) one gets seeded here."""
+    effective = await resolve_effective_template(db, workflow_node)
+    if effective is None:
+        return
+    spawned = await db.execute(select(func.count()).select_from(Track).where(Track.spawned_from_node_id == workflow_node.id))
+    spawned_count = spawned.scalar_one()
+    max_slots = slot_count(effective.param_schema)
+    if workflow_node.visible_slot_count is None:
+        required_count, filled_optional = await _count_filled_optional_slots(db, workflow_node, effective.param_schema)
+        if max_slots > required_count:
+            workflow_node.visible_slot_count = min(max_slots, max(required_count + filled_optional + 1, required_count, 1))
+    target = max(workflow_node.visible_slot_count or 1, 1 + spawned_count, 1)
+    await _ensure_rows_up_to(db, workflow_node, target)
+
+
 async def _count_filled_optional_slots(db: AsyncSession, node: Node, param_schema: dict) -> tuple[int, int]:
     """(required_slot_count, filled_optional_slot_count) for one workflow
     node, resolved the same way generation does (_asset_at_cell_index /
@@ -312,14 +318,25 @@ async def _count_filled_optional_slots(db: AsyncSession, node: Node, param_schem
 
 @router.post("/{node_id}/recompute-span", response_model=NodeRead)
 async def recompute_span(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    """Manually recomputes Node.visible_slot_count -- a purely cosmetic cap on
-    how tall this node's card renders (see the column's own docstring in
-    db/models.py). Deliberately a user-triggered action, not something that
-    runs automatically off a move/fill event: the "no reactive span effects"
+    """Manually recomputes Node.visible_slot_count -- the reservation target
+    for this node's OPTIONAL image/file slots (see the column's own docstring
+    in db/models.py and grid_layout.py's compute_layout). Deliberately a
+    user-triggered action (the "⤢" button), not something that runs
+    automatically off a move/fill event: the "no reactive span effects"
     incident this project already had was exactly a value derived reactively
     from grid state that itself fed back into a fix-up mutation. Idempotent
-    and safe to call anytime -- it only ever recomputes from the current,
-    real fill state, never grows a track or touches anything else."""
+    and safe to call anytime -- it only ever recomputes from the current, real
+    fill state.
+
+    As of 2026-09-26 this can GROW the reservation, not just relabel a
+    cosmetic cap: since a node with unfilled optional slots no longer keeps
+    every row pre-reserved (only its current visible_slot_count does), growing
+    back into a row that's since been reclaimed by something else needs to
+    make a fresh one -- _ensure_rows_up_to (shared with ensure_span_rows)
+    reuses/splices exactly like a fresh node's initial rows do, never
+    stealing whatever now legitimately occupies a since-freed cell. Shrinking
+    stays a pure number decrease -- no track is ever deleted here, it's simply
+    no longer reserved."""
     node = await db.get(Node, node_id)
     if node is None or node.kind != NodeKind.workflow:
         raise HTTPException(404, "Workflow node not found")
@@ -328,7 +345,10 @@ async def recompute_span(node_id: uuid.UUID, db: AsyncSession = Depends(get_db))
         raise HTTPException(400, "Node has no template assigned yet")
     max_slots = slot_count(effective.param_schema)
     required_count, filled_optional = await _count_filled_optional_slots(db, node, effective.param_schema)
-    node.visible_slot_count = min(max_slots, max(required_count + filled_optional + 1, required_count, 1))
+    new_count = min(max_slots, max(required_count + filled_optional + 1, required_count, 1))
+    if new_count > (node.visible_slot_count or 1):
+        await _ensure_rows_up_to(db, node, new_count)
+    node.visible_slot_count = new_count
     await db.commit()
     await db.refresh(node)
     return node
@@ -660,6 +680,20 @@ async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)):
     # A workflow created already carrying a template needs its input-slot rows
     # materialized too (see ensure_span_rows) -- same as the update path.
     if node.kind == NodeKind.workflow and node.node_type:
+        # Refresh first: `data` came from payload.model_dump(mode="json"), so
+        # node.track_id is still a plain str (the JSON form), not the
+        # uuid.UUID every OTHER caller of ensure_span_rows hands it (they all
+        # load their node via db.get, which deserializes it properly).
+        # _ensure_rows_up_to's `pos.get(workflow_node.track_id)` looks it up
+        # in a dict keyed by real UUID objects (from a fresh ordered_tracks()
+        # query) -- a str key silently never matches a UUID key, so this
+        # returned None and splicing silently no-opped for every node created
+        # via this endpoint with its template already set (e.g. MCP's
+        # create_node, or any workflow node created with node_type in the
+        # same POST rather than assigned afterwards via PATCH). Pre-existing
+        # bug, same in the old uncapped-splice code -- found 2026-09-26 while
+        # testing this exact path for the visible_slot_count change above.
+        await db.refresh(node)
         await ensure_span_rows(db, node)
     await db.commit()
     await db.refresh(node)

@@ -700,13 +700,16 @@ export function Grid({ projectId }: { projectId: string }) {
   //    delete; the backend refuses any that are still part of a real span
   //    (delete_track's 409), which we just skip -- no uncaught errors, no
   //    half-done loop.
-  // 2. Recompute Node.visible_slot_count -- a cosmetic cap (not a track
-  //    deletion) on how many of this workflow's declared OPTIONAL input
-  //    slots it renders tall for, from how many currently resolve to a real
-  //    asset. See db/models.py's Node.visible_slot_count docstring for why
-  //    this is a separate mechanism from spawned-track cleanup above (an
-  //    unfilled optional slot's row must stay reserved, never deleted, so it
-  //    can be grown back into later).
+  // 2. Recompute Node.visible_slot_count -- the reservation target (not just
+  //    a cosmetic cap, as of 2026-09-26) for how many of this workflow's
+  //    declared OPTIONAL input slots it keeps rows for, from how many
+  //    currently resolve to a real asset. See db/models.py's
+  //    Node.visible_slot_count docstring for why this is a separate
+  //    mechanism from spawned-track cleanup above: shrinking here never
+  //    deletes a track (an unfilled optional slot's row just stops being
+  //    reserved, freeing it for anything else), and growing back later
+  //    physically splices a fresh track if the row it needs was reclaimed in
+  //    the meantime, rather than assuming one was kept waiting underneath.
   const shrinkWorkflowToFit = async (node: NodeItem) => {
     if (structuralOpRef.current) {
       alert(t("grid.moveInProgress"));

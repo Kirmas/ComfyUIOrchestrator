@@ -10,7 +10,7 @@ uses it (_ensure_output_binding, worker/_actual_row_span).
 """
 from sqlalchemy import select
 
-from app.core.node_types import resolve_effective_template, slot_count
+from app.core.node_types import reserved_slot_target, resolve_effective_template
 from app.core.track_order import ordered_tracks
 from app.db.models import Node, NodeKind, NodeStatus, Track
 
@@ -19,20 +19,33 @@ async def compute_layout(db, project_id, dashboard_id=None) -> dict:
     """Returns {spans, blocked_cells}:
 
     - spans: {node_id: {desired, achieved, visual_achieved}} for every live
-      workflow node. desired = max(image/file input slots, 1 + spawned
-      tracks). achieved = desired capped at the first row below whose own
-      column is already taken (a spanning card can't overlap an unrelated
-      node in its own column). visual_achieved <= achieved is further capped
-      by Node.visible_slot_count when set (see its own docstring in
-      db/models.py) -- a PURELY cosmetic number the frontend uses for the
-      card's rendered CSS height and for how far its own "+asset" reachable
-      cells extend, never for occupancy: blocked_cells below is deliberately
-      built from the uncapped `achieved`, not `visual_achieved`, so every row
-      up to the template's true declared max stays reserved for this node
-      even while its card renders shorter -- otherwise an unrelated node
-      could get dropped into a "hidden" optional-slot row, and a later
-      recompute-span growing the visible count back would silently resolve
-      that slot to whatever else had been placed there in the meantime.
+      workflow node. desired = max(Node.visible_slot_count when set else the
+      template's full declared image/file slot count, 1 + spawned tracks, the
+      furthest materialized output's offset + 1). achieved = desired capped
+      at the first row below whose own column is already taken (a spanning
+      card can't overlap an unrelated node in its own column). visual_achieved
+      <= achieved is a further, now-usually-redundant cap by
+      Node.visible_slot_count (see its own docstring in db/models.py) kept
+      only for the one case it still matters: a real output past the visible
+      count (via the max-output-offset term above) still needs its row
+      reserved even though the card shouldn't visually stretch to show it.
+      blocked_cells below is built from this same `achieved` -- i.e. from
+      2026-09-26, a node with unfilled OPTIONAL slots only reserves as many
+      rows as it currently shows, not the template's full declared max.
+      (Until 2026-09-26 blocked_cells was deliberately built from the
+      TEMPLATE'S FULL max regardless of visible_slot_count, out of a worry
+      that an unrelated node could land in a "hidden" optional-slot row and a
+      later recompute-span growing back into it would collide -- for a
+      10-slot node like Qwen Image 2.1 Edit that meant permanently reserving
+      10 rows for a node that in practice fills 2-3. Traced and confirmed
+      moot: real occupancy is independently enforced at the point a node is
+      actually moved/created into a cell -- _move_asset/_ensure_slot_free/
+      create_node in api/routes/nodes.py all check for a real Node row at the
+      exact target regardless of blocked_cells, which is only ever an
+      advisory hint the FRONTEND uses to decide which cells to offer as drop
+      targets. So growing back into a since-reclaimed row can't silently
+      collide; recompute-span's growth path (nodes.py) now splices a fresh
+      track for it instead, same as ensure_span_rows already does.)
     - blocked_cells: [[row, col], ...] -- the cells a spanning card covers in
       its OWN column below its anchor row (row is a position in list order).
       An unrelated track sharing that column must treat these as occupied.
@@ -94,8 +107,11 @@ async def compute_layout(db, project_id, dashboard_id=None) -> dict:
         # then couldn't remove (they read as "in the span" -- 2026-07-23). The
         # actual outputs are already covered by max_output_offset, so an empty
         # spawned track no longer stretches the card.
-        slot_max = slot_count(effective.param_schema if effective else {})
-        desired = max(slot_max, max_output_offset.get(n.id, 0) + 1, 1)
+        # reserved_slot_target (core/node_types.py) is now the authoritative
+        # reservation target for optional slots, not the template's full
+        # declared max -- see this function's own docstring.
+        reserved_target = reserved_slot_target(n, effective.param_schema if effective else {})
+        desired = max(reserved_target, max_output_offset.get(n.id, 0) + 1, 1)
 
         # Grow toward desired, stopping at whichever comes first: the first
         # row below whose own column is already occupied by an unrelated
@@ -120,14 +136,12 @@ async def compute_layout(db, project_id, dashboard_id=None) -> dict:
             while achieved < desired and start + achieved < len(ordered) and (start + achieved, n.step_index) not in occupied:
                 achieved += 1
 
-        # visual_achieved: a cosmetic-only cap (Node.visible_slot_count, set
-        # by POST .../recompute-span) on how many of `achieved`'s rows the
-        # card actually renders tall for -- see this function's own docstring
-        # for why blocked_cells below is built from the uncapped `achieved`
-        # instead. Never exceeds `achieved` (a shrunk-then-regrown value could
-        # otherwise claim more than what's actually reserved), and folded in
-        # after occupancy growth above, so it only ever hides real reserved
-        # rows, never invents ones that aren't there.
+        # visual_achieved: now usually == achieved, since `desired` above is
+        # already capped at visible_slot_count. Only still differs when a
+        # real materialized output sits past the visible count (the
+        # max_output_offset term) -- that row must stay reserved (it holds a
+        # real Node) without the card visually stretching to show it, so this
+        # cap stays as a belt-and-suspenders for that one case.
         visual_achieved = achieved
         if n.visible_slot_count is not None:
             visual_achieved = min(achieved, max(n.visible_slot_count, 1))

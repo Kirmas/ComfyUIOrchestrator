@@ -162,6 +162,24 @@ def slot_count(schema: dict[str, Any] | None) -> int:
     return len(slot_fields(schema))
 
 
+def reserved_slot_target(node: Node, schema: dict[str, Any] | None) -> int:
+    """How many rows this workflow node currently keeps reserved for its own
+    OPTIONAL image/file slots -- Node.visible_slot_count when set, else the
+    template's full declared max for an older/never-seeded node (see
+    Node.visible_slot_count's own docstring in db/models.py).
+
+    As of 2026-09-26 this, not the bare template max, is the true reservation
+    target: grid_layout.py's compute_layout uses it for a node's own
+    achieved/blocked_cells span, and worker/tasks.py's
+    _splice_after_would_split_a_span must use the exact same number when
+    deciding whether some OTHER node's span would be split by an insertion --
+    otherwise it still treats a node's unreserved, since-freed rows (beyond
+    its visible_slot_count) as part of that node's span, refusing splices
+    that are perfectly safe now that those rows are legitimately available to
+    whatever else got placed there."""
+    return node.visible_slot_count if node.visible_slot_count is not None else slot_count(schema)
+
+
 def image_field_count(schema: dict[str, Any] | None) -> int:
     """Every image/file field, fixed or not. Used only where the question is
     "how many LoadImage-shaped inputs does this node type's workflow.json

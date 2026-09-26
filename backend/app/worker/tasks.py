@@ -19,7 +19,7 @@ from app.core.asset_types import (
 )
 from app.core.comfyui_backend import ComfyUIBackend, wait_with_timeout
 from app.core.job_backend import JobStatus as BackendJobStatus
-from app.core.node_types import resolve_effective_template, slot_count, slot_fields
+from app.core.node_types import reserved_slot_target, resolve_effective_template, slot_fields
 from app.core.queue import job_queue
 from app.core.storage import get_storage
 from app.core.idea_macros import apply_macros, project_idea_texts
@@ -176,8 +176,13 @@ async def _splice_after_would_split_a_span(db, project_id, after_pos: int, order
     of just refusing the doomed generation).
 
     exclude_node_id skips one workflow -- used when the splice is deliberately
-    growing THAT node's own span (ensure_span_rows), where "splitting" it is
-    the whole point, not a hazard."""
+    growing THAT node's own span (ensure_span_rows / recompute_span), where
+    "splitting" it is the whole point, not a hazard.
+
+    "Span" here means reserved_slot_target (core/node_types.py), i.e. each
+    OTHER node's own current reservation -- not its template's declared max --
+    since 2026-09-26 a node past its own visible_slot_count no longer keeps
+    those rows reserved at all (see grid_layout.py's compute_layout)."""
     # Scoped to the tracks the caller already resolved (`pos` is exactly one
     # dashboard's track set) rather than to the whole project: positions only
     # mean anything within a single grid scope, and a workflow sitting in some
@@ -200,7 +205,13 @@ async def _splice_after_would_split_a_span(db, project_id, after_pos: int, order
         effective = await resolve_effective_template(db, node)
         if effective is None:
             continue
-        desired = slot_count(effective.param_schema)
+        # reserved_slot_target (core/node_types.py), not the template's full
+        # declared max: as of 2026-09-26 a node's real reservation stops at
+        # its own visible_slot_count (see grid_layout.py's compute_layout),
+        # so a row beyond that is legitimately available to whatever else is
+        # there -- using the full max here would still treat it as part of
+        # this node's span and wrongly refuse splices past it.
+        desired = reserved_slot_target(node, effective.param_schema)
         span = await _actual_row_span(db, node, max(desired, 1), ordered, pos)
         if node_pos + span > after_pos + 1:
             return True

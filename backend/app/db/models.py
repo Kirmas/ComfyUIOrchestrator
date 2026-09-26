@@ -321,20 +321,35 @@ class Node(Base):
     subgraph_dashboard_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("dashboards.id", ondelete="CASCADE"), nullable=True
     )
-    # Cosmetic-only cap on how many of this workflow's declared optional slots
-    # its card actually renders as tall -- NULL (the default, and the only
-    # value any node had before this column existed) means "show the full
-    # declared count", unchanged behavior. Set only by POST
-    # /api/nodes/{id}/recompute-span (api/routes/nodes.py), which counts how
-    # many optional slots currently resolve to a real asset and caps at
-    # required_count + filled_optional_count + 1 -- never automatically, since
-    # deriving this reactively from fill state was the exact shape of a past
-    # incident (see memory/feedback_no_reactive_span_effects.md). Deliberately
-    # does NOT feed slot_count()/_actual_span/_actual_row_span/
-    # ensure_span_rows/_splice_after_would_split_a_span -- every row up to the
-    # template's true declared max is still structurally reserved and
-    # protected regardless of this value, so a later recompute can always grow
-    # the visible count back without a track ever needing to be (re)created.
+    # How many of this workflow's declared OPTIONAL image/file slots are
+    # actually reserved+rendered right now -- NULL (the default, and the only
+    # value any node had before this column existed) means "reserve/show the
+    # full declared count", unchanged legacy behavior. Set/grown by POST
+    # /api/nodes/{id}/recompute-span (api/routes/nodes.py) and seeded on
+    # template (re)assignment by ensure_span_rows, both counting how many
+    # optional slots currently resolve to a real asset and capping at
+    # required_count + filled_optional_count + 1 spare -- never automatically
+    # off a fill/move event, since deriving this reactively from grid state was
+    # the exact shape of a past incident (see
+    # memory/feedback_no_reactive_span_effects.md); growth only ever happens
+    # imperatively, from the "⤢" button.
+    #
+    # Until 2026-09-26 this was purely cosmetic and did NOT feed
+    # grid_layout.py's real row reservation (blocked_cells) -- every row up to
+    # the template's true declared max stayed structurally reserved regardless,
+    # out of a worry that growing back into a since-reclaimed row could
+    # silently collide with whatever else had been placed there. For a node
+    # with many optional slots (e.g. Qwen Image 2.1 Edit, ~10 optional image
+    # references but 2-3 used in practice) that meant permanently blocking 10
+    # grid rows for a card that only ever shows 2-3. Traced and confirmed the
+    # worry moot -- real occupancy is independently enforced wherever a node
+    # is actually moved/created into a cell (_move_asset/_ensure_slot_free/
+    # create_node in api/routes/nodes.py), so blocked_cells was only ever an
+    # advisory hint for the frontend's own drop-target list, never a backend
+    # invariant. This column is now the authoritative reservation target
+    # itself (compute_layout uses it directly when set); growing back into a
+    # reclaimed row now splices a fresh track for it (_ensure_rows_up_to)
+    # instead of relying on the row having stayed pre-reserved underneath.
     visible_slot_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
