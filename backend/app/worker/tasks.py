@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from app.config import get_settings
 from app.core import dispatch_stats, dispatcher
@@ -773,6 +773,32 @@ async def _materialize_job_result(db, job: Job, node: Node, effective, instance,
     await ws_manager.broadcast(project_id, {"type": "node", "node_id": str(asset_node.id), "status": "running"})
 
 
+async def _save_progress(job_id: str, pct: int, step: int, total: int) -> None:
+    """Persists one progress tick through a session of its own, never
+    run_variant_job's. on_progress runs inside the websocket listener task,
+    which _wait_for_completion cancels the moment HTTP polling notices
+    completion first -- and a commit on the shared session cancelled half-way
+    left it either stuck in "prepared" state (the job then failed while
+    attaching its already-finished result and sat in "running" forever) or
+    rolled back with every object expired (run_variant_job's finally then
+    couldn't read the backend id, skipped release_backend, and that backend
+    was never picked again until a restart) -- 2026-09-26 incident. shield()
+    lets a write that has started finish instead of being torn mid-transaction;
+    the status guard stops one landing late from rewinding a finished job."""
+    try:
+        async with async_session_maker() as db:
+            await db.execute(
+                update(Job)
+                .where(Job.id == job_id, Job.status == JobStatusEnum.running)
+                .values(progress=pct, progress_step=step, progress_max=total)
+            )
+            await db.commit()
+    except Exception:
+        # Cosmetic -- the live value already goes out over the websocket, and
+        # the listener dying over it would only cost the job its progress feed.
+        logger.warning("couldn't persist progress for job %s", job_id, exc_info=True)
+
+
 async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = None) -> None:
     settings = get_settings()
     exclude = set(exclude_backend_ids or [])
@@ -838,16 +864,17 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
             )
             return
 
-        job.status = JobStatusEnum.running
-        job.backend_id = choice.backend.id if choice.backend else None
-        job.started_at = datetime.now(UTC)
-        node.status = NodeStatus.running
-        node.backend_used_id = choice.backend.id if choice.backend else None
-        await db.commit()
-        await ws_manager.broadcast(
-            project_id,
-            {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "running", "progress": 0},
-        )
+        # Plain values, captured while every ORM object here is certainly still
+        # loaded: from this point on the finally below must release this pick
+        # whatever state `db` ends up in. A flush that dies half-way rolls the
+        # session back and expires every object in it, so the finally used to
+        # raise reading `choice.backend.id`, skip release_backend, and leave
+        # the backend reading as busy -- never picked again until a restart
+        # (2026-09-26 incident: asusi7 sat idle for hours while every job
+        # queued up behind asusi9).
+        backend_id = str(choice.backend.id) if choice.backend else None
+        node_id = node.id
+        succeeded = False
 
         async def _run() -> None:
             resolved_inputs = await resolve_node_inputs(db, node, effective.param_schema, effective.defaults)
@@ -867,10 +894,14 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                     step = data.get("value", 0)
                     total = data.get("max") or 1
                     pct = min(100, int(100 * step / total))
+                    # In memory only on this session's `job` -- it's what
+                    # _wait_with_stall_detection watches for movement. The DB
+                    # copy goes through _save_progress's own session; see its
+                    # docstring for why this one must never commit from here.
                     job.progress = pct
                     job.progress_step = step
                     job.progress_max = total
-                    await db.commit()
+                    await asyncio.shield(_save_progress(job_id, pct, step, total))
                     await ws_manager.broadcast(
                         project_id,
                         {
@@ -906,16 +937,28 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                 db.add(ApiUsageLog(backend_id=choice.backend.id, node_id=node.id))
                 await db.commit()
 
-        # Run as its own Task (registered in _running_job_tasks) rather than
-        # awaited inline, so cancel_job() can cancel *this specific job's*
-        # work without touching the worker-loop task that's running it --
-        # cancelling that instead would propagate into _worker_loop's own
-        # `except asyncio.CancelledError: raise` and permanently cost one of
-        # worker_concurrency's slots per cancellation.
-        exec_task = asyncio.create_task(_run())
-        _running_job_tasks[job_id] = exec_task
         try:
+            job.status = JobStatusEnum.running
+            job.backend_id = choice.backend.id if choice.backend else None
+            job.started_at = datetime.now(UTC)
+            node.status = NodeStatus.running
+            node.backend_used_id = choice.backend.id if choice.backend else None
+            await db.commit()
+            await ws_manager.broadcast(
+                project_id,
+                {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "running", "progress": 0},
+            )
+
+            # Run as its own Task (registered in _running_job_tasks) rather than
+            # awaited inline, so cancel_job() can cancel *this specific job's*
+            # work without touching the worker-loop task that's running it --
+            # cancelling that instead would propagate into _worker_loop's own
+            # `except asyncio.CancelledError: raise` and permanently cost one of
+            # worker_concurrency's slots per cancellation.
+            exec_task = asyncio.create_task(_run())
+            _running_job_tasks[job_id] = exec_task
             await exec_task
+            succeeded = True
         except asyncio.CancelledError:
             # Two different things land here identically: cancel_job()
             # cancelling exec_task directly (the case this exists for), and
@@ -957,6 +1000,16 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
             raise
         except Exception as exc:
             logger.exception("job %s failed", job_id)
+            # Whatever failed may have taken `db` down with it (a flush that
+            # died half-way leaves the session unusable until rolled back), and
+            # committing on top of that raised again and left the job in
+            # "running" forever with no retry queued. Start from a clean
+            # transaction and re-read the row -- which is gone altogether if
+            # the node was deleted while this job ran.
+            await db.rollback()
+            job = await db.get(Job, job_id)
+            if job is None:
+                return
             job.retries += 1
             job.error = str(exc)
             if job.retries <= settings.max_retries:
@@ -973,8 +1026,8 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                 # a subclass of the builtin TimeoutError, so a transient
                 # network blip during polling used to slip past this guard
                 # and exclude the backend anyway (2026-07-14 recurrence).
-                if choice.backend and not isinstance(exc, (TimeoutError, httpx.TransportError)):
-                    exclude.add(str(choice.backend.id))
+                if backend_id and not isinstance(exc, (TimeoutError, httpx.TransportError)):
+                    exclude.add(backend_id)
                 await job_queue.enqueue(run_variant_job, job_id, list(exclude))
                 return
             job.status = JobStatusEnum.error
@@ -982,7 +1035,7 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
             await db.commit()
             await ws_manager.broadcast(
                 project_id,
-                {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "error", "error": str(exc)},
+                {"type": "job", "job_id": job_id, "node_id": str(node_id), "status": "error", "error": str(exc)},
             )
         finally:
             # Always pop, on every exit including cancellation -- otherwise a
@@ -995,11 +1048,10 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
             # placed against (core/dispatch_stats.py). In a finally, and on
             # every exit including the retry `return` above, so a backend can
             # never be left holding a phantom in-flight job that would make it
-            # read as busy forever.
-            if choice.backend:
-                dispatch_stats.note_finish(
-                    str(choice.backend.id), str(job.id), succeeded=job.status == JobStatusEnum.done
-                )
+            # read as busy forever. Only plain values from here on, never an
+            # ORM attribute -- see backend_id above.
+            if backend_id:
+                dispatch_stats.note_finish(backend_id, job_id, succeeded=succeeded)
                 # Used to release right after submit() -- as soon as ComfyUI's
                 # own /queue reflected this job, dispatcher.capacity() could be
                 # trusted again. But capacity() only reads that live /queue, so
@@ -1015,9 +1067,9 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                 # instead -- once this job is truly done, one way or another --
                 # keeps the backend reserved for the whole submit-through-
                 # download span, not just until submission.
-                await dispatcher.release_backend(str(choice.backend.id))
+                await dispatcher.release_backend(backend_id)
 
-        await _finalize_node_if_done(db, node.id, project_id)
+        await _finalize_node_if_done(db, node_id, project_id)
 
 
 async def _finalize_node_if_done(db, node_id, project_id: str) -> None:
