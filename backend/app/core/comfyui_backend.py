@@ -27,6 +27,7 @@ from PIL import Image
 
 from app.core.job_backend import AssetRef, CapacityInfo, JobStatus
 from app.core.template_engine import build_workflow
+from app.core.workflow_analyzer import SAVE_IMAGE_CLASS_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +170,7 @@ class ComfyUIBackend:
 
     @staticmethod
     def _mask_save_node_ids(prompt_graph: dict[str, dict]) -> set[str]:
-        """Which SaveImage node ids are fed directly by a MaskToImage -- those
+        """Which save-image node ids are fed directly by a MaskToImage -- those
         are visualizing a MASK, not a real generated picture (see the "get
         mask as its own asset" design thread), so result() stores them as
         AssetKind.mask and shrinks them back to one channel before storage
@@ -180,7 +181,7 @@ class ComfyUIBackend:
         happens to be titled."""
         ids: set[str] = set()
         for node_id, node in prompt_graph.items():
-            if not isinstance(node, dict) or node.get("class_type") != "SaveImage":
+            if not isinstance(node, dict) or node.get("class_type") not in SAVE_IMAGE_CLASS_TYPES:
                 continue
             source = node.get("inputs", {}).get("images")
             if isinstance(source, list) and len(source) == 2 and isinstance(source[0], str):
@@ -229,7 +230,7 @@ class ComfyUIBackend:
                 save_node_ids = {
                     node_id
                     for node_id, node in graph.items()
-                    if isinstance(node, dict) and node.get("class_type") == "SaveImage"
+                    if isinstance(node, dict) and node.get("class_type") in SAVE_IMAGE_CLASS_TYPES
                 }
                 mask_node_ids = self._mask_save_node_ids(graph)
 

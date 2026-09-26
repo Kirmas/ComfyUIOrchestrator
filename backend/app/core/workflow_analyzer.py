@@ -56,7 +56,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 INPUT_IMAGE_CLASS_TYPES = {"LoadImage"}
-OUTPUT_CLASS_TYPES = {"SaveImage", "PreviewImage"}
+# Nodes that write the deliverable to disk. SaveImageAdvanced is ComfyUI's
+# own newer variant (per-format bit depth/colour space) and the one every
+# Qwen Image 2.1 workflow is built with -- left out of here, its graphs
+# analyzed as having no output node at all, and core/comfyui_backend.py's
+# result() filter dropped their images on the floor: the job "succeeded"
+# with nothing to show for it (2026-09-25).
+SAVE_IMAGE_CLASS_TYPES = {"SaveImage", "SaveImageAdvanced"}
+OUTPUT_CLASS_TYPES = SAVE_IMAGE_CLASS_TYPES | {"PreviewImage"}
 SAMPLER_CLASS_TYPES = {"KSampler", "KSamplerAdvanced", "SamplerCustomAdvanced"}
 # SamplerCustomAdvanced-style graphs (Flux2, Ideogram 4) carry no
 # positive/negative of their own -- conditioning reaches the sampler through a
