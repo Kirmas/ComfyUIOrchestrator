@@ -287,8 +287,11 @@ class ComfyUIBackend:
                 # there commits them to this instance before a second instance can spin up
                 # and take a share (see select_backend's max_queue_length check).
                 return CapacityInfo(is_alive=True, queue_length=length, max_queue_length=1)
-        except Exception:
-            logger.warning("ComfyUI backend %s unreachable", self.base_url, exc_info=True)
+        except Exception as exc:
+            # A backend being off is routine in a home-lab setup (see heartbeat.py's
+            # own up/down flip logging), not a bug -- don't spam WARNING+traceback
+            # on every dispatch attempt/heartbeat tick while it's powered down.
+            logger.debug("ComfyUI backend %s unreachable: %s", self.base_url, exc)
             return CapacityInfo(is_alive=False, queue_length=0)
 
     async def cancel(self, job_id: str) -> None:
@@ -331,8 +334,8 @@ class ComfyUIBackend:
                         continue
                     if isinstance(entry, dict):
                         found[class_type] = entry
-        except Exception:
-            logger.warning("ComfyUI backend %s unreachable while reading object_info", self.base_url, exc_info=True)
+        except Exception as exc:
+            logger.debug("ComfyUI backend %s unreachable while reading object_info: %s", self.base_url, exc)
         return found
 
     async def heartbeat(self) -> dict:
