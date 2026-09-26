@@ -215,6 +215,11 @@ export const nodesApi = {
   // node's -- see db/models.py's Node.collapse_target_id docstring.
   collapse: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/collapse`),
   expand: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/expand`),
+  // Recomputes Node.visible_slot_count -- a cosmetic cap on how many of this
+  // workflow's declared OPTIONAL input slots its card renders tall for, from
+  // how many currently resolve to a real asset. Never shrinks below required
+  // fields or grows a track; see db/models.py's Node.visible_slot_count.
+  recomputeSpan: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/recompute-span`),
   uploadAsset: (id: string, file: File) => {
     const form = new FormData();
     form.append("file", file);

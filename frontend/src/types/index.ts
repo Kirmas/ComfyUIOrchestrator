@@ -116,7 +116,7 @@ export interface Project {
 // renders workflow spans / blocked cells from this instead of recomputing the
 // span formula (which used to drift between the two sides).
 export interface GridLayout {
-  spans: Record<string, { desired: number; achieved: number }>;
+  spans: Record<string, { desired: number; achieved: number; visual_achieved: number }>;
   blocked_cells: [number, number][];
 }
 
@@ -216,6 +216,12 @@ export interface NodeItem {
   // dashboard it opens. Read-only: written only by the /api/dashboards
   // endpoints, never through a generic PATCH.
   subgraph_dashboard_id: string | null;
+  // Read-only cosmetic cap on how many of this workflow's declared OPTIONAL
+  // slots its card renders tall for -- null means "show them all" (every
+  // node before this field existed). Written only by
+  // POST /api/nodes/{id}/recompute-span (see Grid.tsx's shrinkWorkflowToFit).
+  // See backend/app/db/models.py's Node.visible_slot_count docstring.
+  visible_slot_count: number | null;
   created_at: string;
 }
 

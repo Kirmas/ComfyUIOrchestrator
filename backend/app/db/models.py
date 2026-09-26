@@ -321,6 +321,21 @@ class Node(Base):
     subgraph_dashboard_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("dashboards.id", ondelete="CASCADE"), nullable=True
     )
+    # Cosmetic-only cap on how many of this workflow's declared optional slots
+    # its card actually renders as tall -- NULL (the default, and the only
+    # value any node had before this column existed) means "show the full
+    # declared count", unchanged behavior. Set only by POST
+    # /api/nodes/{id}/recompute-span (api/routes/nodes.py), which counts how
+    # many optional slots currently resolve to a real asset and caps at
+    # required_count + filled_optional_count + 1 -- never automatically, since
+    # deriving this reactively from fill state was the exact shape of a past
+    # incident (see memory/feedback_no_reactive_span_effects.md). Deliberately
+    # does NOT feed slot_count()/_actual_span/_actual_row_span/
+    # ensure_span_rows/_splice_after_would_split_a_span -- every row up to the
+    # template's true declared max is still structurally reserved and
+    # protected regardless of this value, so a later recompute can always grow
+    # the visible count back without a track ever needing to be (re)created.
+    visible_slot_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     track: Mapped["Track"] = relationship(back_populates="nodes", foreign_keys=[track_id])

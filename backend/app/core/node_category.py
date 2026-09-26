@@ -48,6 +48,17 @@ def model_family(model: str) -> str:
     token = parts[0] if parts else ""
     if not token:
         return ""
+    # Qwen's own naming puts the generation number right after "image" as its
+    # own bare token ("qwen_image_2.1_..." -> qwen/image/2/1/...), which the
+    # generic base.rstrip(digits) rule below can't see -- the version digits
+    # never touch the leading "qwen" token itself, so both this and the older
+    # "qwen_image_edit_2511_..." collapse to the same plain "Qwen" otherwise
+    # (2026-09-25: the two are different models entirely and were showing up
+    # in one merged node-type picker group). "edit_2511"'s version sits after
+    # a third word ("edit"), not right after "image", so it's unaffected and
+    # still falls through to the plain "Qwen" below.
+    if token == "qwen" and len(parts) > 2 and parts[1] == "image" and parts[2].isdigit() and len(parts[2]) <= 2:
+        return f"Qwen{parts[2]}"
     # Only for names the table already knows split across two words, e.g.
     # "sd_xl_base_1.0" -- checked before the single-token lookup so it wins
     # over the plainer "sd". An unknown pair falls straight through.

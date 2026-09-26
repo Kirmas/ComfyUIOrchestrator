@@ -89,6 +89,7 @@ LORA_LOADER_INPUT_KEYS: dict[str, tuple[str, str]] = {
 PROMPT_CLASS_TYPES: dict[str, str] = {
     "CLIPTextEncode": "text",
     "TextEncodeQwenImageEditPlus": "prompt",
+    "TextEncodeQwenImage21": "prompt",
 }
 
 SAMPLER_LITERAL_FIELDS = [
@@ -153,6 +154,14 @@ KNOWN_NODE_LITERAL_FIELDS: dict[str, list[tuple[tuple[str, ...], str, str]]] = {
     "MaskFromBatch+": [
         (("start",), "start", "int"),
         (("length",), "length", "int"),
+    ],
+    # Qwen Image 2.1's encoder -- "prompt" is covered by PROMPT_CLASS_TYPES
+    # (it also needs sampler-link tracing and doubles as an editable-text-field
+    # source), but that dict is one text key per class, so negative_prompt and
+    # the resolution cap live here instead of a second, conflicting entry.
+    "TextEncodeQwenImage21": [
+        (("negative_prompt",), "negative_prompt", "text"),
+        (("resolution",), "resolution", "int"),
     ],
 }
 

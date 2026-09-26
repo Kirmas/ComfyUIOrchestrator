@@ -18,10 +18,21 @@ from app.db.models import Node, NodeKind, NodeStatus, Track
 async def compute_layout(db, project_id, dashboard_id=None) -> dict:
     """Returns {spans, blocked_cells}:
 
-    - spans: {node_id: {desired, achieved}} for every live workflow node.
-      desired = max(image/file input slots, 1 + spawned tracks). achieved =
-      desired capped at the first row below whose own column is already taken
-      (a spanning card can't overlap an unrelated node in its own column).
+    - spans: {node_id: {desired, achieved, visual_achieved}} for every live
+      workflow node. desired = max(image/file input slots, 1 + spawned
+      tracks). achieved = desired capped at the first row below whose own
+      column is already taken (a spanning card can't overlap an unrelated
+      node in its own column). visual_achieved <= achieved is further capped
+      by Node.visible_slot_count when set (see its own docstring in
+      db/models.py) -- a PURELY cosmetic number the frontend uses for the
+      card's rendered CSS height and for how far its own "+asset" reachable
+      cells extend, never for occupancy: blocked_cells below is deliberately
+      built from the uncapped `achieved`, not `visual_achieved`, so every row
+      up to the template's true declared max stays reserved for this node
+      even while its card renders shorter -- otherwise an unrelated node
+      could get dropped into a "hidden" optional-slot row, and a later
+      recompute-span growing the visible count back would silently resolve
+      that slot to whatever else had been placed there in the meantime.
     - blocked_cells: [[row, col], ...] -- the cells a spanning card covers in
       its OWN column below its anchor row (row is a position in list order).
       An unrelated track sharing that column must treat these as occupied.
@@ -83,7 +94,8 @@ async def compute_layout(db, project_id, dashboard_id=None) -> dict:
         # then couldn't remove (they read as "in the span" -- 2026-07-23). The
         # actual outputs are already covered by max_output_offset, so an empty
         # spawned track no longer stretches the card.
-        desired = max(slot_count(effective.param_schema if effective else {}), max_output_offset.get(n.id, 0) + 1, 1)
+        slot_max = slot_count(effective.param_schema if effective else {})
+        desired = max(slot_max, max_output_offset.get(n.id, 0) + 1, 1)
 
         # Grow toward desired, stopping at whichever comes first: the first
         # row below whose own column is already occupied by an unrelated
@@ -107,7 +119,19 @@ async def compute_layout(db, project_id, dashboard_id=None) -> dict:
         if start is not None:
             while achieved < desired and start + achieved < len(ordered) and (start + achieved, n.step_index) not in occupied:
                 achieved += 1
-        spans[str(n.id)] = {"desired": desired, "achieved": achieved}
+
+        # visual_achieved: a cosmetic-only cap (Node.visible_slot_count, set
+        # by POST .../recompute-span) on how many of `achieved`'s rows the
+        # card actually renders tall for -- see this function's own docstring
+        # for why blocked_cells below is built from the uncapped `achieved`
+        # instead. Never exceeds `achieved` (a shrunk-then-regrown value could
+        # otherwise claim more than what's actually reserved), and folded in
+        # after occupancy growth above, so it only ever hides real reserved
+        # rows, never invents ones that aren't there.
+        visual_achieved = achieved
+        if n.visible_slot_count is not None:
+            visual_achieved = min(achieved, max(n.visible_slot_count, 1))
+        spans[str(n.id)] = {"desired": desired, "achieved": achieved, "visual_achieved": visual_achieved}
 
     blocked_cells: list[list[int]] = []
     for n in nodes:

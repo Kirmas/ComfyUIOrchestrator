@@ -418,6 +418,10 @@ class NodeRead(ORMModel):
     # Read-only -- the dashboard this smart pointer opens. Written only by
     # api/routes/dashboards.py, never through a generic PATCH.
     subgraph_dashboard_id: uuid.UUID | None
+    # Read-only -- see db/models.py's Node.visible_slot_count docstring.
+    # Cosmetic render-height cap only; never appears on NodeCreate/NodeUpdate.
+    # The only writer is POST /api/nodes/{id}/recompute-span.
+    visible_slot_count: int | None
     created_at: datetime
 
 

@@ -378,7 +378,15 @@ export function Grid({ projectId }: { projectId: string }) {
   // them as `spans` (per workflow: {desired, achieved}) and `blockedCells` (a
   // Set of "row:col"). This killed the frontend/backend span-drift bug class.)
   const spanDesired = (nodeId: string): number => spans[nodeId]?.desired ?? 1;
-  const spanAchieved = (nodeId: string): number => spans[nodeId]?.achieved ?? 1;
+  // Rendering-only: how tall a card actually draws and how far its own
+  // "+asset" reachable cells extend. <= spans[nodeId].achieved (the true,
+  // protected span -- what actually blocks other content, mirrored into
+  // blockedCells, which the backend always builds from `achieved`, never
+  // from this), capped by Node.visible_slot_count server-side
+  // (core/grid_layout.py). See db/models.py's Node.visible_slot_count
+  // docstring. Never use this for occupancy/collision checks -- those go
+  // through blockedCells itself.
+  const spanAchieved = (nodeId: string): number => spans[nodeId]?.visual_achieved ?? spans[nodeId]?.achieved ?? 1;
 
   // Which workflow node is the *first* half of a collapsed chain
   // (Node.collapse_target_id, set via the pass-through asset node's own
@@ -682,13 +690,23 @@ export function Grid({ projectId }: { projectId: string }) {
     }
   };
 
-  // NodeCell's "⤢" recompute button: clean up a workflow's now-empty spawned
-  // tracks -- candidate lines whose output was moved away or discarded, which
-  // leave blank rows the card used to span. The card's span itself is tight
-  // again once these are gone (the backend span no longer counts empty spawned
-  // tracks -- see core/grid_layout.py). Each removal is a plain track delete;
-  // the backend refuses any that are still part of a real span (delete_track's
-  // 409), which we just skip -- no uncaught errors, no half-done loop.
+  // NodeCell's "⤢" recompute button: two independent cleanups under one
+  // gesture, since both just mean "make this card's rendered height match
+  // what it actually needs right now":
+  // 1. Clean up a workflow's now-empty spawned tracks -- candidate lines
+  //    whose output was moved away or discarded, which leave blank rows the
+  //    card used to span (the backend span no longer counts empty spawned
+  //    tracks -- see core/grid_layout.py). Each removal is a plain track
+  //    delete; the backend refuses any that are still part of a real span
+  //    (delete_track's 409), which we just skip -- no uncaught errors, no
+  //    half-done loop.
+  // 2. Recompute Node.visible_slot_count -- a cosmetic cap (not a track
+  //    deletion) on how many of this workflow's declared OPTIONAL input
+  //    slots it renders tall for, from how many currently resolve to a real
+  //    asset. See db/models.py's Node.visible_slot_count docstring for why
+  //    this is a separate mechanism from spawned-track cleanup above (an
+  //    unfilled optional slot's row must stay reserved, never deleted, so it
+  //    can be grown back into later).
   const shrinkWorkflowToFit = async (node: NodeItem) => {
     if (structuralOpRef.current) {
       alert(t("grid.moveInProgress"));
@@ -702,10 +720,6 @@ export function Grid({ projectId }: { projectId: string }) {
           t.spawned_from_node_id === node.id &&
           !Object.values(live.nodesById).some((n) => n.track_id === t.id),
       );
-      if (emptySpawned.length === 0) {
-        alert(t("grid.nothingToCleanUp"));
-        return;
-      }
       let removed = 0;
       for (const t of emptySpawned) {
         try {
@@ -717,6 +731,13 @@ export function Grid({ projectId }: { projectId: string }) {
         }
       }
       if (removed) await reloadTracks(projectId);
+
+      const updated = await nodesApi.recomputeSpan(node.id);
+      setNode(updated);
+
+      if (!removed && updated.visible_slot_count === node.visible_slot_count) {
+        alert(t("grid.nothingToCleanUp"));
+      }
     } finally {
       structuralOpRef.current = false;
     }

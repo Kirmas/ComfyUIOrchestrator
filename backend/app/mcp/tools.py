@@ -694,6 +694,15 @@ async def create_node_type(
     at all is optional, but every LoadImage in the workflow ends up with
     exactly one image field either way.
 
+    Add `"optional": true` to an image entry (e.g. a growable reference-image
+    node like Qwen Image 2.1's, which takes images.image_1..image_16) to let
+    that slot be left empty per node instance -- it still reserves its row on
+    the grid (row-span is fixed per node type, not per instance), but an
+    unfilled optional slot's LoadImage node is pruned from the graph at run
+    time instead of submitting whatever placeholder the workflow was captured
+    with. Only settable this way; an auto-numbered (unnamed) image field is
+    always required.
+
     The workflow is checked against the mapping first; on any mismatch nothing
     is created at all, and the error names what's available.
     """

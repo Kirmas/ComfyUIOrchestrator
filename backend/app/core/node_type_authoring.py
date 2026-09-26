@@ -107,7 +107,17 @@ def build_param_schema(analysis: WorkflowAnalysis, param_mapping: dict) -> dict:
         if image_node is not None:
             mapped_image_node_ids.add(node_id)
             label = target.get("label") or image_node.title or field_name.replace("_", " ").title()
-            image_field = {"name": field_name, "type": "image", "label": label, "required": True}
+            # "optional": true on the param_mapping entry itself (same place
+            # "label" already rides) is the one lever to grow a node type
+            # past a fixed reference count without hardcoding N separate
+            # LoadImage nodes as all-required -- an unfilled optional slot
+            # gets pruned from the submitted graph at run time instead of
+            # sending a stale placeholder (see PRUNE_FIELD in
+            # core/template_engine.py). Only settable through an explicit
+            # mapping entry, same restriction as "label": an auto-numbered
+            # field the caller left unnamed has no target dict to read it
+            # from and stays required.
+            image_field = {"name": field_name, "type": "image", "label": label, "required": not target.get("optional")}
             if image_node.likely_kind:
                 image_field["expects_kind"] = image_node.likely_kind
             fields.append(image_field)

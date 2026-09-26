@@ -23,7 +23,7 @@ from app.core.node_types import resolve_effective_template, slot_count, slot_fie
 from app.core.queue import job_queue
 from app.core.storage import get_storage
 from app.core.idea_macros import apply_macros, project_idea_texts
-from app.core.template_engine import validate_params
+from app.core.template_engine import PRUNE_FIELD, validate_params
 from app.core.track_order import ordered_tracks, scope_of, splice_after
 from app.core.ws_manager import ws_manager
 from app.db.base import async_session_maker
@@ -430,6 +430,7 @@ async def resolve_node_inputs(
     or template (DB) backed."""
     fields = (param_schema or {}).get("fields", [])
     slot_field_names = [f["name"] for f in slot_fields(param_schema)]
+    optional_slot_names = {f["name"] for f in slot_fields(param_schema) if not f.get("required", True)}
     fixed_image_field_names = [
         f["name"] for f in fields if f.get("type") in ("image", "file") and f.get("fixed")
     ]
@@ -513,6 +514,12 @@ async def resolve_node_inputs(
 
         if asset is not None:
             resolved[field_name] = storage.get_object(asset.storage_key)
+        elif field_name in optional_slot_names:
+            # Deliberately empty, not just unconnected -- tell build_workflow
+            # to prune this slot's node out of the graph rather than send
+            # whatever placeholder was baked in at wizard time (see
+            # PRUNE_FIELD's own docstring).
+            resolved[field_name] = PRUNE_FIELD
 
     return resolved
 

@@ -75,7 +75,7 @@ interface ProjectState {
   // workflow node id; blockedCells is a Set of "row:col" strings a spanning
   // card covers in its own column. The frontend reads these instead of
   // recomputing the span formula.
-  spans: Record<string, { desired: number; achieved: number }>;
+  spans: Record<string, { desired: number; achieved: number; visual_achieved: number }>;
   blockedCells: Set<string>;
   // Comment blocks. Held flat here; the frame each one draws is derived at
   // render time from where its member nodes currently are.

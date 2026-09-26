@@ -51,6 +51,15 @@ from typing import Any
 
 FIELD_TYPES = {"image", "text", "int", "float", "seed", "enum", "file", "bool"}
 
+# Sentinel a caller puts in resolved_inputs[field_name] to say "this optional
+# image/file slot was deliberately left empty" -- distinct from the field
+# being absent from resolved_inputs at all (which means "untouched, leave
+# whatever's baked into workflow_json alone", the right behavior for e.g. an
+# optional text field nobody overrode). Only resolve_node_inputs in
+# worker/tasks.py sets this, for a slot_fields() entry with required=False
+# that resolved to no asset.
+PRUNE_FIELD = object()
+
 
 class TemplateValidationError(ValueError):
     pass
@@ -112,6 +121,11 @@ def build_workflow(workflow_json: dict, param_mapping: dict[str, dict], resolved
         input_key = target.get("input_key")
         if not node_id or not input_key:
             raise TemplateValidationError(f"param_mapping entry for '{field_name}' must have node_id and input_key")
+
+        if resolved_inputs[field_name] is PRUNE_FIELD:
+            _prune_unfilled_slot(workflow, node_id)
+            continue
+
         node = workflow.get(node_id)
         if node is None:
             title = target.get("title")
@@ -126,3 +140,29 @@ def build_workflow(workflow_json: dict, param_mapping: dict[str, dict], resolved
         inputs[path[-1]] = resolved_inputs[field_name]
 
     return workflow
+
+
+def _prune_unfilled_slot(workflow: dict, node_id: str) -> None:
+    """Drop an optional slot's own node (its LoadImage, normally) entirely,
+    and strip whatever other node's input held a link to it.
+
+    Without this, an unfilled optional slot would keep whatever the capability
+    was captured with at wizard time -- a placeholder filename ComfyUI can't
+    actually load -- and it would still be wired into its consumer (e.g. Qwen
+    Image 2.1's growable images.image_N), which submits a request for a
+    reference that was never actually provided. Just deleting the node and
+    the one link pointing at it is enough, no recursive reachability walk
+    needed: the node this leaves behind (always a plain LoadImage, no link
+    inputs of its own) is simply never reached during execution, and ComfyUI's
+    prompt validation only requires every node's own inputs be internally
+    consistent, not that every node be reachable from an output.
+    """
+    workflow.pop(node_id, None)
+    for other in workflow.values():
+        if not isinstance(other, dict):
+            continue
+        inputs = other.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for key in [k for k, v in inputs.items() if isinstance(v, list) and len(v) == 2 and v[0] == node_id]:
+            del inputs[key]
