@@ -130,7 +130,8 @@ export function usePaintMask({
 }: {
   maskPng: string | null;
   /** The source image's real pixel size; the canvas is sized from it (capped
-   * at MASK_MAX_DIM) once it's known. */
+   * at MASK_MAX_DIM) once it's known. Compared by value, so a consumer may
+   * build it inline without memoizing it. */
   natural: { w: number; h: number } | null;
   /** Re-initialises the canvas when it changes -- the URL(s) of the image(s)
    * being painted over, so switching images starts from a clean canvas. */
@@ -159,6 +160,16 @@ export function usePaintMask({
   // image itself changes -- not on every maskPng echo from a commit, which
   // would otherwise fight an in-progress stroke the same way CropPreview's
   // dragging guard protects against).
+  //
+  // Keyed on natural's two numbers, never the object itself: TransplantPreview
+  // derives `natural` inline, so it's a fresh object on every render, and this
+  // used to re-run on *any* re-render -- including one per WS progress event
+  // of any generation in the project (the cell subscribes to nodesById), plus
+  // every pointerdown (setUndoCount) and every commit echo. Each run
+  // re-assigned canvas.width, which wipes the bitmap, emptied the undo stack
+  // and reloaded the last *committed* mask, so a stroke still being drawn
+  // vanished mid-air, and Undo could never enable (2026-09-26: "the transplant
+  // editor resets while I paint, especially while something is generating").
   useEffect(() => {
     if (!natural) return;
     const canvas = canvasRef.current;
@@ -169,8 +180,12 @@ export function usePaintMask({
     canvas.height = Math.max(1, Math.round(natural.h * scale));
     undoStack.current = [];
     setUndoCount(0);
+    let cancelled = false;
     if (maskPng) {
       decodeMaskPngToImageData(maskPng, canvas.width, canvas.height).then((data) => {
+        // A newer image re-seeded the canvas (or the editor closed) while this
+        // was decoding -- landing now would paint the old mask over it.
+        if (cancelled) return;
         ctx.putImageData(data, 0, 0);
         changed();
       });
@@ -180,8 +195,11 @@ export function usePaintMask({
       setHasStrokes(false);
       changed();
     }
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [natural, resetKey]);
+  }, [natural?.w, natural?.h, resetKey]);
 
   /** Pointer position in the mask canvas's own (capped) pixel space, derived
    * from the pointed-at element's rendered CSS size -- same approach as
