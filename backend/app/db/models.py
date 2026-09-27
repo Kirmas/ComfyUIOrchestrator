@@ -448,8 +448,8 @@ class AnnotationSource(str, enum.Enum):
 
 
 class Annotation(Base):
-    """A comment block: free text attached to a set of nodes, drawn as a frame
-    around them in the grid.
+    """A comment thread on a set of nodes, drawn as a frame around them in the
+    grid: the frame is this row, what was said is its AnnotationMessages.
 
     Deliberately stores no coordinates. The frame's box is derived from where
     its member nodes currently are, so moving a node moves the frame with it --
@@ -458,21 +458,59 @@ class Annotation(Base):
     display-only override). Storing a rect here would reintroduce exactly the
     kind of position that can silently desync from the content it describes.
 
-    An agent flagging an ambiguous cell (the MCP flag_cell tool) creates one of
-    these with source=agent and a single member, so agent flags and hand-written
-    notes are the same object and are reviewed in the same place.
+    An agent flagging a cell (the MCP flag_cell tool) writes into the same
+    thread a person would, so the two talk in one place. It used to be one
+    text field per frame, which made that conversation impossible: an agent
+    could only add frames and a person could only overwrite text, so replies
+    went into the agent's own frame (which still read source=agent) and every
+    "done" became another frame stacked on the same cell (2026-09-27, the
+    Nature Spirit session). There is one thread per member set -- commenting
+    on cells that already have a thread continues it (see routes/annotations.py).
+
+    Resolving is the "done" state that replaced deleting: nothing anyone said
+    is removed, the thread just stops asking for attention, and a new message
+    reopens it.
     """
 
     __tablename__ = "annotations"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    text: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    source: Mapped[AnnotationSource] = mapped_column(String(16), default=AnnotationSource.user, nullable=False)
+    # NULL while open. Who resolved it is kept so a person can tell "the agent
+    # says it's done" from "I closed it".
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[AnnotationSource | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     members: Mapped[list["AnnotationNode"]] = relationship(back_populates="annotation", cascade="all, delete-orphan")
+    messages: Mapped[list["AnnotationMessage"]] = relationship(
+        back_populates="annotation",
+        cascade="all, delete-orphan",
+        order_by="AnnotationMessage.created_at",
+    )
+
+
+class AnnotationMessage(Base):
+    """One message in a comment thread.
+
+    `source` is the author and never changes: an edit changes the words, not
+    who said them. Only the author may edit (routes/annotations.py), so the
+    agent can't rewrite a person's message or the other way round -- each
+    replies instead."""
+
+    __tablename__ = "annotation_messages"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    annotation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("annotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source: Mapped[AnnotationSource] = mapped_column(String(16), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    annotation: Mapped["Annotation"] = relationship(back_populates="messages")
 
 
 class AnnotationNode(Base):

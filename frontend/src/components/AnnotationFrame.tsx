@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
 import { useT } from "../i18n";
 import type { Annotation } from "../types";
+import { cx } from "../utils";
+import { threadState } from "./AnnotationThread";
 
 interface Props {
   annotation: Annotation;
@@ -9,86 +9,62 @@ interface Props {
   // member nodes currently sit -- nothing positional is stored on the
   // annotation itself.
   box: { minRow: number; maxRow: number; minCol: number; maxCol: number };
-  onSave: (text: string) => Promise<void>;
-  onDelete: () => Promise<void>;
+  // Which share of the top edge the label gets when several frames start in
+  // the same cell (Grid.tsx's annotationBoxes); count 1 means the whole edge.
+  labelSlot: { index: number; count: number };
+  onOpen: () => void;
 }
 
-export function AnnotationFrame({ annotation, box, onSave, onDelete }: Props) {
+/** A comment thread's frame on the grid. The label shows where the thread
+ * stands -- its latest message, coloured by who wrote it, or a quiet ✓ once
+ * it's resolved -- and opens the conversation itself (AnnotationThread). */
+export function AnnotationFrame({ annotation, box, labelSlot, onOpen }: Props) {
   const t = useT();
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(annotation.text);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => setDraft(annotation.text), [annotation.text]);
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      await onSave(draft);
-      setEditing(false);
-    } finally {
-      setSaving(false);
-    }
-  };
+  const state = threadState(annotation);
+  const last = annotation.messages[annotation.messages.length - 1];
+  const count = annotation.messages.length;
+  const title = [
+    last ? `${last.source === "agent" ? t("annotation.agent") : t("annotation.you")}: ${last.text}` : t("annotation.empty"),
+    count > 1 ? t("annotation.messageCount", { n: count }) : null,
+    state === "resolved"
+      ? annotation.resolved_by === "agent"
+        ? t("annotation.resolvedByAgent")
+        : t("annotation.resolvedByYou")
+      : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   return (
-    <>
-      <div
-        // A grid item spanning its members' rows/columns, not an absolutely
-        // positioned overlay: the grid itself then keeps the frame aligned at
-        // any zoom level, with no coordinate math to drift.
-        className={`annotation-frame annotation-${annotation.source}`}
-        style={{
-          gridRow: `${box.minRow + 1} / span ${box.maxRow - box.minRow + 1}`,
-          gridColumn: `${box.minCol + 2} / span ${box.maxCol - box.minCol + 1}`,
-        }}
-        onDoubleClick={() => setEditing(true)}
-        title={annotation.text || t("annotation.addTitle")}
+    <div
+      // A grid item spanning its members' rows/columns, not an absolutely
+      // positioned overlay: the grid itself then keeps the frame aligned at
+      // any zoom level, with no coordinate math to drift.
+      className={cx("annotation-frame", `annotation-${state}`)}
+      style={{
+        gridRow: `${box.minRow + 1} / span ${box.maxRow - box.minRow + 1}`,
+        gridColumn: `${box.minCol + 2} / span ${box.maxCol - box.minCol + 1}`,
+      }}
+    >
+      {/* The frame body must not eat clicks meant for the cells inside it
+          (pointer-events: none in CSS); only this label is interactive. */}
+      <button
+        className="annotation-label"
+        onClick={onOpen}
+        title={title}
+        style={
+          labelSlot.count > 1
+            ? {
+                left: `calc(10px + ${labelSlot.index} * (100% - 20px) / ${labelSlot.count})`,
+                maxWidth: `calc((100% - 20px) / ${labelSlot.count} - 4px)`,
+              }
+            : undefined
+        }
       >
-        {/* The frame body must not eat clicks meant for the cells inside it
-            (pointer-events: none in CSS); only this label is interactive. */}
-        <div className="annotation-label">
-          <span className="annotation-text">{annotation.text || t("annotation.empty")}</span>
-          <span className="annotation-actions">
-            <button onClick={() => setEditing(true)} title={t("annotation.editTitle")}>
-              {t("common.edit")}
-            </button>
-            <button onClick={onDelete} title={t("annotation.deleteTitle")}>
-              ×
-            </button>
-          </span>
-        </div>
-      </div>
-
-      {editing &&
-        // Portaled to the body: this sits inside the grid's zoom transform,
-        // and any ancestor transform makes position: fixed resolve against
-        // that ancestor instead of the viewport, which would open the dialog
-        // far off-screen.
-        createPortal(
-          <div className="image-modal-backdrop" onClick={() => !saving && setEditing(false)}>
-            <div className="params-modal-content" onClick={(e) => e.stopPropagation()}>
-              <h3>{t("annotation.title")}</h3>
-              <textarea
-                autoFocus
-                rows={5}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder={t("annotation.placeholder")}
-                style={{ width: "100%" }}
-              />
-              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
-                <button onClick={() => setEditing(false)} disabled={saving}>
-                  {t("common.cancel")}
-                </button>
-                <button onClick={save} disabled={saving}>
-                  {saving ? t("common.saving") : t("common.save")}
-                </button>
-              </div>
-            </div>
-          </div>,
-          document.body,
-        )}
-    </>
+        {state === "resolved" && <span className="annotation-mark">✓</span>}
+        <span className="annotation-text">{last?.text || t("annotation.empty")}</span>
+        {count > 1 && <span className="annotation-count">{count}</span>}
+      </button>
+    </div>
   );
 }

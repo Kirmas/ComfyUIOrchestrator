@@ -21,12 +21,13 @@ from app.core.subgraph_copy import workflow_node_copy
 from app.core.storage import build_asset_url, get_storage
 from app.api.routes.assets import to_asset_read
 from app.db.base import get_db
-from app.db.models import Asset, AssetKind, Dashboard, Job, Node, NodeKind, NodeStatus, Track
+from app.db.models import Asset, AssetKind, Dashboard, Job, JobStatusEnum, Node, NodeKind, NodeStatus, Track
 from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeDuplicate, NodeMove, NodeRead, NodeUpdate, PickCandidate
 from app.worker.tasks import (
     _asset_at_cell_index,
     _locate_output_row,
     _splice_after_would_split_a_span,
+    cancel_job,
     enqueue_node_job,
     has_room_for_output,
     own_output_nodes,
@@ -1064,6 +1065,28 @@ async def generate_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     node.status = NodeStatus.queued
     await db.commit()
     await db.refresh(node)
+    return node
+
+
+@router.post("/{node_id}/cancel", response_model=NodeRead)
+async def cancel_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Stop every variant this node still has in flight -- queued, waiting for
+    a backend or running. Variants that already finished are kept, and the
+    node settles on them (worker/tasks.py's _finalize_node_if_done) once the
+    last cancellation lands. Each one goes through the same cancel_job as
+    POST /api/jobs/{id}/cancel; this just saves every caller from having to
+    work out which of a node's jobs are still live."""
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(404, "Node not found")
+    result = await db.execute(
+        select(Job.id).where(
+            Job.node_id == node_id,
+            Job.status.in_((JobStatusEnum.pending, JobStatusEnum.running, JobStatusEnum.waiting_for_backend)),
+        )
+    )
+    for job_id in result.scalars().all():
+        await job_queue.enqueue(cancel_job, str(job_id))
     return node
 
 

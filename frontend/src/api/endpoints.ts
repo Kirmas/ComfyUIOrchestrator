@@ -135,11 +135,19 @@ export const dashboardsApi = {
 };
 
 export const annotationsApi = {
-  create: (data: { project_id: string; node_ids: string[]; text?: string }) =>
+  // Continues the thread these exact cells already have, if any, instead of
+  // stacking a second frame on them.
+  create: (data: { project_id: string; node_ids: string[]; text: string }) =>
     api.post<Annotation>("/api/annotations", data),
-  update: (id: string, data: { text?: string; node_ids?: string[] }) =>
-    api.patch<Annotation>(`/api/annotations/${id}`, data),
+  reply: (id: string, text: string) => api.post<Annotation>(`/api/annotations/${id}/messages`, { text }),
+  setResolved: (id: string, resolved: boolean) => api.patch<Annotation>(`/api/annotations/${id}`, { resolved }),
   remove: (id: string) => api.delete(`/api/annotations/${id}`),
+  // The backend lets only the author edit; the UI only offers it on the
+  // person's own messages.
+  editMessage: (messageId: string, text: string) =>
+    api.patch<Annotation>(`/api/annotation-messages/${messageId}`, { text }),
+  // Removing a thread's last message removes the thread.
+  removeMessage: (messageId: string) => api.delete(`/api/annotation-messages/${messageId}`),
 };
 
 export const tracksApi = {
@@ -209,6 +217,8 @@ export const nodesApi = {
   outputs: (id: string) => api.get<Asset[]>(`/api/nodes/${id}/outputs`),
   jobs: (id: string) => api.get<Job[]>(`/api/nodes/${id}/jobs`),
   generate: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/generate`),
+  // Every variant still in flight; finished ones are kept.
+  cancel: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/cancel`),
   discard: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/discard`),
   reroll: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/reroll`),
   // id here is the pass-through asset node's own id, not either workflow

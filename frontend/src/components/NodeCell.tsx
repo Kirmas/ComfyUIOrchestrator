@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { createPortal } from "react-dom";
 import { resolveAssetPreviewUrl, resolveAssetUrl } from "../api/client";
-import { assetsApi, dashboardsApi, jobsApi, nodesApi, nodeTemplatesApi } from "../api/endpoints";
+import { assetsApi, dashboardsApi, nodesApi, nodeTemplatesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
 import { isFileDrag } from "../dragUtils";
 import { detectLayerMaskGroups, detectMaskGroups, resolveMaskImageField } from "../maskUtils";
@@ -1335,11 +1335,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   // -- never deletes or discards any already-produced Asset, so a variant
   // that already finished stays exactly as it is when you cancel the rest.
   const cancel = async () => {
-    await Promise.all(
-      jobs
-        .filter((j) => j.status === "pending" || j.status === "running" || j.status === "waiting_for_backend")
-        .map((j) => jobsApi.cancel(j.id)),
-    );
+    await nodesApi.cancel(node.id);
     const [updatedNode, list] = await Promise.all([nodesApi.get(node.id), nodesApi.jobs(node.id).catch(() => [])]);
     setNode(updatedNode);
     setJobs(list);

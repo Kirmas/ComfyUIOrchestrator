@@ -2,9 +2,9 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.routes.annotations import LOAD_THREAD, annotation_read
 from app.core.grid_layout import compute_layout
 from app.core.grid_scope import scope_start_kind
 from app.core.node_types import resolve_effective_template
@@ -201,7 +201,7 @@ async def list_project_annotations(project_id: uuid.UUID, db: AsyncSession = Dep
     invisible in the grid anyway and could never be selected to delete by hand.
     """
     result = await db.execute(
-        select(Annotation).options(selectinload(Annotation.members)).where(Annotation.project_id == project_id)
+        select(Annotation).options(*LOAD_THREAD).where(Annotation.project_id == project_id).order_by(Annotation.created_at)
     )
     annotations = list(result.scalars().all())
 
@@ -211,19 +211,7 @@ async def list_project_annotations(project_id: uuid.UUID, db: AsyncSession = Dep
     if orphaned:
         await db.commit()
 
-    return [
-        AnnotationRead(
-            id=a.id,
-            project_id=a.project_id,
-            text=a.text,
-            source=a.source,
-            node_ids=[m.node_id for m in a.members],
-            created_at=a.created_at,
-            updated_at=a.updated_at,
-        )
-        for a in annotations
-        if a.members
-    ]
+    return [annotation_read(a) for a in annotations if a.members]
 
 
 @router.delete("/{project_id}", status_code=204)

@@ -120,17 +120,31 @@ export interface GridLayout {
   blocked_cells: [number, number][];
 }
 
-// A comment block: text attached to a set of nodes, drawn as a frame around
-// them. No coordinates -- the frame is derived from where its members
-// currently sit, so it follows them when they move. "agent" ones are cells an
-// agent flagged as needing a look; they're the same object as a hand-written
-// note and are reviewed together.
+// A comment thread: messages attached to a set of nodes, drawn as a frame
+// around them. No coordinates -- the frame is derived from where its members
+// currently sit, so it follows them when they move. One thread per set of
+// cells, and the person ("user") and an agent working through MCP ("agent")
+// talk in the same one.
+export interface AnnotationMessage {
+  id: string;
+  // The author. An edit never changes it, and only the author may edit.
+  source: "user" | "agent";
+  text: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Annotation {
   id: string;
   project_id: string;
-  text: string;
-  source: "user" | "agent";
   node_ids: string[];
+  // Done: nothing in it is removed, it just stops asking for attention. Any
+  // new message reopens it.
+  resolved: boolean;
+  resolved_at: string | null;
+  resolved_by: "user" | "agent" | null;
+  // Oldest first; the last one is where the conversation stands.
+  messages: AnnotationMessage[];
   created_at: string;
   updated_at: string;
 }
@@ -345,14 +359,18 @@ export interface Job {
   finished_at: string | null;
 }
 
-export interface ProgressEvent {
-  type: "job" | "node";
-  job_id?: string;
-  node_id: string;
-  status: string;
-  progress?: number;
-  error?: string;
-}
+export type ProgressEvent =
+  | {
+      type: "job" | "node";
+      job_id?: string;
+      node_id: string;
+      status: string;
+      progress?: number;
+      error?: string;
+    }
+  // Something in the project's comment threads changed -- possibly an agent
+  // writing through MCP, which this tab would otherwise never hear about.
+  | { type: "annotations" };
 
 // ---------- Template creation wizard ----------
 export interface WorkflowNodeInfo {

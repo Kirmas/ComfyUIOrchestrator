@@ -11,6 +11,7 @@ touches a project it creates itself.
 """
 import asyncio
 import base64
+import io
 import json
 import sys
 
@@ -23,6 +24,18 @@ PNG_1PX = base64.b64encode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
     )
 ).decode()
+
+
+
+def big_png_b64(width: int = 3000, height: int = 2000) -> str:
+    """Large enough that get_candidates has to scale it down, which is the
+    path an 8K upscale takes (sending those as is closed the connection)."""
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), (40, 90, 160)).save(buf, "PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
 
 PASS, FAIL = "PASS", "FAIL"
 results: list[tuple[str, str, str]] = []
@@ -66,7 +79,17 @@ async def main(base_url: str, token: str) -> int:
             tools = (await session.list_tools()).tools
             names = {t.name for t in tools}
             check("tools listed", len(tools) > 0, f"{len(tools)} tools")
-            for required in ("create_node", "run_node", "await_node", "select_candidate", "flag_cell"):
+            for required in (
+                "create_node",
+                "run_node",
+                "await_node",
+                "cancel_node",
+                "select_candidate",
+                "flag_cell",
+                "reply_to_flag",
+                "resolve_flag",
+                "edit_flag_message",
+            ):
                 check(f"tool present: {required}", required in names)
 
             try:
@@ -109,11 +132,77 @@ async def main(base_url: str, token: str) -> int:
                 recipe2 = payload(await session.call_tool("get_project_recipe", {"project_id": project_id}))
                 check("recipe reports the new node as occupied", [0, 0] in recipe2["occupied"], str(recipe2["occupied"]))
 
+                big = payload(
+                    await session.call_tool(
+                        "upload_reference_image",
+                        {"node_id": node_id, "image_base64": big_png_b64(), "filename": "big.png"},
+                    )
+                )
+                listing = await session.call_tool("get_candidates", {"node_id": node_id, "max_images": 0})
+                texts = [b.text for b in listing.content if b.type == "text"]
+                check(
+                    "get_candidates(max_images=0) lists every id, no images",
+                    not any(b.type == "image" for b in listing.content) and big["id"] in texts[0] and asset["id"] in texts[0],
+                    texts[0][:80],
+                )
+                scaled = await session.call_tool("get_candidates", {"node_id": node_id, "max_px": 800})
+                scaled_texts = " ".join(b.text for b in scaled.content if b.type == "text")
+                check("get_candidates scales a big image to max_px", "sent at 800x533" in scaled_texts, scaled_texts[-60:])
+                cropped = await session.call_tool(
+                    "get_candidates", {"node_id": node_id, "max_px": 800, "region": [0.25, 0.25, 0.5, 0.5]}
+                )
+                cropped_texts = " ".join(b.text for b in cropped.content if b.type == "text")
+                check("get_candidates crops region from the original", "sent at 750x500" in cropped_texts, cropped_texts[-60:])
+
+                # Comment threads: one per cell, the person and the agent in it.
                 flag = payload(await session.call_tool("flag_cell", {"node_id": node_id, "note": "smoke-test flag"}))
-                check("flag_cell creates annotation", flag.get("source") == "agent" and node_id in flag.get("node_ids", []))
+                check(
+                    "flag_cell starts a thread",
+                    node_id in flag.get("node_ids", [])
+                    and [m["source"] for m in flag.get("messages", [])] == ["agent"]
+                    and flag["resolved"] is False,
+                )
+                again = payload(await session.call_tool("flag_cell", {"node_id": node_id, "note": "second note"}))
+                check("flag_cell on the same cell continues that thread", again["id"] == flag["id"] and len(again["messages"]) == 2)
+
+                import httpx
+
+                async with httpx.AsyncClient(headers=headers, timeout=30) as c:
+                    r = await c.post(
+                        f"{base_url.rstrip('/')}/api/annotations/{flag['id']}/messages", json={"text": "person replying"}
+                    )
+                    user_message = r.json()["messages"][-1]
+                check("a person's reply lands as source=user", user_message["source"] == "user", user_message["source"])
+
+                done = payload(
+                    await session.call_tool("reply_to_flag", {"flag_id": flag["id"], "text": "done, have a look", "resolve": True})
+                )
+                check(
+                    "reply_to_flag(resolve=True) answers and resolves",
+                    done["resolved"] is True and done["resolved_by"] == "agent" and done["messages"][-1]["text"] == "done, have a look",
+                )
+                open_flags = payload(await session.call_tool("list_flags", {"project_id": project_id}))
+                all_flags = payload(await session.call_tool("list_flags", {"project_id": project_id, "include_resolved": True}))
+                check(
+                    "list_flags hides resolved unless asked",
+                    not any(f["id"] == flag["id"] for f in open_flags) and any(f["id"] == flag["id"] for f in all_flags),
+                )
+
+                own = done["messages"][0]
+                edited = payload(await session.call_tool("edit_flag_message", {"message_id": own["id"], "text": "edited note"}))
+                check("edit_flag_message rewrites the agent's own message", edited["messages"][0]["text"] == "edited note")
+                refused = await session.call_tool("edit_flag_message", {"message_id": user_message["id"], "text": "hijack"})
+                check("edit_flag_message refuses a person's message", refused.isError is True)
+
+                reopened = payload(await session.call_tool("resolve_flag", {"flag_id": flag["id"], "resolved": False}))
+                check("resolve_flag(resolved=False) reopens", reopened["resolved"] is False)
 
                 flags = payload(await session.call_tool("list_flags", {"project_id": project_id}))
                 check("list_flags returns it", any(f["id"] == flag["id"] for f in flags))
+                messages_before = next(f for f in flags if f["id"] == flag["id"])["messages"]
+
+                cancelled = payload(await session.call_tool("cancel_node", {"node_id": node_id}))
+                check("cancel_node on a node with nothing in flight", cancelled.get("cancelled_variants") == [], str(cancelled))
 
                 # Idea board (roadmap.md §1): a sticker the agent wrote, a
                 # comment on it, and the project-wide uniqueness of a {tag}.
@@ -163,7 +252,12 @@ async def main(base_url: str, token: str) -> int:
                 check("blocked run did not queue the node", after["status"] != "queued", f"status={after['status']}")
 
                 flags_after = payload(await session.call_tool("list_flags", {"project_id": project_id}))
-                check("blocked run left a flag for review", len(flags_after) > len(flags))
+                thread_after = next(f for f in flags_after if f["id"] == flag["id"])
+                check(
+                    "blocked run left a note in the cell's thread",
+                    len(thread_after["messages"]) == len(messages_before) + 1
+                    and thread_after["messages"][-1]["source"] == "agent",
+                )
 
                 check("list_backends", isinstance(payload(await session.call_tool("list_backends", {})), list))
                 check("list_node_types", isinstance(payload(await session.call_tool("list_node_types", {})), list))

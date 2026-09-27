@@ -479,28 +479,57 @@ class JobRead(ORMModel):
 
 
 
-# ---------- Annotation (comment blocks) ----------
+# ---------- Annotation (comment threads) ----------
 # No geometry here on purpose: an annotation is a set of member nodes, and the
 # frame drawn around them is derived from where those nodes currently are (see
 # db/models.py's Annotation docstring).
+#
+# `source` on a write is who is writing -- "user" from the UI, "agent" from
+# the MCP tools. It's the author of a new message, the one resolving a thread,
+# and what an edit is checked against (only the author may edit).
 class AnnotationCreate(BaseModel):
+    """Comment on a set of cells. Continues the thread those exact cells
+    already have, if any, rather than stacking a second frame on them."""
+
     project_id: uuid.UUID
-    node_ids: list[uuid.UUID] = []
-    text: str = ""
+    node_ids: list[uuid.UUID]
+    text: str
     source: AnnotationSource = AnnotationSource.user
 
 
 class AnnotationUpdate(BaseModel):
-    text: str | None = None
     node_ids: list[uuid.UUID] | None = None
+    resolved: bool | None = None
+    source: AnnotationSource = AnnotationSource.user
+
+
+class AnnotationMessageCreate(BaseModel):
+    text: str
+    source: AnnotationSource = AnnotationSource.user
+
+
+class AnnotationMessageUpdate(BaseModel):
+    text: str
+    source: AnnotationSource = AnnotationSource.user
+
+
+class AnnotationMessageRead(ORMModel):
+    id: uuid.UUID
+    source: AnnotationSource
+    text: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class AnnotationRead(ORMModel):
     id: uuid.UUID
     project_id: uuid.UUID
-    text: str
-    source: AnnotationSource
     node_ids: list[uuid.UUID]
+    resolved: bool
+    resolved_at: datetime | None
+    resolved_by: AnnotationSource | None
+    # Oldest first; the last one is where the conversation stands.
+    messages: list[AnnotationMessageRead]
     created_at: datetime
     updated_at: datetime
 

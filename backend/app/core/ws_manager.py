@@ -21,7 +21,14 @@ class WebSocketManager:
 
     async def broadcast(self, project_id: str, payload: dict) -> None:
         dead = set()
-        for ws in self._connections.get(project_id, ()):
+        # A snapshot, never the live set: each send awaits, and a browser tab
+        # connecting or dropping during that await adds to or discards from
+        # this very set. Iterating it live raised "Set changed size during
+        # iteration" into the caller -- once a job re-polling for a free
+        # backend, which died before it could requeue itself and sat in
+        # waiting_for_backend until the next restart (2026-09-27, node
+        # e43c72b9: 3 of 4 variants done, the node "running" all night).
+        for ws in list(self._connections.get(project_id, ())):
             try:
                 await ws.send_json(payload)
             except Exception:

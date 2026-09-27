@@ -269,6 +269,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   applyProgressEvent: (event: ProgressEvent) => {
+    if (event.type === "annotations") {
+      const pid = get().projectId;
+      if (pid) get().reloadAnnotations(pid).catch(() => undefined);
+      return;
+    }
     const node = get().nodesById[event.node_id];
 
     if (event.type === "node") {

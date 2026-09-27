@@ -856,11 +856,14 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
         if choice is None:
             job.status = JobStatusEnum.waiting_for_backend
             await db.commit()
-            await ws_manager.broadcast(
-                project_id, {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "waiting_for_backend"}
-            )
+            # Requeue before anything else can fail: this re-poll is the only
+            # thing keeping the job alive, and nothing ever looks for a
+            # waiting_for_backend job that lost it (short of a restart).
             await job_queue.enqueue(
                 run_variant_job, job_id, list(exclude), delay=settings.dispatch_poll_interval_seconds
+            )
+            await ws_manager.broadcast(
+                project_id, {"type": "job", "job_id": str(job.id), "node_id": str(node.id), "status": "waiting_for_backend"}
             )
             return
 

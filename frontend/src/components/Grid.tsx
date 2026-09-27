@@ -9,6 +9,7 @@ import { useT } from "../i18n";
 import { cx } from "../utils";
 import { isFileDrag } from "../dragUtils";
 import { AnnotationFrame } from "./AnnotationFrame";
+import { AnnotationThread } from "./AnnotationThread";
 import { ReferencePicker } from "./ReferencePicker";
 import { ArrowsOverlay, type Edge } from "./ArrowsOverlay";
 import { CompareModal } from "./CompareModal";
@@ -66,6 +67,10 @@ export function Grid({ projectId }: { projectId: string }) {
   // cell toggles membership; a plain click is left alone so it keeps meaning
   // whatever it meant before (compare, ref, open).
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
+  // The comment thread open in its dialog: an existing one by id (read live
+  // from the store, so an agent's reply appears while it's open), or the cells
+  // a new one is about to be started on.
+  const [openThread, setOpenThread] = useState<{ id: string } | { nodeIds: string[] } | null>(null);
   const [templates, setTemplates] = useState<NodeTemplate[]>([]);
   const [backends, setBackends] = useState<Backend[]>([]);
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
@@ -619,11 +624,50 @@ export function Grid({ projectId }: { projectId: string }) {
     });
   };
 
-  const createAnnotationFromSelection = async () => {
+  // Opens the thread these exact cells already have rather than starting a
+  // second one on them -- the backend would continue it anyway (one thread per
+  // set of cells), this just shows the conversation before you type into it.
+  const commentOnSelection = () => {
     if (selectedNodeIds.size === 0) return;
-    await annotationsApi.create({ project_id: projectId, node_ids: [...selectedNodeIds], text: "" });
+    const nodeIds = [...selectedNodeIds];
+    const existing = annotations.find((a) => a.node_ids.length === nodeIds.length && nodeIds.every((id) => a.node_ids.includes(id)));
+    setOpenThread(existing ? { id: existing.id } : { nodeIds });
     setSelectedNodeIds(new Set());
-    await reloadAnnotations(projectId);
+  };
+
+  const threadActions = (thread: { id: string } | { nodeIds: string[] }) => {
+    const refresh = () => reloadAnnotations(projectId);
+    return {
+      onSend: async (text: string) => {
+        if ("id" in thread) {
+          await annotationsApi.reply(thread.id, text);
+          await refresh();
+          return;
+        }
+        const created = await annotationsApi.create({ project_id: projectId, node_ids: thread.nodeIds, text });
+        // Refreshed first, so the dialog never looks the new id up before the
+        // store has it (which would close and reopen it).
+        await refresh();
+        setOpenThread({ id: created.id });
+      },
+      onSetResolved: async (resolved: boolean) => {
+        if ("id" in thread) await annotationsApi.setResolved(thread.id, resolved);
+        await refresh();
+      },
+      onEditMessage: async (message: { id: string }, text: string) => {
+        await annotationsApi.editMessage(message.id, text);
+        await refresh();
+      },
+      onRemoveMessage: async (message: { id: string }) => {
+        await annotationsApi.removeMessage(message.id);
+        await refresh();
+      },
+      onRemove: async () => {
+        if ("id" in thread) await annotationsApi.remove(thread.id);
+        setOpenThread(null);
+        await refresh();
+      },
+    };
   };
 
   // A frame's box is derived here, every render, from where its members
@@ -631,27 +675,36 @@ export function Grid({ projectId }: { projectId: string }) {
   // moved node carries its frame along instead of leaving it behind.
   const annotationBoxes = useMemo(() => {
     const rowOf = new Map(tracks.map((t) => [t.id, t.row_index]));
-    return annotations
-      .map((annotation) => {
-        const positions = annotation.node_ids
-          .map((id) => nodesById[id])
-          .filter((n): n is NodeItem => Boolean(n))
-          .map((n) => ({ row: rowOf.get(n.track_id), col: n.step_index }))
-          .filter((p): p is { row: number; col: number } => p.row !== undefined);
-        if (positions.length === 0) return null;
-        const rows = positions.map((p) => p.row);
-        const cols = positions.map((p) => p.col);
-        return {
-          annotation,
-          box: {
-            minRow: Math.min(...rows),
-            maxRow: Math.max(...rows),
-            minCol: Math.min(...cols),
-            maxCol: Math.max(...cols),
-          },
-        };
-      })
-      .filter((x): x is { annotation: (typeof annotations)[number]; box: { minRow: number; maxRow: number; minCol: number; maxCol: number } } => x !== null);
+    type Box = { minRow: number; maxRow: number; minCol: number; maxCol: number };
+    const framed: { annotation: (typeof annotations)[number]; box: Box; labelSlot: { index: number; count: number } }[] = [];
+    for (const annotation of annotations) {
+      const positions = annotation.node_ids
+        .map((id) => nodesById[id])
+        .filter((n): n is NodeItem => Boolean(n))
+        .map((n) => ({ row: rowOf.get(n.track_id), col: n.step_index }))
+        .filter((p): p is { row: number; col: number } => p.row !== undefined);
+      if (positions.length === 0) continue;
+      const rows = positions.map((p) => p.row);
+      const cols = positions.map((p) => p.col);
+      const box = { minRow: Math.min(...rows), maxRow: Math.max(...rows), minCol: Math.min(...cols), maxCol: Math.max(...cols) };
+      framed.push({ annotation, box, labelSlot: { index: 0, count: 1 } });
+    }
+    // Every frame's label sits on its top-left corner, so frames starting in
+    // the same cell (a group frame over a cell with a thread of its own) would
+    // stack their labels exactly on top of each other. They split that edge
+    // instead, narrowest frame first: each one's slot is a fraction of its own
+    // width, so a wider frame's slot always starts right of a narrower one's.
+    const byCorner = new Map<string, typeof framed>();
+    for (const f of framed) {
+      const key = `${f.box.minRow}:${f.box.minCol}`;
+      byCorner.set(key, [...(byCorner.get(key) ?? []), f]);
+    }
+    const size = (b: Box) => [b.maxCol - b.minCol, b.maxRow - b.minRow];
+    for (const group of byCorner.values()) {
+      group.sort((a, b) => size(a.box)[0] - size(b.box)[0] || size(a.box)[1] - size(b.box)[1]);
+      group.forEach((f, index) => (f.labelSlot = { index, count: group.length }));
+    }
+    return framed;
   }, [annotations, nodesById, tracks]);
 
   const addTrackRow = async () => {
@@ -1453,7 +1506,7 @@ export function Grid({ projectId }: { projectId: string }) {
           {selectedNodeIds.size === 1
             ? t("grid.selectedOne", { n: selectedNodeIds.size })
             : t("grid.selectedMany", { n: selectedNodeIds.size })}
-          <button onClick={createAnnotationFromSelection} title={t("grid.addCommentTitle")}>
+          <button onClick={commentOnSelection} title={t("grid.addCommentTitle")}>
             {t("grid.addComment")}
           </button>
           <button onClick={() => setSelectedNodeIds(new Set())} title={t("grid.clearSelectionTitle")}>
@@ -1638,19 +1691,13 @@ export function Grid({ projectId }: { projectId: string }) {
             });
           })}
 
-          {annotationBoxes.map(({ annotation, box }) => (
+          {annotationBoxes.map(({ annotation, box, labelSlot }) => (
             <AnnotationFrame
               key={annotation.id}
               annotation={annotation}
               box={box}
-              onSave={async (text) => {
-                await annotationsApi.update(annotation.id, { text });
-                await reloadAnnotations(projectId);
-              }}
-              onDelete={async () => {
-                await annotationsApi.remove(annotation.id);
-                await reloadAnnotations(projectId);
-              }}
+              labelSlot={labelSlot}
+              onOpen={() => setOpenThread({ id: annotation.id })}
             />
           ))}
 
@@ -1981,6 +2028,15 @@ export function Grid({ projectId }: { projectId: string }) {
               onSelectLeft={eligible ? selectCompareLeft : undefined}
               onDiscardLeft={eligible ? discardCompareLeft : undefined}
             />
+          );
+        })()}
+      {openThread &&
+        (() => {
+          const annotation = "id" in openThread ? annotations.find((a) => a.id === openThread.id) : null;
+          // Deleted while open -- here or by removing its last message.
+          if ("id" in openThread && !annotation) return null;
+          return (
+            <AnnotationThread annotation={annotation ?? null} onClose={() => setOpenThread(null)} {...threadActions(openThread)} />
           );
         })()}
       {pickRefAt && (

@@ -11,10 +11,13 @@ instead of being mirrored (and drifting) here.
 """
 import asyncio
 import base64
+import io
+import math
 import mimetypes
 import uuid
 from pathlib import Path
 
+from PIL import Image as PILImage
 from sqlalchemy import select
 
 from app.db.base import async_session_maker
@@ -459,8 +462,14 @@ async def add_pointer(
 async def set_dashboard_result(dashboard_id: str, asset_id: str | None = None) -> dict:
     """Choose which asset generated inside this sub-dashboard is its result --
     the face every pointer into it (including the one sitting in the parent
-    grid) shows from then on. The asset must actually live inside this
-    dashboard's own scope. Pass asset_id=None to clear it back to blank."""
+    grid) shows from then on. Pass asset_id=None to clear it back to blank.
+
+    The asset must have been produced inside this dashboard's own grid. A
+    reference (asset.refasset) to a picture made elsewhere is refused on
+    purpose: a dashboard's face is what that dashboard made. Don't work around
+    it by copying the picture in (e.g. a full-frame native.crop) -- if the
+    result you want lives somewhere else, flag the cell and leave it for the
+    person to decide."""
     return await _post(f"/api/dashboards/{dashboard_id}/result", {"asset_id": asset_id})
 
 
@@ -566,32 +575,117 @@ async def rerun_node(node_id: str) -> dict:
     return await _post(f"/api/nodes/{node_id}/reroll")
 
 
-# ---------- candidates ----------
 @mcp_server.tool()
-async def get_candidates(node_id: str, max_images: int = 8) -> list:
-    """Fetch a node's outputs as actual images, so they can be looked at and
-    judged rather than guessed at from metadata."""
+async def cancel_node(node_id: str) -> dict:
+    """Stop a node's generation: every variant still queued, waiting for a
+    backend or running is cancelled. Variants that already finished are kept,
+    and the node settles as done on them -- the way out when some variants
+    came back and the rest are stuck. Takes a moment to land; confirm with
+    get_runs_status."""
+    jobs = await _get(f"/api/nodes/{node_id}/jobs")
+    live = [j for j in jobs if j["status"] in ("pending", "running", "waiting_for_backend")]
+    await _post(f"/api/nodes/{node_id}/cancel")
+    return {
+        "node_id": node_id,
+        "cancelled_variants": [j["variant_index"] for j in live],
+        "kept_variants": [j["variant_index"] for j in jobs if j["status"] == "done"],
+    }
+
+
+# ---------- candidates ----------
+# Claude looks at no more than ~1568 px on the long edge; anything bigger is
+# downscaled on arrival anyway, so sending it only costs transfer. The originals
+# are the problem this exists for: an 8K upscale is tens of MB, and returning
+# one as is closed the MCP connection outright (2026-09-27).
+_VIEW_MAX_PX = 1568
+
+
+def _agent_view(data: bytes, max_px: int, region: list[float] | None) -> tuple[bytes, str, tuple[int, int]]:
+    """An image as the agent should see it: `region` (fractions of the
+    original) cut out first, then scaled to fit max_px. Returns the bytes,
+    their format and the size actually sent. Blocking -- decoding an 8K PNG
+    takes about a second and ~130 MB, so callers run it in a thread."""
+    with PILImage.open(io.BytesIO(data)) as img:
+        if region is None and not (max_px and max(img.size) > max_px):
+            return data, (img.format or "png").lower(), img.size
+        # Real transparency is kept (native.mask bakes its holes into alpha), so
+        # that goes out as PNG; everything else as JPEG, several times smaller.
+        alpha = img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info
+        view = img
+        if region is not None:
+            width, height = img.size
+            left, top, right, bottom = region
+            # Outward to whole pixels, so a region never rounds away to nothing
+            # (a thin strip of a small image would otherwise crop to 0 px).
+            box = (
+                math.floor(left * width),
+                math.floor(top * height),
+                max(math.floor(left * width) + 1, math.ceil(right * width)),
+                max(math.floor(top * height) + 1, math.ceil(bottom * height)),
+            )
+            view = img.crop(box)
+        if view.mode not in ("RGB", "RGBA"):
+            view = view.convert("RGBA" if alpha else "RGB")
+        if max_px and max(view.size) > max_px:
+            view.thumbnail((max_px, max_px), PILImage.LANCZOS)
+        buf = io.BytesIO()
+        if alpha and view.getchannel("A").getextrema()[0] < 255:
+            view.save(buf, "PNG")
+            return buf.getvalue(), "png", view.size
+        view.convert("RGB").save(buf, "JPEG", quality=90)
+        return buf.getvalue(), "jpeg", view.size
+
+
+@mcp_server.tool()
+async def get_candidates(
+    node_id: str, max_images: int = 8, max_px: int = _VIEW_MAX_PX, region: list[float] | None = None
+) -> list:
+    """Look at a node's outputs as actual images, so they can be judged rather
+    than guessed at from metadata.
+
+    The first line lists every output -- asset_id, whether it's selected, its
+    full size -- whatever max_images is, so max_images=0 is the cheap way to
+    get just the ids (for select_candidate or set_dashboard_result).
+
+    Images come back scaled to fit max_px on the long edge; about 1568 is the
+    most a model actually looks at. To inspect detail -- seams between upscale
+    tiles, lettering, a hand -- pass region=[left, top, right, bottom] as
+    fractions of the image (e.g. [0.4, 0.4, 0.6, 0.6] for the middle): the crop
+    is cut from the full-size original before scaling, so a small enough
+    region shows real pixels. The same region applies to every candidate,
+    which makes it easy to compare them. max_px=0 sends images unscaled --
+    avoid it on anything big.
+    """
     from mcp.server.fastmcp import Image
+
+    if region is not None:
+        if len(region) != 4 or not (0 <= region[0] < region[2] <= 1 and 0 <= region[1] < region[3] <= 1):
+            raise ValueError("region must be [left, top, right, bottom], fractions of the image with left < right and top < bottom")
 
     outputs = await _get(f"/api/nodes/{node_id}/outputs")
     storage = get_storage()
-    content: list = [{"type": "text", "text": f"{len(outputs)} candidate(s) for node {node_id}"}]
-
-    for asset in outputs[:max_images]:
-        summary = {
+    listing = [
+        {
             "asset_id": asset["id"],
             "selected": asset.get("selected"),
+            "size": f"{asset['width']}x{asset['height']}" if asset.get("width") else None,
             "mime_type": asset.get("mime_type"),
             "created_at": asset.get("created_at"),
         }
-        content.append({"type": "text", "text": str(summary)})
+        for asset in outputs
+    ]
+    content: list = [{"type": "text", "text": f"{len(outputs)} candidate(s) for node {node_id}: {listing}"}]
+
+    for asset in outputs[: max(0, max_images)]:
         try:
-            data = storage.get_object(asset["storage_key"])
-        except OSError as exc:
-            content.append({"type": "text", "text": f"(image unreadable: {exc})"})
+            data = await asyncio.to_thread(storage.get_object, asset["storage_key"])
+            view, fmt, size = await asyncio.to_thread(_agent_view, data, max_px, region)
+        except Exception as exc:  # one unreadable output shouldn't cost the agent the rest
+            content.append({"type": "text", "text": f"asset {asset['id']}: can't show it as an image ({exc!r})"})
             continue
-        fmt = (asset.get("mime_type") or "image/png").split("/")[-1]
-        content.append(Image(data=data, format=fmt))
+        shown = "region " + str(region) + ", " if region else ""
+        content.append({"type": "text", "text": f"asset {asset['id']} ({shown}sent at {size[0]}x{size[1]})"})
+        content.append(Image(data=view, format=fmt))
     return content
 
 
@@ -639,13 +733,23 @@ async def select_candidate(node_id: str, kept_asset_id: str) -> dict:
 
 
 # ---------- review ----------
+# A cell's comments are one thread (one per set of cells), shared with the
+# person: flag_cell starts it or continues it, reply_to_flag answers in it,
+# resolve_flag marks it done. What anyone said is never removed from here --
+# there is deliberately no delete tool, the same way there is none for nodes:
+# closing a thread is how an agent says "handled", and cleaning up stays a
+# person's call.
 @mcp_server.tool()
 async def flag_cell(node_id: str, note: str) -> dict:
-    """Mark a cell as needing a human look, with a note, and carry on.
+    """Leave a note on a cell for the person to read, and carry on.
 
     Use this instead of stopping to ask a question when running unattended.
-    The flag shows up as a comment block on the grid, the same object a person
-    creates by hand, so flags are reviewed alongside their own notes.
+    It shows up as a comment frame on the grid, the same thread a person
+    writes in by hand. If the cell already has a thread this continues it
+    (and reopens it if it was resolved) rather than stacking a second frame
+    on the same cell -- so for a status update on work you announced earlier,
+    prefer reply_to_flag on that thread, or edit_flag_message if you'd rather
+    update your earlier message in place.
     """
     node = await _get(f"/api/nodes/{node_id}")
     track = await _get(f"/api/tracks/{node['track_id']}")
@@ -656,9 +760,52 @@ async def flag_cell(node_id: str, note: str) -> dict:
 
 
 @mcp_server.tool()
-async def list_flags(project_id: str) -> list[dict]:
-    """All comment blocks on a project -- both agent flags and hand-written notes."""
-    return await _get(f"/api/projects/{project_id}/annotations")
+async def list_flags(project_id: str, include_resolved: bool = False) -> list[dict]:
+    """Comment threads on a project's grid, each with every message in it,
+    oldest first, and `source` saying who wrote it ("user" is the person,
+    "agent" is you or another agent).
+
+    Read the last message to see where a thread stands: one ending in a
+    "user" message is the person talking to you -- an instruction, feedback
+    on something you made -- and is yours to act on, then answer with
+    reply_to_flag. Resolved threads are left out unless include_resolved; a
+    new message in one reopens it, so anything the person comes back to
+    shows up here again by itself.
+    """
+    threads = await _get(f"/api/projects/{project_id}/annotations")
+    return threads if include_resolved else [t for t in threads if not t["resolved"]]
+
+
+@mcp_server.tool()
+async def reply_to_flag(flag_id: str, text: str, resolve: bool = False) -> dict:
+    """Answer in a comment thread (flag_id is the thread's id from list_flags
+    or flag_cell).
+
+    resolve=True also marks the thread done in the same call -- the usual way
+    to report back on something the person asked for ("done: ..., have a
+    look"). A resolved thread stays on the grid, just quieter, and reopens if
+    anyone writes in it again.
+    """
+    thread = await _post(f"/api/annotations/{flag_id}/messages", {"text": text, "source": "agent"})
+    if resolve:
+        thread = await _patch(f"/api/annotations/{flag_id}", {"resolved": True, "source": "agent"})
+    return thread
+
+
+@mcp_server.tool()
+async def resolve_flag(flag_id: str, resolved: bool = True) -> dict:
+    """Mark a comment thread done without writing anything, or reopen it
+    (resolved=False). Nothing in it is deleted either way."""
+    return await _patch(f"/api/annotations/{flag_id}", {"resolved": resolved, "source": "agent"})
+
+
+@mcp_server.tool()
+async def edit_flag_message(message_id: str, text: str) -> dict:
+    """Rewrite one of your own messages in a thread -- e.g. turn an earlier
+    "in progress, don't touch" into "done". Only messages you wrote
+    (source="agent") can be edited; a person's message is theirs, so answer
+    it with reply_to_flag instead."""
+    return await _patch(f"/api/annotation-messages/{message_id}", {"text": text, "source": "agent"})
 
 
 # ---------- backends ----------

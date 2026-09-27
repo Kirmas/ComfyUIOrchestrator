@@ -162,9 +162,9 @@ async def select_backend(
     capabilities = await eligible_capabilities(db, node_type_slug, mode, manual_backend_id, use_api)
 
     candidates: list[DispatchChoice] = []
+    # Backends this job already failed on (run_variant_job's retry path).
+    avoided: list[DispatchChoice] = []
     for capability in capabilities:
-        if str(capability.backend_id) in exclude_backend_ids:
-            continue
         backend = await db.get(Backend, capability.backend_id)
         if backend is None or not backend.is_active:
             continue
@@ -175,19 +175,29 @@ async def select_backend(
         instance = _instantiate(backend, capability)
         if instance is None:
             continue
-        candidates.append(DispatchChoice(backend=backend, capability=capability, instance=instance))
-
-    if not candidates:
-        return None
+        choice = DispatchChoice(backend=backend, capability=capability, instance=instance)
+        (avoided if str(capability.backend_id) in exclude_backend_ids else candidates).append(choice)
 
     # capacity() is a live HTTP round trip -- run these concurrently-safe outside
     # the lock. Only the read-_reserved/pick-best/write-_reserved step needs to
     # be atomic, otherwise two callers can both read the same stale reservation
     # count before either has incremented it (see module docstring above).
     infos = [(choice, await choice.instance.capacity()) for choice in candidates]
+    if avoided and not any(info.is_alive for _, info in infos):
+        # Exclusion is a preference -- "retry somewhere else" -- not a ban. With
+        # nothing else even up, honouring it parked the retry in
+        # waiting_for_backend for as long as the other machine stayed off
+        # (2026-09-27: a variant hit a sampler fault on asusi9 while asusi7 was
+        # powered down, and waited for asusi7 all night). Trying again where it
+        # failed is bounded by max_retries like any other retry; a backend
+        # that's merely busy still counts as alive, so this never jumps a queue
+        # that's about to drain.
+        infos += [(choice, await choice.instance.capacity()) for choice in avoided]
+    if not infos:
+        return None
     # Read before taking the lock -- it's a DB round trip, and the count only
     # needs to be good enough to tell "one job left" from "several".
-    waiting_jobs = await _waiting_job_count(db) if node_id and len(candidates) > 1 else 0
+    waiting_jobs = await _waiting_job_count(db) if node_id and len(infos) > 1 else 0
 
     best: DispatchChoice | None = None
     async with _reservation_lock:
@@ -232,6 +242,8 @@ async def select_backend(
 
         if best is not None:
             backend_id = str(best.backend.id)
+            if backend_id in exclude_backend_ids:
+                logger.info("job %s -> backend %s again: no backend it hasn't failed on is up", job_id, backend_id)
             _reserved[backend_id] = _reserved.get(backend_id, 0) + 1
             if node_id and job_id:
                 dispatch_stats.note_dispatch(backend_id, node_id, job_id)
