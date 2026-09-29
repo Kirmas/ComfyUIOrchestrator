@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     # just 127.0.0.1/localhost.
     mcp_allowed_hosts: list[str] = ["127.0.0.1:*", "localhost:*", "[::1]:*", "192.168.0.3:*"]
 
+    # Agent chats (app/api/routes/agent_chats.py). The agent runner is a
+    # separate process (agent_runner/runner.py, its own user unit) so a chat
+    # survives this service restarting; this service only proxies to it and
+    # authenticates to it with its own api_token. agent_mcp_url is this
+    # instance's own /mcp as the runner (same box) reaches it -- the MCP
+    # server a project chat's agent works through.
+    agent_runner_url: str = "http://127.0.0.1:8765"
+    agent_mcp_url: str = "http://127.0.0.1:8000/mcp/"
+
     @model_validator(mode="after")
     def _resolve_relative_paths(self) -> "Settings":
         if self.database_url.startswith("sqlite") and ":///" in self.database_url:

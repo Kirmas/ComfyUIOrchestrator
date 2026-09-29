@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AgentChat } from "./components/AgentChat";
 import { getApiToken } from "./api/client";
 import { projectsApi } from "./api/endpoints";
 import { Board } from "./components/Board";
@@ -10,13 +11,13 @@ import { Settings } from "./components/Settings";
 import { useT } from "./i18n";
 import { cx } from "./utils";
 
-type View = "grid" | "board" | "settings" | "logs";
+type View = "grid" | "board" | "agent" | "settings" | "logs";
 type AuthStatus = "checking" | "unauthenticated" | "authenticated";
 
 const LAST_PROJECT_KEY = "comfy-orchestrator:lastProjectId";
 const LAST_VIEW_KEY = "comfy-orchestrator:lastView";
 
-const VIEWS: View[] = ["grid", "board", "settings", "logs"];
+const VIEWS: View[] = ["grid", "board", "agent", "settings", "logs"];
 
 /** Reloading should put you back where you were, the same way the project
  * picker already remembers its selection -- landing back on the grid after
@@ -102,6 +103,9 @@ export default function App() {
           <button onClick={() => goTo(view === "board" ? "grid" : "board")} className={view === "board" ? "active" : ""}>
             {t("app.board")}
           </button>
+          <button onClick={() => goTo(view === "agent" ? "grid" : "agent")} className={view === "agent" ? "active" : ""}>
+            {t("app.agent")}
+          </button>
           <button onClick={() => goTo(view === "logs" ? "grid" : "logs")} className={view === "logs" ? "active" : ""}>
             {t("app.logs")}
           </button>
@@ -119,6 +123,9 @@ export default function App() {
         <div className="main-area">
           <Logs />
         </div>
+      ) : view === "agent" ? (
+        // Rendered without a project too: dev chats aren't about any project.
+        <AgentChat projectId={projectId} />
       ) : view === "board" ? (
         projectId ? (
           <Board projectId={projectId} />

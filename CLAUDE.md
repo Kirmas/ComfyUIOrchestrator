@@ -228,6 +228,33 @@ same reason. Note fastapi 0.140 represents included routers as `_IncludedRouter`
 objects rather than flattening them into `app.routes` — route *counts* look
 wildly different, but routing is unchanged.
 
+## Agent chats (`agent_runner/`, `routes/agent_chats.py`, `AgentChat.tsx`)
+
+The **Agent** tab has two kinds of chat with a Claude Code CLI agent: a
+*project* chat, bound to the current project and working only through this
+app's own `/mcp` (no shell, no files), and a *dev* chat, which is Claude Code
+in this very dev copy -- it can change and deploy the site, and whatever its
+permission rules don't allow comes to the page as Allow / Deny buttons
+(opt-in via `RUNNER_DEV_ENABLED=1`; one dev chat runs at a time, and a dev
+chat shares this working tree with any terminal session, so don't run both on
+the same change). The sessions live in a **separate user-level service, `comfy-agent-runner`**
+(runs as keresh, `127.0.0.1:8765`), not in this process -- a restart of
+`comfy-orchestrator-api` must not kill an agent mid-turn, and the transcript
+stream (SSE keyed by a per-chat sequence) resumes by itself through the proxy.
+The proxy authenticates to the runner with this instance's own `API_TOKEN`,
+so the runner's `RUNNER_TOKENS` must list it (`agent_runner/install.sh`).
+`deploy.sh` does not restart the runner. Details: `agent_runner/README.md`.
+**Night mode** (`agent_runner/night.py`): while the person has it switched on,
+agents can file bugs in this app with the MCP tool `report_bug`; a dev agent
+works each one unattended, refuses non-bugs with reasons, fixes real ones, and
+the *runner* (not the agent) backs up prod, stashes work in progress, deploys,
+health-checks, and commits on a `night/<session>` branch only once prod came
+up -- else discards and redeploys. The morning accept/reject is for the whole
+night (fast-forward main, or redeploy main); no partial picks, by the user's
+choice. If you find the dev copy on a `night/*` branch with a stash named
+"night session ...", a night session is open: decide it in the Agent tab
+rather than by hand.
+
 ## Dev environment (`backend/.venv` + `backend/.env`, both gitignored)
 
 The dev copy is runnable now: a venv plus a `.env` pointing at

@@ -492,3 +492,88 @@ export interface UnownedAsset {
 export interface UnownedAssetScanResult {
   unowned_assets: UnownedAsset[];
 }
+
+// Agent chats (backend/app/api/routes/agent_chats.py -> agent_runner/runner.py).
+// A chat lives in the runner, not the DB: it has to outlive the orchestrator
+// restarting. Statuses: idle | running | awaiting_approval | stopped | error |
+// interrupted. "project" chats are bound to one project and only have its MCP
+// tools; "dev" chats work on the codebase itself (cwd = the dev copy).
+export type AgentChatKind = "project" | "dev";
+
+export interface AgentChat {
+  id: string;
+  kind: AgentChatKind;
+  title: string;
+  project_id?: string;
+  project_name?: string;
+  repo?: string;
+  // Night mode: a dev chat started by another agent's bug report (report_bug)
+  // rather than by the person, and where it is in the pipeline.
+  origin?: "agent";
+  stage?: string;
+  verdict?: string;
+  outcome?: string;
+  status: string;
+  // What the next turn will run on (picked in the chat header) vs what the
+  // CLI reported the last turn actually ran on.
+  requested_model: string;
+  model?: string;
+  created_at: number;
+  updated_at: number;
+  last_seq: number;
+}
+
+export type AgentEvent = { seq: number; ts: number } & (
+  | { type: "user"; text: string; origin?: "agent" }
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: string }
+  | { type: "tool_result"; tool_use_id: string; is_error: boolean; content: string }
+  | { type: "result"; is_error: boolean; subtype?: string; duration_ms?: number; cost_usd?: number; num_turns?: number }
+  | { type: "error"; text: string }
+  | { type: "status"; status: string }
+  | { type: "model"; model: string }
+  | { type: "permission_request"; request_id: string; tool: string; description: string; input: string }
+  | { type: "permission_decision"; request_id: string; decision: PermissionDecision | "cancelled" | "deny_unattended" }
+  | { type: "night"; text: string }
+);
+
+export type PermissionDecision = "allow" | "allow_session" | "deny";
+
+export interface AgentModel {
+  id: string;
+  label: string;
+}
+
+// Night mode (agent_runner/night.py): one session per night, decided as a
+// whole in the morning.
+export interface NightReportSummary {
+  id: string;
+  title: string;
+  stage: string;
+  verdict: string | null;
+  outcome: string | null;
+}
+
+export interface NightSession {
+  id: string;
+  branch: string;
+  branch_created: boolean;
+  base: string;
+  stash: string | null;
+  started_at: number;
+  reports: NightReportSummary[];
+  commits: { sha: string; report_id: string; summary: string; files: string[] }[];
+  notes: { ts: number; text: string }[];
+  outcome?: "accepted" | "rejected";
+  outcome_detail?: string;
+  finished_at?: number;
+}
+
+export interface NightStatus {
+  available: boolean;
+  accept_reports: boolean;
+  busy: boolean;
+  queued: number;
+  session: NightSession | null;
+  history: NightSession[];
+}

@@ -996,3 +996,44 @@ async def place_reference_asset(track_id: str, step_index: int, asset_id: str) -
             "inputs": [{"type": "explicit", "output_id": asset_id}],
         },
     )
+
+
+# ---------- bug reports (night mode, agent_runner/night.py) ----------
+@mcp_server.tool()
+async def report_bug(summary: str, details: str) -> dict:
+    """Report a bug in this orchestrator itself -- not in your own work.
+
+    For when a tool contradicts its own documentation or the app's design:
+    a 500, a result that doesn't match the docstring, two tools that disagree.
+    NOT for wishes: a missing tool or parameter, a limit you'd like lifted, or
+    behaviour that is documented as deliberate (e.g. there are no delete
+    tools for agents) -- those are refused. Before filing, re-read the tool's
+    docstring: a wrong call on your side is refused too, with an explanation.
+
+    `details`: what you called (tool + arguments), what you expected and why
+    (quote the docstring/design), what happened (exact error text). Max 20000
+    chars; summary max 300.
+
+    Only works while the person has night mode switched on; otherwise it
+    fails, and you should tell the person yourself. A developer agent then
+    works the report unattended. If it's a real bug, it fixes and deploys
+    it -- the site restarts for about a minute, so your MCP calls fail
+    meanwhile. Poll get_bug_report every minute or two until status is
+    "done", then act on its verdict and reply.
+    """
+    return await _post("/api/agent-reports", {"summary": summary, "details": details})
+
+
+@mcp_server.tool()
+async def get_bug_report(report_id: str) -> dict:
+    """Where a report_bug report stands.
+
+    status: queued -> preparing -> investigating -> checking -> deploying ->
+    done. While "deploying" the site is restarting: wait, don't retry yet.
+    Once "done": verdict is the developer agent's call (bug-fixed, not-a-bug,
+    agent-misuse, feature-request, unsure), outcome is what actually happened
+    (deployed means the fix is live now; rolled-back / failed-checks mean the
+    bug is still there), and reply is its answer to you -- for a refusal, what
+    you're doing wrong and how to get there with the tools that exist.
+    """
+    return await _get(f"/api/agent-reports/{report_id}")

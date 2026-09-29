@@ -1,5 +1,9 @@
 import { api, getApiBaseUrl, getApiToken } from "./client";
 import type {
+  AgentChat,
+  AgentChatKind,
+  AgentModel,
+  NightStatus,
   Annotation,
   Asset,
   Backend,
@@ -20,6 +24,7 @@ import type {
   NodeKind,
   NodeTemplate,
   OrphanScanResult,
+  PermissionDecision,
   Project,
   StorageInfo,
   Track,
@@ -309,4 +314,32 @@ export const systemApi = {
   deleteUnownedAsset: (assetId: string) => api.post<void>("/api/system/unowned-assets/delete", { asset_id: assetId }),
   adoptUnownedAsset: (assetId: string, projectId: string) =>
     api.post<Asset>("/api/system/unowned-assets/adopt", { asset_id: assetId, project_id: projectId }),
+};
+
+export const agentChatsApi = {
+  list: () => api.get<AgentChat[]>("/api/agent-chats"),
+  models: () => api.get<{ models: AgentModel[]; default: string }>("/api/agent-chats/models"),
+  kinds: () => api.get<{ kinds: AgentChatKind[] }>("/api/agent-chats/kinds"),
+  create: (kind: AgentChatKind, projectId: string | null, model?: string) =>
+    api.post<AgentChat>("/api/agent-chats", { kind, project_id: projectId, model }),
+  decide: (id: string, requestId: string, decision: PermissionDecision) =>
+    api.post<AgentChat>(`/api/agent-chats/${id}/permissions/${requestId}`, { decision }),
+  setModel: (id: string, model: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { model }),
+  remove: (id: string) => api.delete(`/api/agent-chats/${id}`),
+  send: (id: string, text: string) => api.post<AgentChat>(`/api/agent-chats/${id}/messages`, { text }),
+  stop: (id: string) => api.post<AgentChat>(`/api/agent-chats/${id}/stop`),
+  // EventSource can't set headers, so the token rides in the query string
+  // (auth_middleware accepts either). `after` replays from a known point
+  // when we reconnect by hand; EventSource's own retries send Last-Event-ID.
+  eventsUrl: (id: string, after: number) =>
+    `${getApiBaseUrl()}/api/agent-chats/${id}/events?after=${after}&token=${encodeURIComponent(getApiToken())}`,
+};
+
+export const nightApi = {
+  status: () => api.get<NightStatus>("/api/agent-night"),
+  setAcceptReports: (accept: boolean) => api.patch<NightStatus>("/api/agent-night", { accept_reports: accept }),
+  diff: () => api.get<{ diff: string }>("/api/agent-night/diff"),
+  // Reject redeploys main, which restarts this very server -- the request
+  // may well die with it; callers poll status() afterwards.
+  finish: (action: "accept" | "reject") => api.post<{ steps: string[] }>(`/api/agent-night/${action}`),
 };
