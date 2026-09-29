@@ -16,8 +16,8 @@ export function ConnectionBar({ forceOpen = false }: { forceOpen?: boolean } = {
 
   // A wrong token (or base URL) must not look like success: closing this
   // panel and reloading unconditionally, as this used to do, left every
-  // other screen just showing empty lists with no error (ProjectPicker
-  // swallows load failures, Settings.tsx's loaders have no .catch at all)
+  // other screen just showing empty lists with no error (the old project picker
+  // swallowed load failures, Settings.tsx's loaders have no .catch at all)
   // -- indistinguishable from "you have no projects yet". Probing with a
   // real authenticated request here, and rolling back on failure, means a
   // bad token surfaces immediately instead of as a silent empty app.

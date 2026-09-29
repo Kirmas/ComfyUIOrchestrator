@@ -225,6 +225,7 @@ class WorkflowAnalysisOut(BaseModel):
 # ---------- Project ----------
 class ProjectCreate(BaseModel):
     name: str
+    category_id: uuid.UUID | None = None
 
 
 class ProjectRead(ORMModel):
@@ -232,11 +233,48 @@ class ProjectRead(ORMModel):
     name: str
     start_kind: NodeKind | None
     asset_only_view: bool
+    category_id: uuid.UUID | None = None
+    # Hand-picked card picture; null means "random" (see preview_url).
+    preview_asset_id: uuid.UUID | None = None
+    # What the card shows: the picked asset, else a random image out of the
+    # project, re-drawn on every list call. Only the list route fills it.
+    preview_url: str | None = None
     created_at: datetime
 
 
 class ProjectUpdate(BaseModel):
+    # Omitted = leave alone. category_id/preview_asset_id may be sent as an
+    # explicit null (top level / back to random), so the route goes by
+    # model_fields_set rather than "is not None" for those two.
+    name: str | None = None
     asset_only_view: bool | None = None
+    category_id: uuid.UUID | None = None
+    preview_asset_id: uuid.UUID | None = None
+
+
+class ProjectCategoryCreate(BaseModel):
+    name: str
+    parent_id: uuid.UUID | None = None
+
+
+class ProjectCategoryRead(ORMModel):
+    id: uuid.UUID
+    name: str
+    parent_id: uuid.UUID | None
+    created_at: datetime
+
+
+class ProjectCategoryUpdate(BaseModel):
+    # Same explicit-null rule as ProjectUpdate: parent_id=null moves to the top.
+    name: str | None = None
+    parent_id: uuid.UUID | None = None
+
+
+class ProjectImageRead(BaseModel):
+    """One candidate for a project's card picture."""
+
+    id: uuid.UUID
+    preview_url: str
 
 
 # ---------- Track ----------

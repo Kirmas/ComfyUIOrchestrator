@@ -1,29 +1,75 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes.annotations import LOAD_THREAD, annotation_read
 from app.core.grid_layout import compute_layout
 from app.core.grid_scope import scope_start_kind
 from app.core.node_types import resolve_effective_template
+from app.core.storage import build_preview_url
 from app.core.track_order import ordered_tracks
 from app.db.base import get_db
-from app.db.models import Annotation, Capability, Dashboard, Node, NodeKind, NodeStatus, Project
-from app.schemas.schemas import AnnotationRead, ProjectCreate, ProjectRead, ProjectUpdate, TrackRead
+from app.db.models import (
+    Annotation,
+    Asset,
+    AssetKind,
+    Capability,
+    Dashboard,
+    Node,
+    NodeKind,
+    NodeStatus,
+    Project,
+    ProjectCategory,
+    Track,
+)
+from app.schemas.schemas import (
+    AnnotationRead,
+    ProjectCreate,
+    ProjectImageRead,
+    ProjectRead,
+    ProjectUpdate,
+    TrackRead,
+)
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+
+def _project_images(project_id: uuid.UUID):
+    """Every image that lives in a project: grid output in any of its
+    dashboards (tracks carry project_id whatever scope they're in) plus the
+    board's library. The pool a card picture is picked -- or drawn -- from."""
+    return (
+        select(Asset.id)
+        .outerjoin(Node, Asset.node_id == Node.id)
+        .outerjoin(Track, Node.track_id == Track.id)
+        .where(Asset.kind == AssetKind.image, or_(Asset.project_id == project_id, Track.project_id == project_id))
+    )
 
 
 @router.get("", response_model=list[ProjectRead])
 async def list_projects(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Project).order_by(Project.created_at))
-    return result.scalars().all()
+    out = []
+    for project in result.scalars().all():
+        item = ProjectRead.model_validate(project)
+        asset_id = project.preview_asset_id or await db.scalar(
+            _project_images(project.id).order_by(func.random()).limit(1)
+        )
+        item.preview_url = build_preview_url(asset_id) if asset_id else None
+        out.append(item)
+    return out
+
+
+async def _ensure_category(db: AsyncSession, category_id: uuid.UUID | None) -> None:
+    if category_id is not None and not await db.get(ProjectCategory, category_id):
+        raise HTTPException(404, "Category not found")
 
 
 @router.post("", response_model=ProjectRead, status_code=201)
 async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_db)):
+    await _ensure_category(db, payload.category_id)
     project = Project(**payload.model_dump())
     db.add(project)
     await db.commit()
@@ -46,9 +92,29 @@ async def update_project(project_id: uuid.UUID, payload: ProjectUpdate, db: Asyn
         raise HTTPException(404, "Project not found")
     if payload.asset_only_view is not None:
         project.asset_only_view = payload.asset_only_view
+    if payload.name is not None:
+        if not payload.name.strip():
+            raise HTTPException(422, "Project name can't be empty")
+        project.name = payload.name.strip()
+    if "category_id" in payload.model_fields_set:
+        await _ensure_category(db, payload.category_id)
+        project.category_id = payload.category_id
+    if "preview_asset_id" in payload.model_fields_set:
+        if payload.preview_asset_id is not None and not await db.scalar(
+            _project_images(project_id).where(Asset.id == payload.preview_asset_id)
+        ):
+            raise HTTPException(409, "That image isn't part of this project")
+        project.preview_asset_id = payload.preview_asset_id
     await db.commit()
     await db.refresh(project)
     return project
+
+
+@router.get("/{project_id}/images", response_model=list[ProjectImageRead])
+async def list_project_images(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Candidates for the card picture, newest first."""
+    ids = (await db.scalars(_project_images(project_id).order_by(Asset.created_at.desc()))).all()
+    return [ProjectImageRead(id=i, preview_url=build_preview_url(i)) for i in ids]
 
 
 @router.get("/{project_id}/tracks", response_model=list[TrackRead])

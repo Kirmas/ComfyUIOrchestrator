@@ -60,14 +60,24 @@ async def _delete(path: str) -> None:
 # ---------- projects / tracks ----------
 @mcp_server.tool()
 async def list_projects() -> list[dict]:
-    """List all projects (id, name, start_kind)."""
+    """List all projects (id, name, start_kind, category_id). category_id is
+    the folder it's filed under on the projects page (see
+    list_project_categories); null = top level."""
     return await _get("/api/projects")
 
 
 @mcp_server.tool()
-async def create_project(name: str) -> dict:
-    """Create an empty project. It has no tracks yet -- call create_track next."""
-    return await _post("/api/projects", {"name": name})
+async def list_project_categories() -> list[dict]:
+    """The projects page's folders (id, name, parent_id -- they nest; null
+    parent = top level). Organisation only: nothing in a grid reads them."""
+    return await _get("/api/project-categories")
+
+
+@mcp_server.tool()
+async def create_project(name: str, category_id: str | None = None) -> dict:
+    """Create an empty project, optionally filed under a category from
+    list_project_categories. It has no tracks yet -- call create_track next."""
+    return await _post("/api/projects", {"name": name, "category_id": category_id})
 
 
 @mcp_server.tool()

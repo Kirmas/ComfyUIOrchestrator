@@ -109,7 +109,26 @@ export interface Project {
   // Pure display toggle -- Grid.tsx hides workflow columns when set. Persisted
   // here purely so it's remembered across reloads; nothing server-side reads it.
   asset_only_view: boolean;
+  // Folder on the projects page; null = top level.
+  category_id: string | null;
+  // Hand-picked card picture; null = random.
+  preview_asset_id: string | null;
+  // What the card shows: the picked picture, else a random one from the
+  // project, re-drawn on every list load. Null when the project has none.
+  preview_url: string | null;
   created_at: string;
+}
+
+export interface ProjectCategory {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  created_at: string;
+}
+
+export interface ProjectImage {
+  id: string;
+  preview_url: string;
 }
 
 // Backend-computed derived layout (GET /api/projects/{id}/layout). The client

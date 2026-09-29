@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
 
-from app.api.routes import agent_chats, annotations, assets, backends, boards, capabilities, dashboards, health, jobs, logs, node_templates, node_types, nodes, projects, system, tracks, ws
+from app.api.routes import agent_chats, annotations, assets, backends, boards, capabilities, dashboards, health, jobs, logs, node_templates, node_types, nodes, project_categories, projects, system, tracks, ws
 from app.config import get_settings
 from app.core.auth import auth_middleware
 from app.core.heartbeat import heartbeat_loop
@@ -87,6 +87,7 @@ def create_app() -> FastAPI:
         backends.router,
         capabilities.router,
         node_templates.router,
+        project_categories.router,
         projects.router,
         tracks.router,
         nodes.router,

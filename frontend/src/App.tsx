@@ -1,23 +1,24 @@
 import { useEffect, useState } from "react";
 import { AgentChat } from "./components/AgentChat";
-import { getApiToken } from "./api/client";
+import { ApiError, getApiToken } from "./api/client";
 import { projectsApi } from "./api/endpoints";
+import type { Project } from "./types";
 import { Board } from "./components/Board";
 import { ConnectionBar } from "./components/ConnectionBar";
 import { Grid } from "./components/Grid";
 import { Logs } from "./components/Logs";
-import { ProjectPicker } from "./components/ProjectPicker";
+import { ProjectsPage } from "./components/ProjectsPage";
 import { Settings } from "./components/Settings";
 import { useT } from "./i18n";
 import { cx } from "./utils";
 
-type View = "grid" | "board" | "agent" | "settings" | "logs";
+type View = "projects" | "grid" | "board" | "agent" | "settings" | "logs";
 type AuthStatus = "checking" | "unauthenticated" | "authenticated";
 
 const LAST_PROJECT_KEY = "comfy-orchestrator:lastProjectId";
 const LAST_VIEW_KEY = "comfy-orchestrator:lastView";
 
-const VIEWS: View[] = ["grid", "board", "agent", "settings", "logs"];
+const VIEWS: View[] = ["projects", "grid", "board", "agent", "settings", "logs"];
 
 /** Reloading should put you back where you were, the same way the project
  * picker already remembers its selection -- landing back on the grid after
@@ -34,6 +35,8 @@ export default function App() {
   const t = useT();
   const [projectId, setProjectId] = useState<string | null>(() => localStorage.getItem(LAST_PROJECT_KEY));
   const [view, setView] = useState<View>(storedView);
+  // Shown on the topbar button that opens the projects page.
+  const [projectName, setProjectName] = useState<string | null>(null);
   // On phones the whole topbar (project picker + nav + connection) collapses
   // behind a hamburger -- it's rarely needed mid-session and eats scarce
   // screen width. No effect on desktop, where CSS keeps .topbar-menu always
@@ -62,10 +65,38 @@ export default function App() {
     setMenuOpen(false);
   };
 
+  // The selected id can come back from localStorage after a reload -- if the
+  // project was deleted in the meantime (this browser or another), drop it
+  // instead of leaving Grid pointed at a project that 404s.
+  useEffect(() => {
+    if (authStatus !== "authenticated" || !projectId) {
+      setProjectName(null);
+      return;
+    }
+    projectsApi
+      .get(projectId)
+      .then((p) => setProjectName(p.name))
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 404) selectProject("");
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authStatus, projectId]);
+
+  const onProjectsLoaded = (projects: Project[]) => {
+    const mine = projects.find((p) => p.id === projectId);
+    if (projectId && !mine) selectProject("");
+    else if (mine) setProjectName(mine.name);
+  };
+
   const goTo = (next: View) => {
     setView(next);
     localStorage.setItem(LAST_VIEW_KEY, next);
     setMenuOpen(false);
+  };
+
+  const openProject = (id: string) => {
+    selectProject(id);
+    goTo("grid");
   };
 
   if (authStatus !== "authenticated") {
@@ -94,7 +125,12 @@ export default function App() {
           {menuOpen ? "✕" : "☰"}
         </button>
         <div className={cx("topbar-menu", menuOpen && "open")}>
-          <ProjectPicker projectId={projectId} onSelect={selectProject} />
+          <button
+            onClick={() => goTo(view === "projects" && projectId ? "grid" : "projects")}
+            className={cx("topbar-project", view === "projects" && "active")}
+          >
+            📁 {projectName ?? t("project.select")}
+          </button>
           <div className="topbar-spacer" />
           {view !== "grid" && <button onClick={() => goTo("grid")}>{t("app.backToGrid")}</button>}
           {/* Pre-production lives here: idea, references, divergence. The grid
@@ -115,7 +151,10 @@ export default function App() {
           <ConnectionBar />
         </div>
       </div>
-      {view === "settings" ? (
+      {view === "projects" || (!projectId && (view === "grid" || view === "board")) ? (
+        // Also what a grid/board with no project to show falls back to.
+        <ProjectsPage projectId={projectId} onOpen={openProject} onProjectsLoaded={onProjectsLoaded} />
+      ) : view === "settings" ? (
         <div className="main-area">
           <Settings />
         </div>
@@ -126,20 +165,10 @@ export default function App() {
       ) : view === "agent" ? (
         // Rendered without a project too: dev chats aren't about any project.
         <AgentChat projectId={projectId} />
-      ) : view === "board" ? (
-        projectId ? (
-          <Board projectId={projectId} />
-        ) : (
-          <div className="main-area" style={{ padding: 24, color: "var(--text-dim)" }}>
-            {t("app.pickProjectForBoard")}
-          </div>
-        )
-      ) : projectId ? (
-        <Grid projectId={projectId} />
+      ) : view === "board" && projectId ? (
+        <Board projectId={projectId} />
       ) : (
-        <div className="main-area" style={{ padding: 24, color: "var(--text-dim)" }}>
-          {t("app.pickProjectForGrid")}
-        </div>
+        projectId && <Grid projectId={projectId} />
       )}
     </div>
   );

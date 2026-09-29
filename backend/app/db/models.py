@@ -126,11 +126,42 @@ class NodeTemplate(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ProjectCategory(Base):
+    """A folder on the projects page ("Babylon" > "Characters"). Pure
+    organisation: nothing in the grid, the board or generation reads it.
+
+    Nests through parent_id to any depth. Deleting one is refused while it
+    still holds projects or subcategories (routes/project_categories.py) --
+    a cascade here would take finished projects with it, and a SET NULL would
+    silently scatter them to the top level."""
+
+    __tablename__ = "project_categories"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("project_categories.id", ondelete="RESTRICT"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Project(Base):
     __tablename__ = "projects"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Null = top level of the projects page.
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("project_categories.id", ondelete="RESTRICT"), nullable=True
+    )
+    # The picture on this project's card, chosen by hand. Null = a random image
+    # from the project on every load (routes/projects.py). A project rarely has
+    # one "final" picture, so nothing picks this automatically. use_alter:
+    # assets.project_id points back here, so the two tables reference each other.
+    preview_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assets.id", ondelete="SET NULL", use_alter=True, name="fk_projects_preview_asset_id"),
+        nullable=True,
+    )
     # Column kind (asset/workflow) is a project-wide, position-based pattern, not
     # a per-node choice: whichever kind the very first node in the project is
     # given fixes column 0's kind, and it strictly alternates from there. Null

@@ -26,6 +26,8 @@ import type {
   OrphanScanResult,
   PermissionDecision,
   Project,
+  ProjectCategory,
+  ProjectImage,
   StorageInfo,
   Track,
   UnownedAssetScanResult,
@@ -99,7 +101,13 @@ export const nodeTemplatesApi = {
 
 export const projectsApi = {
   list: () => api.get<Project[]>("/api/projects"),
-  create: (name: string) => api.post<Project>("/api/projects", { name }),
+  create: (name: string, categoryId: string | null = null) =>
+    api.post<Project>("/api/projects", { name, category_id: categoryId }),
+  // Only the fields present are changed; categoryId/previewAssetId accept an
+  // explicit null (top level / back to a random picture).
+  update: (id: string, patch: { name?: string; category_id?: string | null; preview_asset_id?: string | null }) =>
+    api.patch<Project>(`/api/projects/${id}`, patch),
+  images: (id: string) => api.get<ProjectImage[]>(`/api/projects/${id}/images`),
   get: (id: string) => api.get<Project>(`/api/projects/${id}`),
   // dashboardId null/omitted = the project's main grid; pass one to read that
   // sub-dashboard's own scope instead. Row order, spans and blocked cells only
@@ -114,6 +122,15 @@ export const projectsApi = {
   annotations: (id: string) => api.get<Annotation[]>(`/api/projects/${id}/annotations`),
   setAssetOnlyView: (id: string, value: boolean) => api.patch<Project>(`/api/projects/${id}`, { asset_only_view: value }),
   remove: (id: string) => api.delete(`/api/projects/${id}`),
+};
+
+export const projectCategoriesApi = {
+  list: () => api.get<ProjectCategory[]>("/api/project-categories"),
+  create: (name: string, parentId: string | null) =>
+    api.post<ProjectCategory>("/api/project-categories", { name, parent_id: parentId }),
+  update: (id: string, patch: { name?: string; parent_id?: string | null }) =>
+    api.patch<ProjectCategory>(`/api/project-categories/${id}`, patch),
+  remove: (id: string) => api.delete(`/api/project-categories/${id}`),
 };
 
 export const dashboardsApi = {
