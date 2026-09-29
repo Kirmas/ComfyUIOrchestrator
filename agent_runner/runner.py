@@ -113,6 +113,20 @@ MODEL_IDS = {m["id"] for m in MODELS}
 DEFAULT_MODEL = MODELS[0]["id"]
 
 
+# How a dev chat's tool calls get approved (the CLI's --permission-mode), picked
+# per chat next to the model and switchable mid-turn. Project chats have none:
+# their only tools are pre-allowed MCP tools. A night report is always auto --
+# there is nobody to ask. The first entry is the default.
+PERMISSION_MODES = ["auto", "default", "acceptEdits"]
+
+
+def chat_permission_mode(meta: dict) -> str:
+    if meta.get("origin") == "agent":
+        return "auto"
+    mode = meta.get("permission_mode")
+    return mode if mode in PERMISSION_MODES else PERMISSION_MODES[0]
+
+
 def chat_model(meta: dict) -> str:
     """The family a chat runs on. Chats created before the switch to aliases
     stored an exact id ("claude-sonnet-5"); those map to their family."""
@@ -310,6 +324,8 @@ def public_meta(chat: Chat) -> dict:
     m.pop("report_prompt", None)
     m["last_seq"] = chat.seq
     m["requested_model"] = chat_model(chat.meta)
+    if m.get("kind") == "dev":
+        m["permission_mode"] = chat_permission_mode(chat.meta)
     return m
 
 
@@ -421,11 +437,11 @@ class DevProfile(Profile):
 
     def args(self, chat):
         # The user's own settings, CLAUDE.md, memory and MCP servers load as
-        # they would in a terminal (no --setting-sources override). Auto mode:
-        # the same safety classifier that guards the person's own unattended
-        # terminal sessions decides what runs; what it wants confirmed comes
-        # to the page -- or, in a turn started by a bug report, is denied
-        # (auto_decide).
+        # they would in a terminal (no --setting-sources override). The
+        # permission mode is the chat's own pick (auto by default: the same
+        # safety classifier that guards the person's unattended terminal
+        # sessions); whatever the mode wants confirmed comes to the page --
+        # or, in a turn started by a bug report, is denied (auto_decide).
         prompt = DEV_PROMPT.format(repo=chat.meta["repo"])
         extra: list[str] = []
         if chat.meta.get("origin") == "agent":
@@ -434,7 +450,7 @@ class DevProfile(Profile):
             # the prompt says so, and these make it so.
             extra = ["--max-budget-usd", REPORT_BUDGET_USD, "--disallowedTools", *REPORT_DISALLOWED]
         return [
-            "--permission-mode", "auto",
+            "--permission-mode", chat_permission_mode(chat.meta),
             "--permission-prompt-tool", "stdio",
             *extra,
             "--append-system-prompt", prompt,
@@ -702,6 +718,7 @@ async def create_chat(request: Request):
         "title": body.get("title") or "",
         **extra,
         "requested_model": model,
+        **({"permission_mode": body["permission_mode"]} if profile.kind == "dev" and body.get("permission_mode") in PERMISSION_MODES else {}),
         "session_id": str(uuid.uuid4()),
         "session_started": False,
         "status": "idle",
@@ -735,11 +752,26 @@ async def update_chat(request: Request):
         # In the transcript too, so it's clear which answers came from which.
         await chat.emit({"type": "model", "model": model})
         chat.save_meta()
+    mode = body.get("permission_mode")
+    if mode is not None and chat.meta.get("kind") == "dev" and mode != chat_permission_mode(chat.meta):
+        if chat.meta.get("origin") == "agent":
+            return JSONResponse({"detail": "A night report always runs in auto mode"}, status_code=400)
+        if mode not in PERMISSION_MODES:
+            return JSONResponse({"detail": f"Unknown permission mode: {mode!r}"}, status_code=400)
+        chat.meta["permission_mode"] = mode
+        chat.save_meta()
+        # A turn in flight switches right away (the CLI's own control
+        # request); otherwise it applies from the next message.
+        proc = chat.proc
+        if proc and proc.returncode is None and proc.stdin and not proc.stdin.is_closing():
+            send_line(proc, {"type": "control_request", "request_id": f"mode-{uuid.uuid4().hex[:8]}", "request": {"subtype": "set_permission_mode", "mode": mode}})
+            await proc.stdin.drain()
+        await chat.emit({"type": "mode", "mode": mode})
     return JSONResponse(public_meta(chat))
 
 
 async def list_models(request: Request):
-    return JSONResponse({"models": MODELS, "default": DEFAULT_MODEL})
+    return JSONResponse({"models": MODELS, "default": DEFAULT_MODEL, "permission_modes": PERMISSION_MODES})
 
 
 async def delete_chat(request: Request):

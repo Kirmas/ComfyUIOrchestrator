@@ -2790,8 +2790,14 @@ th, td {
   }
 }
 
-.agent-model {
+.agent-header-controls {
   margin-left: auto;
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.agent-model {
   font-size: 12px;
 }
 

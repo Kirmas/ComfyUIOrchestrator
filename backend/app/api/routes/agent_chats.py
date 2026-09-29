@@ -34,12 +34,14 @@ class AgentChatCreate(BaseModel):
     kind: str = "project"
     # Project chats only; a dev chat works on the codebase, not on a project.
     project_id: uuid.UUID | None = None
-    # None = the runner's default. The runner owns the list and validates it.
+    # None = the runner's default. The runner owns the lists and validates.
     model: str | None = None
+    permission_mode: str | None = None  # dev chats only
 
 
 class AgentChatUpdate(BaseModel):
     model: str | None = None
+    permission_mode: str | None = None
 
 
 class PermissionDecision(BaseModel):
@@ -87,7 +89,7 @@ async def list_kinds():
 
 @router.post("")
 async def create_chat(payload: AgentChatCreate, db: AsyncSession = Depends(get_db)):
-    body: dict = {"kind": payload.kind, "model": payload.model}
+    body: dict = {"kind": payload.kind, "model": payload.model, "permission_mode": payload.permission_mode}
     if payload.kind == "project":
         if not payload.project_id:
             raise HTTPException(400, "A project chat needs project_id")

@@ -318,10 +318,11 @@ export const systemApi = {
 
 export const agentChatsApi = {
   list: () => api.get<AgentChat[]>("/api/agent-chats"),
-  models: () => api.get<{ models: AgentModel[]; default: string }>("/api/agent-chats/models"),
+  models: () => api.get<{ models: AgentModel[]; default: string; permission_modes: string[] }>("/api/agent-chats/models"),
   kinds: () => api.get<{ kinds: AgentChatKind[] }>("/api/agent-chats/kinds"),
-  create: (kind: AgentChatKind, projectId: string | null, model?: string) =>
-    api.post<AgentChat>("/api/agent-chats", { kind, project_id: projectId, model }),
+  create: (kind: AgentChatKind, projectId: string | null, model?: string, permissionMode?: string) =>
+    api.post<AgentChat>("/api/agent-chats", { kind, project_id: projectId, model, permission_mode: permissionMode }),
+  setPermissionMode: (id: string, mode: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { permission_mode: mode }),
   decide: (id: string, requestId: string, decision: PermissionDecision) =>
     api.post<AgentChat>(`/api/agent-chats/${id}/permissions/${requestId}`, { decision }),
   setModel: (id: string, model: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { model }),

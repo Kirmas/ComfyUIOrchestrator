@@ -518,6 +518,9 @@ export interface AgentChat {
   // CLI reported the last turn actually ran on.
   requested_model: string;
   model?: string;
+  // Dev chats: how tool calls get approved -- auto (classifier), default
+  // (ask for everything not allowlisted) or acceptEdits.
+  permission_mode?: string;
   created_at: number;
   updated_at: number;
   last_seq: number;
@@ -532,6 +535,7 @@ export type AgentEvent = { seq: number; ts: number } & (
   | { type: "error"; text: string }
   | { type: "status"; status: string }
   | { type: "model"; model: string }
+  | { type: "mode"; mode: string }
   | { type: "permission_request"; request_id: string; tool: string; description: string; input: string }
   | { type: "permission_decision"; request_id: string; decision: PermissionDecision | "cancelled" | "deny_unattended" }
   | { type: "night"; text: string }
