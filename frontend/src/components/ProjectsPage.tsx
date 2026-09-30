@@ -1,41 +1,56 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { resolveAssetUrl } from "../api/client";
-import { projectCategoriesApi, projectsApi } from "../api/endpoints";
+import { designDocApi, projectCategoriesApi, projectsApi } from "../api/endpoints";
 import { useT } from "../i18n";
-import type { Project, ProjectCategory, ProjectImage } from "../types";
+import type { DesignDocSummary, Project, ProjectCategory, ProjectImage } from "../types";
 import { cx } from "../utils";
 
 const FOLDER_KEY = "comfy-orchestrator:projectsFolder";
 
-type Target = { kind: "project"; item: Project } | { kind: "folder"; item: ProjectCategory };
+type Target =
+  | { kind: "project"; item: Project }
+  | { kind: "folder"; item: ProjectCategory }
+  | { kind: "doc"; item: DesignDocSummary };
+
+const targetName = (target: Target) => (target.kind === "doc" ? target.item.title : target.item.name);
 
 /** The projects page: folders (they nest -- "Babylon" > "Characters") and a
  * card per project. Replaced the topbar dropdown once projects stopped being a
- * short flat list. Folders are organisation only; nothing in a grid reads them. */
+ * short flat list. Folders are organisation only; nothing in a grid reads them.
+ *
+ * A folder also holds *global* design docs -- a world's lore rather than one
+ * project's (routes/design_docs.py). One can be moved into a project that has
+ * no doc of its own, or become a new project; it then stops being global. */
 export function ProjectsPage({
   projectId,
   onOpen,
+  onOpenDoc,
+  onOpenProjectDoc,
   onProjectsLoaded,
 }: {
   projectId: string | null;
   onOpen: (id: string) => void;
+  onOpenDoc: (docId: string) => void;
+  onOpenProjectDoc: (projectId: string) => void;
   onProjectsLoaded: (projects: Project[]) => void;
 }) {
   const t = useT();
   const [projects, setProjects] = useState<Project[]>([]);
   const [folders, setFolders] = useState<ProjectCategory[]>([]);
+  const [docs, setDocs] = useState<DesignDocSummary[]>([]);
   const [folderId, setFolderId] = useState<string | null>(() => localStorage.getItem(FOLDER_KEY));
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionsFor, setActionsFor] = useState<Target | null>(null);
   const [previewFor, setPreviewFor] = useState<Project | null>(null);
 
   const reload = () =>
-    Promise.all([projectsApi.list(), projectCategoriesApi.list()])
-      .then(([p, f]) => {
+    Promise.all([projectsApi.list(), projectCategoriesApi.list(), designDocApi.list()])
+      .then(([p, f, d]) => {
         setLoadError(null);
         setProjects(p);
         setFolders(f);
+        setDocs(d);
         onProjectsLoaded(p);
       })
       .catch((err) => setLoadError(err instanceof Error ? err.message : t("project.loadFailed")));
@@ -78,6 +93,7 @@ export function ProjectsPage({
 
   const subfolders = folders.filter((f) => f.parent_id === currentId).sort((a, b) => a.name.localeCompare(b.name));
   const here = projects.filter((p) => p.category_id === currentId).sort((a, b) => a.name.localeCompare(b.name));
+  const docsHere = docs.filter((d) => d.category_id === currentId);
 
   const createProject = async () => {
     const name = prompt(t("projects.newProjectPrompt"))?.trim();
@@ -85,6 +101,37 @@ export function ProjectsPage({
     const project = await projectsApi.create(name, currentId);
     await reload();
     onOpen(project.id);
+  };
+
+  const createDoc = async () => {
+    const title = prompt(t("projects.newDocPrompt"))?.trim();
+    if (!title) return;
+    const doc = await designDocApi.create(title, currentId);
+    onOpenDoc(doc.id);
+  };
+
+  /** Moves a global doc into a project (which must have no doc of its own) and
+   * opens it there -- it's that project's doc from now on. */
+  const attachDoc = (doc: DesignDocSummary, projectIdTo: string) => {
+    if (!projectIdTo) return;
+    designDocApi
+      .attach(doc.id, projectIdTo)
+      .then(() => {
+        setActionsFor(null);
+        onOpenProjectDoc(projectIdTo);
+      })
+      .catch((err) => alert(err instanceof Error ? err.message : String(err)));
+  };
+
+  const projectFromDoc = (doc: DesignDocSummary) => {
+    if (!confirm(t("projects.docToProjectConfirm", { name: doc.title }))) return;
+    designDocApi
+      .createProject(doc.id)
+      .then((project) => {
+        setActionsFor(null);
+        onOpenProjectDoc(project.id);
+      })
+      .catch((err) => alert(err instanceof Error ? err.message : String(err)));
   };
 
   const createFolder = async () => {
@@ -105,12 +152,14 @@ export function ProjectsPage({
   };
 
   const rename = (target: Target) => {
-    const name = prompt(t("projects.renamePrompt"), target.item.name)?.trim();
-    if (!name || name === target.item.name) return;
+    const name = prompt(t("projects.renamePrompt"), targetName(target))?.trim();
+    if (!name || name === targetName(target)) return;
     run(() =>
       target.kind === "project"
         ? projectsApi.update(target.item.id, { name })
-        : projectCategoriesApi.update(target.item.id, { name }),
+        : target.kind === "doc"
+          ? designDocApi.update(target.item.id, { title: name })
+          : projectCategoriesApi.update(target.item.id, { name }),
     );
   };
 
@@ -119,7 +168,9 @@ export function ProjectsPage({
     run(() =>
       target.kind === "project"
         ? projectsApi.update(target.item.id, { category_id: dest })
-        : projectCategoriesApi.update(target.item.id, { parent_id: dest }),
+        : target.kind === "doc"
+          ? designDocApi.update(target.item.id, { category_id: dest })
+          : projectCategoriesApi.update(target.item.id, { parent_id: dest }),
     );
   };
 
@@ -127,6 +178,9 @@ export function ProjectsPage({
     if (target.kind === "project") {
       if (!confirm(t("project.confirmDelete", { name: target.item.name }))) return;
       run(() => projectsApi.remove(target.item.id));
+    } else if (target.kind === "doc") {
+      if (!confirm(t("projects.confirmDeleteDoc", { name: target.item.title }))) return;
+      run(() => designDocApi.remove(target.item.id));
     } else {
       if (!confirm(t("projects.confirmDeleteFolder", { name: target.item.name }))) return;
       run(() => projectCategoriesApi.remove(target.item.id));
@@ -149,8 +203,7 @@ export function ProjectsPage({
     return out;
   };
 
-  const targetParent = (target: Target) =>
-    target.kind === "project" ? target.item.category_id : target.item.parent_id;
+  const targetParent = (target: Target) => (target.kind === "folder" ? target.item.parent_id : target.item.category_id);
 
   return (
     <div className="main-area projects-page">
@@ -170,6 +223,7 @@ export function ProjectsPage({
         </div>
         <div className="topbar-spacer" />
         <button onClick={createFolder}>{t("projects.newFolder")}</button>
+        <button onClick={() => void createDoc()}>{t("projects.newDoc")}</button>
         <button onClick={createProject}>{t("projects.newProject")}</button>
       </div>
       {loadError && <div className="error-text">{loadError}</div>}
@@ -205,6 +259,26 @@ export function ProjectsPage({
             </div>
           );
         })}
+        {docsHere.map((d) => (
+          <div key={d.id} className="project-tile design-doc-tile" onClick={() => onOpenDoc(d.id)}>
+            <div className="project-tile-image">
+              <span className="project-tile-placeholder">📄</span>
+            </div>
+            <div className="project-tile-footer">
+              <span className="project-tile-name">{d.title}</span>
+              <button
+                className="project-tile-more"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setActionsFor({ kind: "doc", item: d });
+                }}
+                title={t("projects.actions")}
+              >
+                ⋯
+              </button>
+            </div>
+          </div>
+        ))}
         {here.map((p) => (
           <div key={p.id} className={cx("project-tile", p.id === projectId && "current")} onClick={() => onOpen(p.id)}>
             <div className="project-tile-image">
@@ -230,7 +304,7 @@ export function ProjectsPage({
           </div>
         ))}
       </div>
-      {subfolders.length === 0 && here.length === 0 && !loadError && (
+      {subfolders.length === 0 && here.length === 0 && docsHere.length === 0 && !loadError && (
         <div className="projects-empty">{t("projects.empty")}</div>
       )}
 
@@ -239,8 +313,8 @@ export function ProjectsPage({
           <div className="image-modal-backdrop" onClick={() => setActionsFor(null)}>
             <div className="projects-sheet" onClick={(e) => e.stopPropagation()}>
               <div className="projects-sheet-title">
-                {actionsFor.kind === "folder" ? "📁 " : ""}
-                {actionsFor.item.name}
+                {actionsFor.kind === "folder" ? "📁 " : actionsFor.kind === "doc" ? "📄 " : ""}
+                {targetName(actionsFor)}
               </div>
               <button onClick={() => rename(actionsFor)}>{t("projects.rename")}</button>
               {actionsFor.kind === "project" && (
@@ -252,6 +326,26 @@ export function ProjectsPage({
                 >
                   {t("projects.choosePreview")}
                 </button>
+              )}
+              {actionsFor.kind === "doc" && (
+                <>
+                  <button onClick={() => projectFromDoc(actionsFor.item)}>{t("projects.docToProject")}</button>
+                  {/* Only projects without a doc of their own can take one. */}
+                  <label className="projects-sheet-move">
+                    {t("projects.docAttachTo")}
+                    <select value="" onChange={(e) => attachDoc(actionsFor.item, e.target.value)}>
+                      <option value="">—</option>
+                      {projects
+                        .filter((p) => !p.has_design_doc)
+                        .sort((a, b) => a.name.localeCompare(b.name))
+                        .map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                </>
               )}
               <label className="projects-sheet-move">
                 {t("projects.moveTo")}
@@ -265,7 +359,11 @@ export function ProjectsPage({
                 </select>
               </label>
               <button className="projects-sheet-danger" onClick={() => remove(actionsFor)}>
-                {actionsFor.kind === "project" ? t("project.delete") : t("projects.deleteFolder")}
+                {actionsFor.kind === "project"
+                  ? t("project.delete")
+                  : actionsFor.kind === "doc"
+                    ? t("projects.deleteDoc")
+                    : t("projects.deleteFolder")}
               </button>
               <button onClick={() => setActionsFor(null)}>{t("projects.close")}</button>
             </div>

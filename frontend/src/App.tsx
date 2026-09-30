@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { AgentChat } from "./components/AgentChat";
 import { ApiError, getApiToken } from "./api/client";
-import { projectsApi } from "./api/endpoints";
-import type { Project } from "./types";
+import { designDocApi, projectsApi } from "./api/endpoints";
+import type { DesignDocSummary, Project } from "./types";
 import { Board } from "./components/Board";
 import { ConnectionBar } from "./components/ConnectionBar";
 import { DesignDoc } from "./components/DesignDoc";
@@ -13,13 +13,15 @@ import { Settings } from "./components/Settings";
 import { useT } from "./i18n";
 import { cx } from "./utils";
 
-type View = "projects" | "grid" | "board" | "doc" | "agent" | "settings" | "logs";
+// "gdoc": a global design doc, opened from its folder on the projects page.
+type View = "projects" | "grid" | "board" | "doc" | "gdoc" | "agent" | "settings" | "logs";
 type AuthStatus = "checking" | "unauthenticated" | "authenticated";
 
 const LAST_PROJECT_KEY = "comfy-orchestrator:lastProjectId";
 const LAST_VIEW_KEY = "comfy-orchestrator:lastView";
+const LAST_GLOBAL_DOC_KEY = "comfy-orchestrator:lastGlobalDoc";
 
-const VIEWS: View[] = ["projects", "grid", "board", "doc", "agent", "settings", "logs"];
+const VIEWS: View[] = ["projects", "grid", "board", "doc", "gdoc", "agent", "settings", "logs"];
 
 /** Reloading should put you back where you were, the same way the project
  * picker already remembers its selection -- landing back on the grid after
@@ -36,6 +38,8 @@ export default function App() {
   const t = useT();
   const [projectId, setProjectId] = useState<string | null>(() => localStorage.getItem(LAST_PROJECT_KEY));
   const [view, setView] = useState<View>(storedView);
+  const [globalDocId, setGlobalDocId] = useState<string | null>(() => localStorage.getItem(LAST_GLOBAL_DOC_KEY));
+  const [globalDoc, setGlobalDoc] = useState<DesignDocSummary | null>(null);
   // Shown on the topbar button that opens the projects page.
   const [projectName, setProjectName] = useState<string | null>(null);
   // On phones the whole topbar (project picker + nav + connection) collapses
@@ -82,6 +86,25 @@ export default function App() {
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authStatus, projectId]);
+
+  // Re-read on open: the title may have changed, or the doc may have been
+  // attached to a project since (then it's no longer global, back to the list).
+  useEffect(() => {
+    if (authStatus !== "authenticated" || !globalDocId) {
+      setGlobalDoc(null);
+      return;
+    }
+    designDocApi
+      .get(globalDocId)
+      .then((d) => setGlobalDoc(d.project_id ? null : d))
+      .catch(() => setGlobalDoc(null));
+  }, [authStatus, globalDocId]);
+
+  const openGlobalDoc = (id: string) => {
+    setGlobalDocId(id);
+    localStorage.setItem(LAST_GLOBAL_DOC_KEY, id);
+    goTo("gdoc");
+  };
 
   const onProjectsLoaded = (projects: Project[]) => {
     const mine = projects.find((p) => p.id === projectId);
@@ -155,9 +178,22 @@ export default function App() {
           <ConnectionBar />
         </div>
       </div>
-      {view === "projects" || (!projectId && (view === "grid" || view === "board" || view === "doc")) ? (
+      {view === "projects" ||
+      (!projectId && (view === "grid" || view === "board" || view === "doc")) ||
+      (view === "gdoc" && !globalDoc) ? (
         // Also what a grid/board with no project to show falls back to.
-        <ProjectsPage projectId={projectId} onOpen={openProject} onProjectsLoaded={onProjectsLoaded} />
+        <ProjectsPage
+          projectId={projectId}
+          onOpen={openProject}
+          onOpenDoc={openGlobalDoc}
+          onOpenProjectDoc={(id) => {
+            selectProject(id);
+            goTo("doc");
+          }}
+          onProjectsLoaded={onProjectsLoaded}
+        />
+      ) : view === "gdoc" && globalDoc ? (
+        <DesignDoc source={{ kind: "global", docId: globalDoc.id, title: globalDoc.title }} />
       ) : view === "settings" ? (
         <div className="main-area">
           <Settings />
@@ -170,7 +206,7 @@ export default function App() {
         // Rendered without a project too: dev chats aren't about any project.
         <AgentChat projectId={projectId} />
       ) : view === "doc" && projectId ? (
-        <DesignDoc projectId={projectId} />
+        <DesignDoc source={{ kind: "project", projectId }} />
       ) : view === "board" && projectId ? (
         <Board projectId={projectId} />
       ) : (

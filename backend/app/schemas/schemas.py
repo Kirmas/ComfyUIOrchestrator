@@ -239,6 +239,9 @@ class ProjectRead(ORMModel):
     # What the card shows: the picked asset, else a random image out of the
     # project, re-drawn on every list call. Only the list route fills it.
     preview_url: str | None = None
+    # Whether the project already has a design doc with text in it -- a global
+    # doc can only be attached to one that doesn't. Only the list route fills it.
+    has_design_doc: bool = False
     created_at: datetime
 
 
@@ -757,6 +760,8 @@ class DesignDocRef(BaseModel):
 
 
 class DesignDocRead(BaseModel):
+    # Null for a project that has no doc yet (it reads as empty).
+    doc_id: uuid.UUID | None = None
     lang: str
     content: str
     updated_at: datetime | None = None
@@ -769,3 +774,39 @@ class DesignDocUpdate(BaseModel):
 
 class DesignDocRefsRequest(BaseModel):
     refs: list[str]
+
+
+class DesignDocSummary(ORMModel):
+    """A doc as a thing on the projects page: a global one sits in a folder
+    (category_id), a project's one hangs off its project (project_id)."""
+
+    id: uuid.UUID
+    title: str
+    project_id: uuid.UUID | None
+    category_id: uuid.UUID | None
+    created_at: datetime
+
+
+class DesignDocCreate(BaseModel):
+    title: str
+    category_id: uuid.UUID | None = None
+
+
+class DesignDocMetaUpdate(BaseModel):
+    # Omitted = unchanged; category_id may be an explicit null (top level).
+    title: str | None = None
+    category_id: uuid.UUID | None = None
+
+
+class DesignDocMakeGlobal(BaseModel):
+    # Omitted = the project's own folder, which is almost always where it belongs.
+    category_id: uuid.UUID | None = None
+    title: str | None = None
+
+
+class DesignDocAttach(BaseModel):
+    project_id: uuid.UUID
+
+
+class DesignDocNewProject(BaseModel):
+    name: str | None = None

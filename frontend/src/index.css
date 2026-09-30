@@ -3494,3 +3494,7 @@ th, td {
     display: none;
   }
 }
+
+.design-doc-title {
+  margin-right: 4px;
+}

@@ -943,6 +943,29 @@ async def set_design_doc(project_id: str, content: str, lang: str = "uk") -> dic
     return await _put(f"/api/projects/{project_id}/design-doc?lang={lang}", {"content": content})
 
 
+@mcp_server.tool()
+async def list_global_design_docs() -> list[dict]:
+    """Design docs that belong to a folder rather than a project -- e.g. a
+    world's lore that several projects draw on. `category_id` is the folder
+    (null = top level). Read/write them with get_global_design_doc /
+    set_global_design_doc; a project's own doc is get_design_doc."""
+    return await _get("/api/design-docs")
+
+
+@mcp_server.tool()
+async def get_global_design_doc(doc_id: str, lang: str = "uk") -> dict:
+    """One language ("uk"/"en") of a global design doc, with its references
+    resolved -- same shape and reference syntax as get_design_doc."""
+    return await _get(f"/api/design-docs/{doc_id}/text", lang=lang)
+
+
+@mcp_server.tool()
+async def set_global_design_doc(doc_id: str, content: str, lang: str = "uk") -> dict:
+    """Replace one language of a global design doc with `content`. Same rules
+    as set_design_doc: read first, edit, don't overwrite blind."""
+    return await _put(f"/api/design-docs/{doc_id}/text?lang={lang}", {"content": content})
+
+
 # ---------- idea board (roadmap.md §1) ----------
 # The point of exposing the board to the agent is that an idea has somewhere to
 # land other than a chat that disappears: "propose eight directions for this

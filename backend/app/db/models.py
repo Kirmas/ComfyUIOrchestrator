@@ -177,25 +177,49 @@ class Project(Base):
 
 
 class DesignDoc(Base):
-    """A project's design doc: one markdown text per project *per language*
-    (a Ukrainian and an English version, written side by side rather than
-    translated by the app; the allowed set is `Lang` in routes/design_docs.py). The primary key is (project,
-    lang), so a project can't grow a second doc in the same language. A row
-    is created on first save; a missing one simply reads as an empty doc.
+    """A design doc, owned by exactly one of two things: a **project** (its
+    design doc -- at most one per project, `project_id` is unique) or a
+    **folder** (`category_id`; null = the projects page's top level) as a
+    *global* doc, e.g. the lore of a whole world that several projects draw on.
 
-    The text may reference things elsewhere in the project by scheme instead
-    of by URL -- `node:<id>` (a grid cell, shown as whatever picture it stands
-    for *now*), `dashboard:<id>` (a sub-dashboard's current result),
-    `board:<id>` (a sticker) or `asset:<id>` (one fixed file) --
-    resolved at read time by routes/design_docs.py, so the doc follows the
-    project instead of freezing a copy of it.
+    Ownership moves, it is never shared: attaching a global doc to a project
+    takes it out of its folder, and making a project's doc global detaches it
+    from the project (routes/design_docs.py). `project_id` set means "project
+    doc" and `category_id` is then ignored.
+
+    The text itself lives in DesignDocText, one row per language.
     """
 
     __tablename__ = "design_docs"
 
-    project_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    # Only meaningful for a global doc; a project's doc goes by the project's name.
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, unique=True
     )
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("project_categories.id", ondelete="RESTRICT"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DesignDocText(Base):
+    """One language of a design doc -- a Ukrainian and an English version
+    written side by side, not translated by the app (the allowed set is `Lang`
+    in routes/design_docs.py). Created on first save; a missing row reads as
+    empty.
+
+    The text may reference things elsewhere by scheme instead of by URL --
+    `node:<id>` (a grid cell, shown as whatever picture it stands for *now*),
+    `dashboard:<id>` (a sub-dashboard's current result), `board:<id>` (a
+    sticker) or `asset:<id>` (one fixed file) -- resolved at read time, so the
+    doc follows the work instead of freezing a copy of it.
+    """
+
+    __tablename__ = "design_doc_texts"
+
+    doc_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("design_docs.id", ondelete="CASCADE"), primary_key=True)
     lang: Mapped[str] = mapped_column(String(8), primary_key=True)
     content: Mapped[str] = mapped_column(Text, default="", nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

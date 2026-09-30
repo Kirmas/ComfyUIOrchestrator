@@ -17,6 +17,8 @@ from app.db.models import (
     AssetKind,
     Capability,
     Dashboard,
+    DesignDoc,
+    DesignDocText,
     Node,
     NodeKind,
     NodeStatus,
@@ -51,9 +53,19 @@ def _project_images(project_id: uuid.UUID):
 @router.get("", response_model=list[ProjectRead])
 async def list_projects(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Project).order_by(Project.created_at))
+    with_doc = set(
+        (
+            await db.scalars(
+                select(DesignDoc.project_id)
+                .join(DesignDocText, DesignDocText.doc_id == DesignDoc.id)
+                .where(DesignDoc.project_id.is_not(None), func.length(func.trim(DesignDocText.content)) > 0)
+            )
+        ).all()
+    )
     out = []
     for project in result.scalars().all():
         item = ProjectRead.model_validate(project)
+        item.has_design_doc = project.id in with_doc
         asset_id = project.preview_asset_id or await db.scalar(
             _project_images(project.id).order_by(func.random()).limit(1)
         )

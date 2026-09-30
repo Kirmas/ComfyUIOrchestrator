@@ -96,6 +96,7 @@ def create_app() -> FastAPI:
         logs.router,
         annotations.router,
         boards.router,
+        design_docs.project_router,
         design_docs.router,
         node_types.router,
         dashboards.router,

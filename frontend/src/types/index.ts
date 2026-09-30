@@ -117,6 +117,8 @@ export interface Project {
   // project, re-drawn on every list load. Null when the project has none.
   preview_url: string | null;
   created_at: string;
+  // Has a design doc with text in it -- a global doc can only be attached to one that doesn't.
+  has_design_doc?: boolean;
 }
 
 export interface ProjectCategory {
@@ -622,8 +624,19 @@ export interface DesignDocRef {
 }
 
 export interface DesignDoc {
+  doc_id: string | null;
   lang: string;
   content: string;
   updated_at: string | null;
   refs: Record<string, DesignDocRef>;
+}
+
+/** A design doc as a thing on the projects page: global ones live in a folder
+ * (category_id), a project's own hangs off its project (project_id). */
+export interface DesignDocSummary {
+  id: string;
+  title: string;
+  project_id: string | null;
+  category_id: string | null;
+  created_at: string;
 }

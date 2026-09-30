@@ -15,6 +15,7 @@ import type {
   Dashboard,
   DesignDoc,
   DesignDocRef,
+  DesignDocSummary,
   DetectedField,
   DirBrowseResult,
   GridLayout,
@@ -310,11 +311,31 @@ export const boardApi = {
 };
 
 export const designDocApi = {
-  get: (projectId: string, lang: string) => api.get<DesignDoc>(`/api/projects/${projectId}/design-doc?lang=${lang}`),
-  save: (projectId: string, lang: string, content: string) =>
+  // A project's own doc (the project may not have one yet -- reads as empty).
+  projectGet: (projectId: string, lang: string) =>
+    api.get<DesignDoc>(`/api/projects/${projectId}/design-doc?lang=${lang}`),
+  projectSave: (projectId: string, lang: string, content: string) =>
     api.put<DesignDoc>(`/api/projects/${projectId}/design-doc?lang=${lang}`, { content }),
-  resolveRefs: (projectId: string, refs: string[]) =>
-    api.post<Record<string, DesignDocRef>>(`/api/projects/${projectId}/design-doc/refs`, { refs }),
+  makeGlobal: (projectId: string, categoryId?: string | null) =>
+    api.post<DesignDocSummary>(
+      `/api/projects/${projectId}/design-doc/make-global`,
+      categoryId === undefined ? {} : { category_id: categoryId },
+    ),
+  // Global docs, owned by a folder.
+  list: () => api.get<DesignDocSummary[]>("/api/design-docs"),
+  create: (title: string, categoryId: string | null) =>
+    api.post<DesignDocSummary>("/api/design-docs", { title, category_id: categoryId }),
+  get: (id: string) => api.get<DesignDocSummary>(`/api/design-docs/${id}`),
+  update: (id: string, patch: { title?: string; category_id?: string | null }) =>
+    api.patch<DesignDocSummary>(`/api/design-docs/${id}`, patch),
+  remove: (id: string) => api.delete(`/api/design-docs/${id}`),
+  getText: (id: string, lang: string) => api.get<DesignDoc>(`/api/design-docs/${id}/text?lang=${lang}`),
+  saveText: (id: string, lang: string, content: string) =>
+    api.put<DesignDoc>(`/api/design-docs/${id}/text?lang=${lang}`, { content }),
+  attach: (id: string, projectId: string) =>
+    api.post<DesignDocSummary>(`/api/design-docs/${id}/attach`, { project_id: projectId }),
+  createProject: (id: string) => api.post<Project>(`/api/design-docs/${id}/create-project`, {}),
+  resolveRefs: (refs: string[]) => api.post<Record<string, DesignDocRef>>("/api/design-docs/refs", { refs }),
 };
 
 export const jobsApi = {

@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import get_db
-from app.db.models import Project, ProjectCategory
+from app.db.models import DesignDoc, Project, ProjectCategory
 from app.schemas.schemas import ProjectCategoryCreate, ProjectCategoryRead, ProjectCategoryUpdate
 
 router = APIRouter(prefix="/api/project-categories", tags=["project-categories"])
@@ -65,7 +65,10 @@ async def delete_category(category_id: uuid.UUID, db: AsyncSession = Depends(get
     category = await _get(db, category_id)
     has_child = await db.scalar(select(ProjectCategory.id).where(ProjectCategory.parent_id == category_id).limit(1))
     has_project = await db.scalar(select(Project.id).where(Project.category_id == category_id).limit(1))
-    if has_child or has_project:
-        raise HTTPException(409, "Category isn't empty -- move its projects and subcategories out first")
+    has_doc = await db.scalar(
+        select(DesignDoc.id).where(DesignDoc.category_id == category_id, DesignDoc.project_id.is_(None)).limit(1)
+    )
+    if has_child or has_project or has_doc:
+        raise HTTPException(409, "Category isn't empty -- move its projects, design docs and subcategories out first")
     await db.delete(category)
     await db.commit()

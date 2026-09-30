@@ -62,8 +62,19 @@ interface TocEntry {
 // h1-h3: a character bible has hundreds of h4s; listing them buries the outline.
 const TOC_SELECTOR = "h1, h2, h3";
 
-export function DesignDoc({ projectId }: { projectId: string }) {
+/** Whose doc this is: a project's own (addressed through the project, which
+ * may not have one yet), or a global one sitting in a folder. */
+export type DocSource = { kind: "project"; projectId: string } | { kind: "global"; docId: string; title: string };
+
+const sourceKey = (s: DocSource) => (s.kind === "project" ? `p:${s.projectId}` : `g:${s.docId}`);
+const fetchDoc = (s: DocSource, lang: DocLang) =>
+  s.kind === "project" ? designDocApi.projectGet(s.projectId, lang) : designDocApi.getText(s.docId, lang);
+const saveDoc = (s: DocSource, lang: DocLang, content: string) =>
+  s.kind === "project" ? designDocApi.projectSave(s.projectId, lang, content) : designDocApi.saveText(s.docId, lang, content);
+
+export function DesignDoc({ source }: { source: DocSource }) {
   const t = useT();
+  const key = sourceKey(source);
   const [lang, setLang] = useState<DocLang>(useLangStore.getState().lang);
   const [content, setContent] = useState<string | null>(null);
   const [refs, setRefs] = useState<Record<string, DesignDocRef>>({});
@@ -87,10 +98,10 @@ export function DesignDoc({ projectId }: { projectId: string }) {
   const loadingFor = useRef("");
 
   const load = () => {
-    const key = `${projectId}:${lang}`;
-    loadingFor.current = key;
-    return designDocApi.get(projectId, lang).then((doc) => {
-      if (loadingFor.current !== key) return;
+    const loadKey = `${key}:${lang}`;
+    loadingFor.current = loadKey;
+    return fetchDoc(source, lang).then((doc) => {
+      if (loadingFor.current !== loadKey) return;
       setContent(doc.content);
       setRefs((prev) => ({ ...prev, ...doc.refs }));
       setSaveState("saved");
@@ -103,21 +114,20 @@ export function DesignDoc({ projectId }: { projectId: string }) {
     setRefs({});
     requested.current.clear();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [key]);
 
   useEffect(() => {
     setContent(null);
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, lang]);
+  }, [key, lang]);
 
   // Autosave. Keyed on the text itself, so the timer restarts on every edit.
   useEffect(() => {
     if (saveState !== "dirty" || content === null) return;
     const timer = setTimeout(() => {
       setSaveState("saving");
-      designDocApi
-        .save(projectId, lang, content)
+      saveDoc(source, lang, content)
         .then((doc) => {
           setRefs((prev) => ({ ...prev, ...doc.refs }));
           // Typing may have continued while the request was out.
@@ -126,7 +136,8 @@ export function DesignDoc({ projectId }: { projectId: string }) {
         .catch(() => setSaveState("error"));
     }, SAVE_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [content, saveState, projectId, lang]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [content, saveState, key, lang]);
 
   // Live preview: resolve references the moment they appear in the text,
   // without waiting for a save.
@@ -135,8 +146,8 @@ export function DesignDoc({ projectId }: { projectId: string }) {
     const unknown = findRefs(content).filter((r) => !(r in refs) && !requested.current.has(r));
     if (unknown.length === 0) return;
     unknown.forEach((r) => requested.current.add(r));
-    designDocApi.resolveRefs(projectId, unknown).then((resolved) => setRefs((prev) => ({ ...prev, ...resolved })));
-  }, [content, refs, projectId]);
+    designDocApi.resolveRefs(unknown).then((resolved) => setRefs((prev) => ({ ...prev, ...resolved })));
+  }, [content, refs]);
 
   const html = useMemo(() => {
     const renderRefs = Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, toRenderRef(v)]));
@@ -212,6 +223,20 @@ export function DesignDoc({ projectId }: { projectId: string }) {
     if (ref && !ref.missing) setOpenRef(ref);
   };
 
+  /** Hands the project's doc over to its folder as a global one. Rare, and it
+   * empties this tab, hence the confirm. */
+  const makeGlobal = async () => {
+    if (source.kind !== "project" || !confirm(t("doc.makeGlobalConfirm"))) return;
+    try {
+      const doc = await designDocApi.makeGlobal(source.projectId);
+      alert(t("doc.madeGlobal", { title: doc.title }));
+      setRefs({});
+      await load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const status = { saved: t("doc.saved"), dirty: t("doc.unsaved"), saving: t("doc.saving"), error: t("doc.saveError") }[saveState];
 
   return (
@@ -225,14 +250,19 @@ export function DesignDoc({ projectId }: { projectId: string }) {
             </button>
           ))}
         </div>
+        {source.kind === "global" && <strong className="design-doc-title">📄 {source.title}</strong>}
         <button disabled={content === null || (editing && saveState !== "saved")} className={editing ? "active" : ""} onClick={() => (editing ? setEditing(false) : void load().then(() => setEditing(true)))}>
           {editing ? t("doc.done") : t("doc.edit")}
         </button>
         {editing && (
           <>
-            <button onClick={() => setBoardPickerOpen(true)} title={t("doc.fromBoardTitle")}>
-              {t("doc.fromBoard")}
-            </button>
+            {/* A board belongs to a project; a global doc has none to pick from
+                (a sticker ref pasted in by hand still resolves). */}
+            {source.kind === "project" && (
+              <button onClick={() => setBoardPickerOpen(true)} title={t("doc.fromBoardTitle")}>
+                {t("doc.fromBoard")}
+              </button>
+            )}
             <button onClick={insertCopiedCell} disabled={!copied} title={copied ? t("doc.pasteCellTitle", { label: copied.label }) : t("doc.pasteCellHint")}>
               {t("doc.pasteCell")}
             </button>
@@ -240,6 +270,11 @@ export function DesignDoc({ projectId }: { projectId: string }) {
               {t("doc.pasteSubgraph")}
             </button>
           </>
+        )}
+        {source.kind === "project" && !editing && content?.trim() && (
+          <button onClick={() => void makeGlobal()} title={t("doc.makeGlobalTitle")}>
+            {t("doc.makeGlobal")}
+          </button>
         )}
         <span className={`design-doc-status ${saveState}`}>{status}</span>
       </div>
@@ -286,9 +321,9 @@ export function DesignDoc({ projectId }: { projectId: string }) {
         )}
       </div>
 
-      {boardPickerOpen && (
+      {boardPickerOpen && source.kind === "project" && (
         <BoardItemPicker
-          projectId={projectId}
+          projectId={source.projectId}
           onPick={(item) => {
             setBoardPickerOpen(false);
             insert(`![${item.tag ?? ""}](board:${item.id})`);
