@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { resolveAssetPreviewUrl, resolveAssetUrl } from "../api/client";
+import { resolveAssetUrl } from "../api/client";
 import { assetsApi, boardApi, designDocApi } from "../api/endpoints";
 import { assetClipboard, subgraphClipboard, useClipboardSlot } from "../clipboard";
 import { useLangStore, useT } from "../i18n";
@@ -39,15 +39,28 @@ const toRenderRef = (ref: DesignDocRef): RenderRef => {
   return {
     missing: ref.missing,
     label: ref.label,
-    // A picture shows its thumbnail (the full file opens on click); video and
-    // audio have no thumbnail to show, so they play the original.
-    src: ref.asset ? (isImage ? resolveAssetPreviewUrl(ref.asset) : resolveAssetUrl(ref.asset.url)) : null,
+    // A picture shows its page-sized rendition -- uncropped, unlike the grid's
+    // square preview -- and the full file opens on click; video and audio have
+    // no rendition, so they play the original.
+    src: ref.asset ? resolveAssetUrl(isImage ? (ref.asset.fit_url ?? ref.asset.url) : ref.asset.url) : null,
     mime,
     text: ref.text,
   };
 };
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
+
+/** One entry of the table of contents. Read off the rendered DOM rather than
+ * re-parsed from the markdown, so it can never disagree with what's on the
+ * page (a fenced "# comment" isn't a heading, and only the renderer knows). */
+interface TocEntry {
+  el: HTMLElement;
+  level: number;
+  text: string;
+}
+
+// h1-h3: a character bible has hundreds of h4s; listing them buries the outline.
+const TOC_SELECTOR = "h1, h2, h3";
 
 export function DesignDoc({ projectId }: { projectId: string }) {
   const t = useT();
@@ -59,6 +72,10 @@ export function DesignDoc({ projectId }: { projectId: string }) {
   const [boardPickerOpen, setBoardPickerOpen] = useState(false);
   const [openRef, setOpenRef] = useState<DesignDocRef | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pageRef = useRef<HTMLDivElement>(null);
+  const renderedRef = useRef<HTMLDivElement>(null);
+  const [toc, setToc] = useState<TocEntry[]>([]);
+  const [activeToc, setActiveToc] = useState(0);
   const copied = useClipboardSlot(assetClipboard);
   const copiedSubgraph = useClipboardSlot(subgraphClipboard);
   // Refs asked for but not answered yet, so a ref isn't re-requested on every
@@ -126,6 +143,29 @@ export function DesignDoc({ projectId }: { projectId: string }) {
     return renderMarkdown(content ?? "", { headingOffset: 0, refs: renderRefs });
   }, [content, refs]);
 
+  useEffect(() => {
+    const root = renderedRef.current;
+    setToc(
+      root && !editing
+        ? [...root.querySelectorAll<HTMLElement>(TOC_SELECTOR)].map((el) => ({
+            el,
+            level: Number(el.tagName[1]),
+            text: el.textContent ?? "",
+          }))
+        : [],
+    );
+  }, [html, editing]);
+
+  // Highlights the section being read: the last heading scrolled past the top.
+  const onPageScroll = () => {
+    const top = (pageRef.current?.getBoundingClientRect().top ?? 0) + 90;
+    let current = 0;
+    toc.forEach((entry, i) => {
+      if (entry.el.getBoundingClientRect().top <= top) current = i;
+    });
+    setActiveToc(current);
+  };
+
   const edit = (next: string) => {
     setContent(next);
     setSaveState("dirty");
@@ -175,7 +215,7 @@ export function DesignDoc({ projectId }: { projectId: string }) {
   const status = { saved: t("doc.saved"), dirty: t("doc.unsaved"), saving: t("doc.saving"), error: t("doc.saveError") }[saveState];
 
   return (
-    <div className="main-area design-doc-page">
+    <div className="main-area design-doc-page" ref={pageRef} onScroll={toc.length > 1 ? onPageScroll : undefined}>
       <div className="design-doc-toolbar">
         {/* Switching with unsaved text would save it into the other language. */}
         <div className="design-doc-langs">
@@ -204,7 +244,7 @@ export function DesignDoc({ projectId }: { projectId: string }) {
         <span className={`design-doc-status ${saveState}`}>{status}</span>
       </div>
 
-      <div className={editing ? "design-doc-split" : undefined}>
+      <div className={editing ? "design-doc-split" : "design-doc-view"}>
         {editing && (
           <textarea
             ref={textareaRef}
@@ -216,7 +256,7 @@ export function DesignDoc({ projectId }: { projectId: string }) {
           />
         )}
         {/* renderMarkdown escapes before it formats (see markdown.ts). */}
-        <div className="design-doc-rendered markdown-body" onClick={onRenderedClick}>
+        <div className="design-doc-rendered markdown-body" ref={renderedRef} onClick={onRenderedClick}>
           {content === null ? (
             <p className="design-doc-empty">{t("common.loading")}</p>
           ) : content.trim() ? (
@@ -225,6 +265,25 @@ export function DesignDoc({ projectId }: { projectId: string }) {
             <p className="design-doc-empty">{t("doc.empty")}</p>
           )}
         </div>
+        {toc.length > 1 && (
+          <nav className="design-doc-toc">
+            <div className="design-doc-toc-title">{t("doc.toc")}</div>
+            {(() => {
+              const minLevel = Math.min(...toc.map((e) => e.level));
+              return toc.map((entry, i) => (
+                <button
+                  key={i}
+                  className={i === activeToc ? "active" : ""}
+                  style={{ paddingLeft: 8 + (entry.level - minLevel) * 12 }}
+                  onClick={() => entry.el.scrollIntoView({ behavior: "smooth", block: "start" })}
+                  title={entry.text}
+                >
+                  {entry.text}
+                </button>
+              ));
+            })()}
+          </nav>
+        )}
       </div>
 
       {boardPickerOpen && (

@@ -3318,12 +3318,20 @@ th, td {
   margin: 16px 0;
 }
 
+/* A picture on a line of its own is centred with its caption under it; a
+   quoted sticker (.doc-embed-text) keeps reading left to right. */
 .doc-embed {
   margin: 12px 0;
+  text-align: center;
+}
+
+.doc-embed-text {
+  text-align: left;
 }
 
 .doc-embed-media {
   display: block;
+  margin: 0 auto;
   max-width: 100%;
   max-height: 60vh;
   border-radius: 6px;
@@ -3345,13 +3353,28 @@ th, td {
    their alt text), and a picture in a cell fills that cell. */
 .design-doc-rendered table {
   display: table;
-  width: 100%;
+  /* As wide as its content needs, up to the column: a short key/value table
+     stays compact instead of spreading its slack across every column, and a
+     table of pictures (width:100% images) still grows to the full width. */
+  width: auto;
+  max-width: 100%;
   border-collapse: collapse;
 }
 
+/* The page's overflow-wrap:anywhere also lowers a word's *minimum* width to
+   one letter, so the browser happily squeezed a label column down to
+   "Heigh/t". break-word only breaks a word that can't fit at all. */
+.design-doc-rendered th,
+.design-doc-rendered td {
+  overflow-wrap: break-word;
+}
+
+/* Natural size, capped at the column: a page-sized rendition (/fit) is wider
+   than the column, so a lone chart spans it and two on one line stack, as in
+   any markdown viewer. */
 .doc-inline-media {
   max-width: 100%;
-  max-height: 360px;
+  height: auto;
   vertical-align: middle;
   border-radius: 4px;
 }
@@ -3359,8 +3382,6 @@ th, td {
 .design-doc-rendered td .doc-inline-media {
   display: block;
   width: 100%;
-  max-height: none;
-  object-fit: cover;
 }
 
 .doc-ref-dead {
@@ -3388,4 +3409,88 @@ th, td {
   text-align: left;
   overflow: hidden;
   height: 100%;
+}
+
+/* A hex colour in markdown (markdown.ts colorChip): its own swatch in front,
+   and never broken across lines -- "#A8A" / "5A1" in a narrow table column
+   read as two values. */
+.color-chip {
+  white-space: nowrap;
+}
+
+.color-swatch {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  margin-right: 0.35em;
+  border-radius: 50%;
+  vertical-align: -0.1em;
+  box-shadow: 0 0 0 1px rgba(127, 127, 127, 0.6);
+}
+
+/* Read view: the page with its table of contents to the right, sticky under
+   the toolbar. Hidden when there's no room for both -- a phone reads the doc
+   full width. */
+.design-doc-view {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.design-doc-view .design-doc-rendered {
+  margin: 0;
+  min-width: 0;
+}
+
+.design-doc-rendered :is(h1, h2, h3, h4, h5, h6) {
+  scroll-margin-top: 56px;
+}
+
+.design-doc-toc {
+  position: sticky;
+  top: 48px;
+  flex: 0 0 240px;
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  border-left: 1px solid var(--border);
+}
+
+.design-doc-toc-title {
+  padding: 0 8px 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.design-doc-toc button {
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  margin-left: -1px;
+  border-radius: 0;
+  padding: 3px 8px;
+  text-align: left;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.design-doc-toc button:hover {
+  color: var(--text);
+}
+
+.design-doc-toc button.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+}
+
+@media (max-width: 1100px) {
+  .design-doc-toc {
+    display: none;
+  }
 }

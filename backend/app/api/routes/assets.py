@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, Upload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import asset_response
-from app.core.storage import build_asset_url, build_preview_url, get_storage
+from app.core.asset_preview import fit_rendition
+from app.core.storage import build_asset_url, build_fit_url, build_preview_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Node, NodeKind, NodeStatus
 from app.schemas.schemas import AssetMoveUpdate, AssetRead, AssetSelectUpdate
@@ -20,6 +21,7 @@ def to_asset_read(asset: Asset) -> AssetRead:
     item = AssetRead.model_validate(asset)
     item.url = build_asset_url(asset.id)
     item.preview_url = build_preview_url(asset.id)
+    item.fit_url = build_fit_url(asset.id)
     # Dimensions come off the prefix block rather than out of the loaded <img>:
     # naturalWidth stops being the original's size the moment that <img> points
     # at a 384x384 preview.
@@ -110,6 +112,40 @@ async def get_asset_preview(request: Request, asset_id: uuid.UUID, db: AsyncSess
     if etag in {tag.strip() for tag in request.headers.get("if-none-match", "").split(",")}:
         return Response(status_code=304, headers=headers)
     return Response(preview, media_type="image/webp", headers=headers)
+
+
+@router.get("/{asset_id}/fit")
+async def get_asset_fit(request: Request, asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """The whole picture, uncropped, scaled to fit a page (asset_preview.FIT_EDGE)
+    -- for the design doc, where /preview's centre square cut a 16:9 chart down
+    to its middle. Falls back to the original like /preview does."""
+    asset = await db.get(Asset, asset_id)
+    if not asset:
+        raise HTTPException(404, "Asset not found")
+    storage = get_storage()
+    path = storage.path_of(asset.storage_key)
+    if not path.is_file():
+        raise HTTPException(404, "Asset file missing")
+
+    # Same content for the same stored file, so the ETag can be derived from the
+    # key without rendering anything -- a revalidation costs no decode.
+    etag = asset_response.payload_etag(asset.storage_key + "#fit")
+    headers = {"Cache-Control": asset_response.REVALIDATE_CACHE, "ETag": etag}
+    if etag in {tag.strip() for tag in request.headers.get("if-none-match", "").split(",")}:
+        return Response(status_code=304, headers=headers)
+
+    fitted = None
+    if asset.kind in (AssetKind.image, AssetKind.mask):
+        fitted = await fit_rendition(asset.storage_key, lambda: storage.get_object(asset.storage_key))
+    if fitted is None:
+        return asset_response.stream_payload(
+            request,
+            path,
+            storage.payload_offset(asset.storage_key),
+            asset.mime_type,
+            asset_response.payload_etag(asset.storage_key),
+        )
+    return Response(fitted, media_type="image/webp", headers=headers)
 
 
 @router.delete("/{asset_id}", status_code=204)

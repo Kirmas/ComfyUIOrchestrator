@@ -122,6 +122,12 @@ def build_asset_url(asset_id: uuid.UUID | str) -> str:
     return f"/api/assets/{asset_id}/file?token={settings.api_token}"
 
 
+def build_fit_url(asset_id: uuid.UUID | str) -> str:
+    """The whole picture, uncropped, at page size (routes/assets.py get_asset_fit)."""
+    settings = get_settings()
+    return f"/api/assets/{asset_id}/fit?token={settings.api_token}"
+
+
 def build_preview_url(asset_id: uuid.UUID | str) -> str:
     """The grid-sized thumbnail out of the asset's prefix block. Falls back to
     the original server-side, so this is always safe to point an <img> at."""

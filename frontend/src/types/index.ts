@@ -294,6 +294,8 @@ export interface Asset {
    * to use as an <img src>: the route falls back to the original for anything
    * that has no preview (a picture already smaller than one, a mesh). */
   preview_url?: string | null;
+  // Whole picture, uncropped, page-sized (the design doc); preview_url is a centre square.
+  fit_url?: string | null;
   /** The *original's* pixel size, read server-side off that prefix block --
    * naturalWidth on a loaded <img> can't answer this once the <img> is showing
    * a 384x384 preview. */

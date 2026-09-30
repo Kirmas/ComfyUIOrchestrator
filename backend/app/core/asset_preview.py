@@ -17,7 +17,9 @@ already cheap to load.
 
 import asyncio
 import io
+from collections import OrderedDict
 from pathlib import Path
+from typing import Callable
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -146,3 +148,53 @@ async def build_preview_async(kind: AssetKind, data: bytes, capacity: int) -> tu
     loads once before (see the FileResponse work in api/routes/assets.py)."""
     async with _decode_semaphore:
         return await asyncio.to_thread(build_preview, kind, data, capacity)
+
+
+# --- page-sized renditions ----------------------------------------------------
+# The prefix preview above is a centre *square*, right for a grid cell and
+# wrong for anything that shows the whole picture: in the design doc a 16:9
+# character chart came out as its middle two columns. A page wants the whole
+# frame at a width a page can use, so this is a second, uncropped size --
+# produced on demand rather than stored, since only pictures a doc actually
+# embeds ever need it, and kept in a small in-memory LRU (a restart just
+# re-renders; the browser keeps its own copy by ETag anyway).
+FIT_EDGE = 1600
+FIT_QUALITY = 85
+_FIT_CACHE_ENTRIES = 48
+_fit_cache: OrderedDict[str, bytes] = OrderedDict()
+
+
+def build_fit(data: bytes, edge: int = FIT_EDGE) -> bytes | None:
+    """The whole picture scaled to fit `edge` on its long side, as WebP. None
+    when it isn't a raster or is already that small -- the original is then the
+    right thing to serve."""
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            img = ImageOps.exif_transpose(img) or img
+            if max(img.size) <= edge:
+                return None
+            mode = "RGBA" if (img.mode in ("RGBA", "LA") or "transparency" in img.info) else "RGB"
+            img = img.convert(mode)
+            # draft-free: thumbnail() keeps the aspect ratio and never upsizes.
+            img.thumbnail((edge, edge), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, "WEBP", quality=FIT_QUALITY, method=4)
+            return buf.getvalue()
+    except (UnidentifiedImageError, OSError, ValueError):
+        return None
+
+
+async def fit_rendition(key: str, load: Callable[[], bytes]) -> bytes | None:
+    """Cached build_fit for the asset stored under `key`. `load` is only called
+    on a miss -- reading an 8K original off disk is the expensive half."""
+    if key in _fit_cache:
+        _fit_cache.move_to_end(key)
+        return _fit_cache[key]
+    async with _decode_semaphore:
+        data = await asyncio.to_thread(load)
+        fitted = await asyncio.to_thread(build_fit, data)
+    if fitted is not None:
+        _fit_cache[key] = fitted
+        while len(_fit_cache) > _FIT_CACHE_ENTRIES:
+            _fit_cache.popitem(last=False)
+    return fitted

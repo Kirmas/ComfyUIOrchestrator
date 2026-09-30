@@ -63,6 +63,14 @@ const mediaTag = (src: string, mime: string | null, alt: string, cls: string): s
       ? `<audio class="${cls}" src="${attr(src)}" controls preload="none"></audio>`
       : `<img class="${cls}" src="${attr(src)}" alt="${alt}" loading="lazy" />`;
 
+/** `#A8A5A1` / `#fff` -- a colour written down in a doc. Rendered with a
+ * swatch of itself in front, so a palette table reads as colours rather than
+ * as strings to paste somewhere else. The value is matched in full by this
+ * pattern before it reaches a style attribute, so nothing else can. */
+const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const colorChip = (hex: string): string =>
+  `<code class="color-chip"><span class="color-swatch" style="background:${hex}"></span>${hex}</code>`;
+
 /** Emphasis only: runs on text that has no links or code left in it. */
 const emphasis = (text: string): string =>
   text
@@ -78,7 +86,10 @@ function inline(text: string, opts: MarkdownOptions): string {
   const hold = (html: string) => `\u0000${held.push(html) - 1}\u0000`;
 
   const out = text
-    .replace(/`([^`]+)`/g, (_m, code: string) => hold(`<code>${code}</code>`))
+    .replace(/`([^`]+)`/g, (_m, code: string) => hold(HEX_COLOR.test(code.trim()) ? colorChip(code.trim()) : `<code>${code}</code>`))
+    // Bare too, but only the unambiguous six-digit form: "#123" is as likely
+    // an issue number as a colour.
+    .replace(/(^|[\s(,;:])(#[0-9a-fA-F]{6})(?![0-9a-zA-Z_])/g, (_m, lead: string, hex: string) => lead + hold(colorChip(hex)))
     .replace(/(!?)\[([^\]]*)\]\(([^)\s]+)\)/g, (m, bang: string, label: string, target: string) => {
       const shown = emphasis(label);
       if (REF_TARGET.test(target)) {
@@ -112,7 +123,10 @@ function inline(text: string, opts: MarkdownOptions): string {
       );
     });
 
-  return emphasis(out).replace(/\u0000(\d+)\u0000/g, (_m, i: string) => held[Number(i)]);
+  // Repeated: a held piece can itself contain one (a colour inside a link label).
+  let html = emphasis(out);
+  while (/\u0000\d+\u0000/.test(html)) html = html.replace(/\u0000(\d+)\u0000/g, (_m, i: string) => held[Number(i)]);
+  return html;
 }
 
 /** A line that is nothing but one reference image -- `![caption](node:...)` --

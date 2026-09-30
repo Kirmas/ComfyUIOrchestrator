@@ -49,6 +49,7 @@ export const en = {
   "doc.pasteSubgraph": "＋ Copied subgraph",
   "doc.pasteSubgraphTitle": "Insert the subgraph \"{name}\" — the doc will always show its current result",
   "doc.pasteSubgraphHint": "Press \"⧉ subgraph\" on a subgraph cell first, then come back here",
+  "doc.toc": "Contents",
   "doc.placeholder": "# Title\n\nMarkdown. ![caption](node:…) embeds a grid cell, ![caption](board:…) a sticker.",
   "doc.empty": "The design doc is empty. Press Edit to start writing.",
   "doc.boardEmpty": "Nothing on the board to reference yet.",
