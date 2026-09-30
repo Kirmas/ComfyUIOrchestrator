@@ -278,6 +278,9 @@ export const assetsApi = {
   // pre-built AssetRead.url around (e.g. Settings' unowned-assets scan,
   // which only returns bare ids/paths, not full asset reads).
   fileUrl: (id: string) => `${getApiBaseUrl()}/api/assets/${id}/file?token=${encodeURIComponent(getApiToken())}`,
+  // Whole picture, uncropped, page-sized (build_fit_url) -- and for an SVG, a
+  // raster of it, which is what makes a heavy vector map usable on the board.
+  fitUrl: (id: string) => `${getApiBaseUrl()}/api/assets/${id}/fit?token=${encodeURIComponent(getApiToken())}`,
   // Same, for the thumbnail (build_preview_url).
   previewUrl: (id: string) => `${getApiBaseUrl()}/api/assets/${id}/preview?token=${encodeURIComponent(getApiToken())}`,
 };
@@ -322,7 +325,8 @@ export const designDocApi = {
       categoryId === undefined ? {} : { category_id: categoryId },
     ),
   // Global docs, owned by a folder.
-  list: () => api.get<DesignDocSummary[]>("/api/design-docs"),
+  list: (includeProjects = false) =>
+    api.get<DesignDocSummary[]>(`/api/design-docs${includeProjects ? "?include_projects=true" : ""}`),
   create: (title: string, categoryId: string | null) =>
     api.post<DesignDocSummary>("/api/design-docs", { title, category_id: categoryId }),
   get: (id: string) => api.get<DesignDocSummary>(`/api/design-docs/${id}`),

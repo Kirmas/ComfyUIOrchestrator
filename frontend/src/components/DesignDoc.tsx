@@ -4,8 +4,8 @@ import { resolveAssetUrl } from "../api/client";
 import { assetsApi, boardApi, designDocApi } from "../api/endpoints";
 import { assetClipboard, subgraphClipboard, useClipboardSlot } from "../clipboard";
 import { useLangStore, useT } from "../i18n";
-import { findRefs, type RenderRef, renderMarkdown } from "../markdown";
-import type { BoardItem, DesignDocRef } from "../types";
+import { findRefs, type RenderRef, renderMarkdown, toggleTask } from "../markdown";
+import type { BoardItem, DesignDocRef, DesignDocSummary } from "../types";
 import { FullSizeModal } from "./NodeCell";
 
 /** The project's design doc: one markdown page per project, kept on the site
@@ -27,7 +27,14 @@ import { FullSizeModal } from "./NodeCell";
  * the UK/EN toggle switches between them. */
 
 /** Mirrors `Lang` in backend/app/api/routes/design_docs.py. */
-type DocLang = "uk" | "en";
+export type DocLang = "uk" | "en";
+
+/** Where a followed doc link asked to land (App.tsx). */
+export interface DocLanding {
+  anchor: string | null;
+  lang: DocLang;
+  nonce: number;
+}
 const DOC_LANGS: DocLang[] = ["uk", "en"];
 
 const SAVE_DELAY_MS = 1200;
@@ -72,10 +79,24 @@ const fetchDoc = (s: DocSource, lang: DocLang) =>
 const saveDoc = (s: DocSource, lang: DocLang, content: string) =>
   s.kind === "project" ? designDocApi.projectSave(s.projectId, lang, content) : designDocApi.saveText(s.docId, lang, content);
 
-export function DesignDoc({ source }: { source: DocSource }) {
+export function DesignDoc({
+  source,
+  landing,
+  onFollow,
+  onBack,
+}: {
+  source: DocSource;
+  landing?: DocLanding | null;
+  onFollow?: (docId: string, anchor: string | null, lang: DocLang) => void;
+  onBack?: () => void;
+}) {
   const t = useT();
   const key = sourceKey(source);
-  const [lang, setLang] = useState<DocLang>(useLangStore.getState().lang);
+  // The chapter to scroll to once the text is on screen; then cleared.
+  const pendingAnchor = useRef<string | null>(landing?.anchor ?? null);
+  const [docId, setDocId] = useState<string | null>(null);
+  const [linkPickerOpen, setLinkPickerOpen] = useState(false);
+  const [lang, setLang] = useState<DocLang>(landing?.lang ?? useLangStore.getState().lang);
   const [content, setContent] = useState<string | null>(null);
   const [refs, setRefs] = useState<Record<string, DesignDocRef>>({});
   const [editing, setEditing] = useState(false);
@@ -102,6 +123,7 @@ export function DesignDoc({ source }: { source: DocSource }) {
     loadingFor.current = loadKey;
     return fetchDoc(source, lang).then((doc) => {
       if (loadingFor.current !== loadKey) return;
+      setDocId(doc.doc_id);
       setContent(doc.content);
       setRefs((prev) => ({ ...prev, ...doc.refs }));
       setSaveState("saved");
@@ -151,7 +173,13 @@ export function DesignDoc({ source }: { source: DocSource }) {
 
   const html = useMemo(() => {
     const renderRefs = Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, toRenderRef(v)]));
-    return renderMarkdown(content ?? "", { headingOffset: 0, refs: renderRefs });
+    return renderMarkdown(content ?? "", {
+      headingOffset: 0,
+      refs: renderRefs,
+      interactiveTasks: true,
+      lineAnchors: true,
+      headingIds: true,
+    });
   }, [content, refs]);
 
   useEffect(() => {
@@ -166,6 +194,120 @@ export function DesignDoc({ source }: { source: DocSource }) {
         : [],
     );
   }, [html, editing]);
+
+  // ---- editor <-> preview scroll sync ----
+  // Source lines don't map to textarea pixels one to one (long lines wrap), so
+  // the pixel top of every line is measured off a hidden copy of the textarea
+  // with the same width and font. The preview side needs no measuring: every
+  // top-level block carries data-line (markdown.ts lineAnchors).
+  const lineTops = useRef<number[]>([]);
+  // Whichever pane the pointer/finger/focus is on drives; the other follows.
+  // Without this each programmatic scroll would echo back as a user scroll.
+  const driver = useRef<"editor" | "preview">("editor");
+
+  const measureLines = () => {
+    const ta = textareaRef.current;
+    if (!ta || content === null) return;
+    const cs = getComputedStyle(ta);
+    const mirror = document.createElement("div");
+    Object.assign(mirror.style, {
+      position: "absolute",
+      visibility: "hidden",
+      left: "-99999px",
+      top: "0",
+      width: `${ta.clientWidth}px`,
+      boxSizing: "border-box",
+      paddingLeft: cs.paddingLeft,
+      paddingRight: cs.paddingRight,
+      fontFamily: cs.fontFamily,
+      fontSize: cs.fontSize,
+      fontWeight: cs.fontWeight,
+      lineHeight: cs.lineHeight,
+      letterSpacing: cs.letterSpacing,
+      whiteSpace: "pre-wrap",
+      overflowWrap: "break-word",
+    });
+    for (const line of content.split("\n")) {
+      const row = document.createElement("div");
+      row.textContent = line || "\u200b";
+      mirror.appendChild(row);
+    }
+    document.body.appendChild(mirror);
+    const padTop = parseFloat(cs.paddingTop) || 0;
+    lineTops.current = Array.from(mirror.children, (row) => (row as HTMLElement).offsetTop + padTop);
+    mirror.remove();
+  };
+
+  /** [source line, pixel top] for every anchored block, in order. */
+  const previewAnchors = (): [number, number][] =>
+    Array.from(renderedRef.current?.querySelectorAll<HTMLElement>("[data-line]") ?? [], (el) => [
+      Number(el.dataset.line),
+      el.offsetTop,
+    ]);
+
+  /** Linear interpolation over sorted [x, y] pairs. */
+  const interpolate = (pairs: [number, number][], x: number): number => {
+    if (pairs.length === 0) return 0;
+    let k = 0;
+    while (k + 1 < pairs.length && pairs[k + 1][0] <= x) k++;
+    const [x0, y0] = pairs[k];
+    const next = pairs[k + 1];
+    if (!next || next[0] === x0) return y0;
+    return y0 + ((x - x0) / (next[0] - x0)) * (next[1] - y0);
+  };
+
+  const editorLinePairs = (): [number, number][] => lineTops.current.map((top, line) => [line, top]);
+
+  const syncFromEditor = () => {
+    const ta = textareaRef.current;
+    const pv = renderedRef.current;
+    if (!ta || !pv || driver.current !== "editor") return;
+    if (ta.scrollTop + ta.clientHeight >= ta.scrollHeight - 2) {
+      pv.scrollTop = pv.scrollHeight;
+      return;
+    }
+    const line = interpolate(
+      editorLinePairs().map(([l, top]) => [top, l]),
+      ta.scrollTop,
+    );
+    pv.scrollTop = interpolate(previewAnchors(), line);
+  };
+
+  const syncFromPreview = () => {
+    const ta = textareaRef.current;
+    const pv = renderedRef.current;
+    if (!ta || !pv || driver.current !== "preview") return;
+    if (pv.scrollTop + pv.clientHeight >= pv.scrollHeight - 2) {
+      ta.scrollTop = ta.scrollHeight;
+      return;
+    }
+    const line = interpolate(
+      previewAnchors().map(([l, top]) => [top, l]),
+      pv.scrollTop,
+    );
+    ta.scrollTop = interpolate(editorLinePairs(), line);
+  };
+
+  // Re-measure when the text changes (debounced -- a 90 KB doc is a lot of
+  // rows to lay out per keystroke) and when the editor changes width.
+  useEffect(() => {
+    if (!editing) return;
+    const timer = setTimeout(() => {
+      measureLines();
+      syncFromEditor();
+    }, 250);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing, content]);
+
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!editing || !ta) return;
+    const observer = new ResizeObserver(() => measureLines());
+    observer.observe(ta);
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing]);
 
   // Highlights the section being read: the last heading scrolled past the top.
   const onPageScroll = () => {
@@ -201,6 +343,18 @@ export function DesignDoc({ source }: { source: DocSource }) {
     });
   };
 
+  /** At the cursor, inline -- a link sits inside a sentence, unlike an embed. */
+  const insertInline = (snippet: string) => {
+    const text = content ?? "";
+    const el = textareaRef.current;
+    const at = el && editing ? el.selectionEnd : text.length;
+    edit(text.slice(0, at) + snippet + text.slice(at));
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(at + snippet.length, at + snippet.length);
+    });
+  };
+
   const insertCopiedCell = () => {
     if (!copied) return;
     insert(copied.nodeId ? `![${copied.label}](node:${copied.nodeId})` : `![${copied.label}](asset:${copied.assetId})`);
@@ -213,7 +367,40 @@ export function DesignDoc({ source }: { source: DocSource }) {
     insert(`![${copiedSubgraph.name}](dashboard:${copiedSubgraph.dashboardId})`);
   };
 
+  const scrollToAnchor = (anchor: string): boolean => {
+    const el = renderedRef.current?.querySelector(`[id="${CSS.escape(anchor)}"]`);
+    el?.scrollIntoView({ block: "start" });
+    return !!el;
+  };
+
+  // Land on the chapter a followed link named, once its text has rendered.
+  useEffect(() => {
+    if (!pendingAnchor.current || content === null) return;
+    const anchor = pendingAnchor.current;
+    pendingAnchor.current = null;
+    requestAnimationFrame(() => scrollToAnchor(anchor));
+  }, [html, content]);
+
   const onRenderedClick = (e: React.MouseEvent) => {
+    // A link to another doc (or a chapter of this one).
+    const link = (e.target as HTMLElement).closest<HTMLElement>("a.doc-link");
+    if (link) {
+      e.preventDefault();
+      const target = link.dataset.doc;
+      const anchor = link.dataset.anchor ?? null;
+      if (!target || target === docId) {
+        if (anchor) scrollToAnchor(anchor);
+      } else onFollow?.(target, anchor, lang);
+      return;
+    }
+    // A ticked checkbox is an edit like any other: it goes through the same
+    // autosave, in view mode too -- ticking a TODO shouldn't need the editor.
+    const task = (e.target as HTMLElement).closest<HTMLInputElement>("input.task-check[data-task]");
+    if (task) {
+      e.preventDefault();
+      if (content !== null) edit(toggleTask(content, Number(task.dataset.task)));
+      return;
+    }
     const el = (e.target as HTMLElement).closest<HTMLElement>("[data-ref]");
     if (!el) return;
     e.preventDefault();
@@ -250,6 +437,11 @@ export function DesignDoc({ source }: { source: DocSource }) {
             </button>
           ))}
         </div>
+        {onBack && (
+          <button onClick={onBack} disabled={saveState !== "saved"} title={t("doc.backTitle")}>
+            {t("doc.back")}
+          </button>
+        )}
         {source.kind === "global" && <strong className="design-doc-title">📄 {source.title}</strong>}
         <button disabled={content === null || (editing && saveState !== "saved")} className={editing ? "active" : ""} onClick={() => (editing ? setEditing(false) : void load().then(() => setEditing(true)))}>
           {editing ? t("doc.done") : t("doc.edit")}
@@ -265,6 +457,9 @@ export function DesignDoc({ source }: { source: DocSource }) {
             )}
             <button onClick={insertCopiedCell} disabled={!copied} title={copied ? t("doc.pasteCellTitle", { label: copied.label }) : t("doc.pasteCellHint")}>
               {t("doc.pasteCell")}
+            </button>
+            <button onClick={() => setLinkPickerOpen(true)} title={t("doc.linkDocTitle")}>
+              {t("doc.linkDoc")}
             </button>
             <button onClick={insertCopiedSubgraph} disabled={!copiedSubgraph} title={copiedSubgraph ? t("doc.pasteSubgraphTitle", { name: copiedSubgraph.name }) : t("doc.pasteSubgraphHint")}>
               {t("doc.pasteSubgraph")}
@@ -286,12 +481,23 @@ export function DesignDoc({ source }: { source: DocSource }) {
             className="design-doc-editor"
             value={content ?? ""}
             onChange={(e) => edit(e.target.value)}
+            onScroll={syncFromEditor}
+            onPointerEnter={() => (driver.current = "editor")}
+            onTouchStart={() => (driver.current = "editor")}
+            onFocus={() => (driver.current = "editor")}
             placeholder={t("doc.placeholder")}
             spellCheck
           />
         )}
         {/* renderMarkdown escapes before it formats (see markdown.ts). */}
-        <div className="design-doc-rendered markdown-body" ref={renderedRef} onClick={onRenderedClick}>
+        <div
+          className="design-doc-rendered markdown-body"
+          ref={renderedRef}
+          onClick={onRenderedClick}
+          onScroll={editing ? syncFromPreview : undefined}
+          onPointerEnter={() => (driver.current = "preview")}
+          onTouchStart={() => (driver.current = "preview")}
+        >
           {content === null ? (
             <p className="design-doc-empty">{t("common.loading")}</p>
           ) : content.trim() ? (
@@ -329,6 +535,17 @@ export function DesignDoc({ source }: { source: DocSource }) {
             insert(`![${item.tag ?? ""}](board:${item.id})`);
           }}
           onClose={() => setBoardPickerOpen(false)}
+        />
+      )}
+
+      {linkPickerOpen && (
+        <DocLinkPicker
+          lang={lang}
+          onPick={(snippet) => {
+            setLinkPickerOpen(false);
+            insertInline(snippet);
+          }}
+          onClose={() => setLinkPickerOpen(false)}
         />
       )}
 
@@ -394,6 +611,83 @@ function BoardItemPicker({ projectId, onPick, onClose }: { projectId: string; on
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+          <button onClick={onClose}>{t("common.cancel")}</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/** Pick another design doc (a global one or a project's), then optionally one
+ * of its chapters; produces `[title](doc:<id>#chapter)`. Chapters are read in
+ * the language being edited, since the two versions' anchors differ. */
+function DocLinkPicker({ lang, onPick, onClose }: { lang: DocLang; onPick: (snippet: string) => void; onClose: () => void }) {
+  const t = useT();
+  const [docs, setDocs] = useState<DesignDocSummary[] | null>(null);
+  const [chosen, setChosen] = useState<DesignDocSummary | null>(null);
+  const [chapters, setChapters] = useState<{ id: string; text: string; level: number }[] | null>(null);
+
+  useEffect(() => {
+    designDocApi
+      .list(true)
+      .then(setDocs)
+      .catch(() => setDocs([]));
+  }, []);
+
+  useEffect(() => {
+    if (!chosen) return;
+    setChapters(null);
+    designDocApi.getText(chosen.id, lang).then((doc) => {
+      // The renderer's own headings, ids and all -- so the anchor written here
+      // is exactly the one that page will have.
+      const html = renderMarkdown(doc.content, { headingOffset: 0, headingIds: true });
+      const found = [...html.matchAll(/<h(\d)[^>]*\bid="([^"]*)"[^>]*>(.*?)<\/h\1>/g)].map((m) => ({
+        level: Number(m[1]),
+        id: m[2],
+        text: m[3].replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"'),
+      }));
+      setChapters(found);
+    });
+  }, [chosen, lang]);
+
+  const link = (label: string, anchor?: string) => onPick(`[${label.replace(/[[\]]/g, "")}](doc:${chosen!.id}${anchor ? `#${anchor}` : ""})`);
+
+  return createPortal(
+    <div className="image-modal-backdrop" onClick={onClose}>
+      <div className="params-modal-content doc-link-picker" onClick={(e) => e.stopPropagation()}>
+        <h3>{chosen ? chosen.title : t("doc.linkDoc")}</h3>
+        {!chosen ? (
+          docs === null ? (
+            <p style={{ color: "var(--text-dim)" }}>{t("common.loading")}</p>
+          ) : (
+            <div className="doc-link-list">
+              {docs.map((d) => (
+                <button key={d.id} onClick={() => setChosen(d)}>
+                  {d.project_id ? "🖼 " : "📄 "}
+                  {d.title}
+                </button>
+              ))}
+            </div>
+          )
+        ) : (
+          <div className="doc-link-list">
+            <button className="doc-link-whole" onClick={() => link(chosen.title)}>
+              {t("doc.linkWholeDoc")}
+            </button>
+            {chapters === null ? (
+              <p style={{ color: "var(--text-dim)" }}>{t("common.loading")}</p>
+            ) : (
+              chapters.map((c, i) => (
+                <button key={i} style={{ paddingLeft: 8 + (c.level - 1) * 14 }} onClick={() => link(c.text, c.id)}>
+                  {c.text}
+                </button>
+              ))
+            )}
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8 }}>
+          {chosen ? <button onClick={() => setChosen(null)}>{t("doc.back")}</button> : <span />}
           <button onClick={onClose}>{t("common.cancel")}</button>
         </div>
       </div>

@@ -5,6 +5,7 @@ __pycache__/
 backend/.env
 backend/media/
 backend/logs/
+backend/cache/
 
 # Frontend (Node)
 frontend/node_modules/

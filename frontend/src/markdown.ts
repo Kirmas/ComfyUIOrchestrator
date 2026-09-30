@@ -39,6 +39,70 @@ export interface MarkdownOptions {
    * h1, so stickers and chat keep the old +2; the design doc is a page. */
   headingOffset?: number;
   refs?: Record<string, RenderRef>;
+  /** Task-list checkboxes ("- [ ]" / "- [x]") are clickable, each carrying
+   * data-task=<its ordinal> for toggleTask(). Off: they're drawn but inert --
+   * a sticker or a chat message has nowhere to write the tick back to. */
+  interactiveTasks?: boolean;
+  /** Tag each top-level block with data-line=<its first source line>, so an
+   * editor can scroll its preview to the block it's showing (DesignDoc.tsx). */
+  lineAnchors?: boolean;
+  /** Give headings GitHub-style ids ("## 3. Dwarf Quarter" -> "3-dwarf-quarter"),
+   * so `#anchor` and `doc:<id>#anchor` links can land on a chapter. Off for
+   * stickers: several notes on one board would repeat the same ids. */
+  headingIds?: boolean;
+}
+
+/** GitHub's heading slug, so anchors written for a repo keep working here:
+ * lower-case, drop everything but letters/digits/spaces/-/_, spaces -> "-".
+ * Unicode letters stay ("Квартал Ельфів" -> "квартал-ельфів"); a dash between
+ * spaces leaves a double hyphen, exactly as GitHub does. */
+export const slugify = (text: string): string =>
+  text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s_-]/gu, "")
+    .replace(/\s/g, "-");
+
+/** The plain text of rendered inline HTML -- what a heading's slug is made of. */
+const plainText = (html: string): string =>
+  html
+    .replace(/<[^>]*>/g, "")
+    .replace(/&(?:amp|lt|gt|quot|#\d+);/g, "");
+
+/** `doc:<uuid>` or `doc:<uuid>#chapter` -- a link to another design doc. */
+export const DOC_LINK = /^doc:([0-9a-fA-F-]{36})(?:#(.*))?$/;
+
+const decodeAnchor = (anchor: string): string => {
+  try {
+    return decodeURIComponent(anchor);
+  } catch {
+    return anchor;
+  }
+};
+
+// A task item's marker, anywhere a list item can sit (inside quotes too).
+const TASK_LINE = /^(\s*(?:>\s?)*\s*[-*+]\s+)\[([ xX])\](?=\s)/;
+
+/** Flips the n-th task checkbox (in render order, which is source order) and
+ * returns the new source. Fenced code is skipped the same way the renderer
+ * skips it, so a "- [ ]" inside a code sample never shifts the count. */
+export function toggleTask(source: string, n: number): string {
+  const lines = source.split("\n");
+  let inFence = false;
+  let seen = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(?:>\s?)*\s*```/.test(lines[i])) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const m = TASK_LINE.exec(lines[i]);
+    if (!m) continue;
+    if (seen++ === n) {
+      lines[i] = lines[i].replace(TASK_LINE, `$1[${m[2] === " " ? "x" : " "}]`);
+      return lines.join("\n");
+    }
+  }
+  return source;
 }
 
 /** Same scheme list as REF_PATTERN in backend/app/api/routes/design_docs.py. */
@@ -74,7 +138,9 @@ const colorChip = (hex: string): string =>
 /** Emphasis only: runs on text that has no links or code left in it. */
 const emphasis = (text: string): string =>
   text
-    .replace(/(\*\*|__)(.+?)\1/g, "<strong>$2</strong>")
+    // The closing ** may not be followed by another *: in "**a *b***" the
+    // bold closes on the last two stars, leaving "*b*" inside to become <em>.
+    .replace(/(\*\*|__)(.+?)\1(?![*_])/g, "<strong>$2</strong>")
     .replace(/~~(.+?)~~/g, "<del>$1</del>")
     .replace(/(?<!\w)([*_])(?=\S)(.+?)(?<=\S)\1(?!\w)/g, "<em>$2</em>");
 
@@ -108,6 +174,16 @@ function inline(text: string, opts: MarkdownOptions): string {
       // `Chart.png` or `../World/Race.md` meant a file next to it) shows its
       // caption instead of raw markdown: a link as its text, a picture as a
       // broken-image marker naming what it wanted.
+      // Another design doc, optionally at a chapter; the page (DesignDoc.tsx)
+      // does the navigating. Same for a chapter of this doc.
+      const docLink = DOC_LINK.exec(target);
+      if (docLink && !bang) {
+        const anchor = docLink[2] ? ` data-anchor="${decodeAnchor(docLink[2])}"` : "";
+        return hold(`<a class="doc-link" href="#" data-doc="${docLink[1]}"${anchor}>${shown || "↗"}</a>`);
+      }
+      if (target.startsWith("#") && !bang) {
+        return hold(`<a class="doc-link" href="#" data-anchor="${decodeAnchor(target.slice(1))}">${shown}</a>`);
+      }
       if (!/^https?:\/\//.test(target)) {
         if (/^[a-z][a-z0-9+.-]*:/i.test(target)) return m;
         return hold(
@@ -162,8 +238,20 @@ const splitRow = (line: string): string[] =>
     .map((c) => c.trim());
 
 export function renderMarkdown(source: string, opts: MarkdownOptions = {}): string {
+  return renderLines(escapeHtml(source || "").split("\n"), opts, { task: 0, slugs: new Map() }, 0);
+}
+
+/** Running state of one render, shared into quotes: task ordinals, and the
+ * slugs used so far (a repeated heading gets "-1", "-2" like on GitHub). */
+interface RenderCounters {
+  task: number;
+  slugs: Map<string, number>;
+}
+
+/** The block pass, on lines that are already escaped -- split out so a quote
+ * can run it again on its own contents without escaping them twice. */
+function renderLines(lines: string[], opts: MarkdownOptions, counter: RenderCounters, base: number | null): string {
   const headingOffset = opts.headingOffset ?? 2;
-  const lines = escapeHtml(source || "").split("\n");
   const out: string[] = [];
   let listType: "ul" | "ol" | null = null;
 
@@ -176,6 +264,8 @@ export function renderMarkdown(source: string, opts: MarkdownOptions = {}): stri
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trimEnd();
+    // Only top level: a quote's own contents sit inside the quote's anchor.
+    const at = opts.lineAnchors && base !== null ? ` data-line="${base + i}"` : "";
     if (!line.trim()) {
       closeList();
       continue;
@@ -185,7 +275,7 @@ export function renderMarkdown(source: string, opts: MarkdownOptions = {}): stri
       closeList();
       const code: string[] = [];
       while (++i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i]);
-      out.push(`<pre><code>${code.join("\n")}</code></pre>`);
+      out.push(`<pre${at}><code>${code.join("\n")}</code></pre>`);
       continue;
     }
 
@@ -201,7 +291,7 @@ export function renderMarkdown(source: string, opts: MarkdownOptions = {}): stri
       const body: string[] = [];
       let j = i + 2;
       for (; j < lines.length && isTableRow(lines[j].trimEnd()); j++) body.push(`<tr>${cells(lines[j], "td")}</tr>`);
-      out.push(`<table><thead><tr>${cells(line, "th")}</tr></thead><tbody>${body.join("")}</tbody></table>`);
+      out.push(`<table${at}><thead><tr>${cells(line, "th")}</tr></thead><tbody>${body.join("")}</tbody></table>`);
       i = j - 1;
       continue;
     }
@@ -210,30 +300,39 @@ export function renderMarkdown(source: string, opts: MarkdownOptions = {}): stri
     if (heading) {
       closeList();
       const level = Math.min(heading[1].length + headingOffset, 6);
-      out.push(`<h${level}>${inline(heading[2], opts)}</h${level}>`);
+      const body = inline(heading[2], opts);
+      let id = "";
+      if (opts.headingIds) {
+        const slug = slugify(plainText(body));
+        const seen = counter.slugs.get(slug) ?? 0;
+        counter.slugs.set(slug, seen + 1);
+        id = ` id="${seen ? `${slug}-${seen}` : slug}"`;
+      }
+      out.push(`<h${level}${at}${id}>${body}</h${level}>`);
       continue;
     }
 
     if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
       closeList();
-      out.push("<hr />");
+      out.push(`<hr${at} />`);
       continue;
     }
 
-    // Consecutive "> " lines are one quote, rendered as markdown in their own right.
+    // Consecutive "> " lines are one quote, rendered as markdown in their own
+    // right -- a table, list or nested quote inside one is still that thing.
     if (/^\s*&gt;/.test(line)) {
       closeList();
       const quoted: string[] = [];
       for (; i < lines.length && /^\s*&gt;/.test(lines[i]); i++) quoted.push(lines[i].replace(/^\s*&gt;\s?/, ""));
       i--;
-      out.push(`<blockquote>${inline(quoted.join("<br />"), opts)}</blockquote>`);
+      out.push(`<blockquote${at}>${renderLines(quoted, opts, counter, null)}</blockquote>`);
       continue;
     }
 
     const embed = embedBlock(line, opts);
     if (embed) {
       closeList();
-      out.push(embed);
+      out.push(embed.replace("<figure", `<figure${at}`));
       continue;
     }
 
@@ -244,7 +343,17 @@ export function renderMarkdown(source: string, opts: MarkdownOptions = {}): stri
         out.push("<ul>");
         listType = "ul";
       }
-      out.push(`<li>${inline(bullet[1], opts)}</li>`);
+      const task = /^\[([ xX])\]\s+(.*)$/.exec(bullet[1]);
+      if (task) {
+        const checked = task[1] !== " " ? " checked" : "";
+        const attrs = opts.interactiveTasks ? ` data-task="${counter.task}"` : " disabled";
+        counter.task++;
+        out.push(
+          `<li${at} class="task-item${checked ? " done" : ""}"><input type="checkbox" class="task-check"${checked}${attrs} />${inline(task[2], opts)}</li>`,
+        );
+      } else {
+        out.push(`<li${at}>${inline(bullet[1], opts)}</li>`);
+      }
       continue;
     }
 
@@ -255,12 +364,12 @@ export function renderMarkdown(source: string, opts: MarkdownOptions = {}): stri
         out.push("<ol>");
         listType = "ol";
       }
-      out.push(`<li>${inline(numbered[1], opts)}</li>`);
+      out.push(`<li${at}>${inline(numbered[1], opts)}</li>`);
       continue;
     }
 
     closeList();
-    out.push(`<p>${inline(line, opts)}</p>`);
+    out.push(`<p${at}>${inline(line, opts)}</p>`);
   }
 
   closeList();

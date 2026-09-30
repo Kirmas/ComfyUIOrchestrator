@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { resolveAssetUrl } from "../api/client";
+import { assetsApi } from "../api/endpoints";
 import { useT } from "../i18n";
 import { renderMarkdown } from "../markdown";
 import type { BoardItem } from "../types";
@@ -165,6 +166,9 @@ export function BoardSticker({
   };
 
   const url = resolveAssetUrl(item.asset_url);
+  // An SVG is drawn from its server-side raster: the browser re-rasterises a
+  // vector on every zoom step, and a 45k-shape map made the whole board crawl.
+  const imageUrl = item.asset_id && item.asset_mime_type?.includes("svg") ? assetsApi.fitUrl(item.asset_id) : url;
   const isMedia = item.kind === "image" || item.kind === "audio" || item.kind === "video";
 
   if (isMark) {
@@ -300,7 +304,7 @@ export function BoardSticker({
           />
         ))}
 
-      {item.kind === "image" && url && <img src={url} alt="" draggable={false} />}
+      {item.kind === "image" && url && <img src={imageUrl} alt="" draggable={false} />}
       {item.kind === "audio" && url && <audio src={url} controls />}
       {item.kind === "video" && url && <video src={url} controls />}
 

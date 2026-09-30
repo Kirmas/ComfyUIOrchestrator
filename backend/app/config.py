@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     # has something to read regardless of how the process is launched.
     log_dir: str = "./logs"
 
+    # Derived renditions that are expensive to redo but can always be redone --
+    # the page-size /fit pictures (asset_preview.py), an SVG rasterised once
+    # rather than on every restart. Deliberately NOT under media_dir: the
+    # backup's file-count check, storage GC and storage migration all treat
+    # every file there as an asset. Safe to delete wholesale.
+    cache_dir: str = "./cache"
+
     # Limits
     max_variants_per_node: int = 8
     # Bounds the *network calls* around a ComfyUI generation (submit, fetch
@@ -85,6 +92,10 @@ class Settings(BaseSettings):
         media_path = Path(self.media_dir)
         if not media_path.is_absolute():
             self.media_dir = str((BASE_DIR / media_path).resolve())
+
+        cache_path = Path(self.cache_dir)
+        if not cache_path.is_absolute():
+            self.cache_dir = str((BASE_DIR / cache_path).resolve())
 
         log_path = Path(self.log_dir)
         if not log_path.is_absolute():

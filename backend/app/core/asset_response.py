@@ -42,6 +42,16 @@ IMMUTABLE_CACHE = "private, max-age=31536000, immutable"
 REVALIDATE_CACHE = "private, max-age=0, must-revalidate"
 
 
+# An SVG is a document, not just a picture: opened directly (not through an
+# <img>, where scripts never run) its <script> would execute on this origin --
+# whose asset URLs carry the API token. So an SVG is served sandboxed, with
+# nothing allowed but its own inline styles and data: images.
+SVG_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox",
+    "X-Content-Type-Options": "nosniff",
+}
+
+
 def payload_etag(key: str) -> str:
     return '"' + hashlib.sha1(key.encode()).hexdigest()[:32] + '"'
 
@@ -98,6 +108,8 @@ def stream_payload(
     """The file from `offset` to EOF, as if that were the whole body."""
     size = max(0, os.path.getsize(path) - offset)
     headers = {"Cache-Control": cache_control, "ETag": etag, "Accept-Ranges": "bytes"}
+    if "svg" in media_type:
+        headers.update(SVG_HEADERS)
 
     if _if_none_match(request, etag):
         return Response(status_code=304, headers=headers)

@@ -217,10 +217,22 @@ async def make_project_design_doc_global(
 
 # ---------- global docs ----------
 @router.get("", response_model=list[DesignDocSummary])
-async def list_global_design_docs(db: AsyncSession = Depends(get_db)):
+async def list_design_docs(include_projects: bool = False, db: AsyncSession = Depends(get_db)):
     """Every global doc, whatever folder -- the projects page filters by the
-    folder it's showing, same as it does for projects."""
-    return (await db.scalars(select(DesignDoc).where(DesignDoc.project_id.is_(None)).order_by(DesignDoc.title))).all()
+    folder it's showing, same as it does for projects. `include_projects` adds
+    the projects' own docs, titled after their project -- what a doc-to-doc
+    link can point at."""
+    out = [
+        DesignDocSummary.model_validate(d)
+        for d in (await db.scalars(select(DesignDoc).where(DesignDoc.project_id.is_(None)))).all()
+    ]
+    if include_projects:
+        rows = await db.execute(select(DesignDoc, Project.name).join(Project, Project.id == DesignDoc.project_id))
+        for doc, name in rows.all():
+            item = DesignDocSummary.model_validate(doc)
+            item.title = name
+            out.append(item)
+    return sorted(out, key=lambda d: d.title.lower())
 
 
 @router.post("", response_model=DesignDocSummary, status_code=201)
@@ -242,7 +254,11 @@ async def resolve_design_doc_refs(payload: DesignDocRefsRequest, db: AsyncSessio
 
 @router.get("/{doc_id}", response_model=DesignDocSummary)
 async def get_design_doc_summary(doc_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    return await _doc_or_404(db, doc_id)
+    doc = await _doc_or_404(db, doc_id)
+    item = DesignDocSummary.model_validate(doc)
+    if doc.project_id is not None:
+        item.title = (await _project_or_404(db, doc.project_id)).name
+    return item
 
 
 @router.patch("/{doc_id}", response_model=DesignDocSummary)

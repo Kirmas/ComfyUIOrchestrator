@@ -3265,27 +3265,38 @@ th, td {
 }
 
 /* Editor and live preview side by side; stacked on a phone. */
+/* Editing: editor and preview side by side, each scrolling on its own inside
+   a fixed-height row, kept on the same source line by DesignDoc's scroll
+   sync. The preview is position:relative so its blocks' offsetTop is
+   measured from its own top. Stacked on a phone, half the screen each. */
 .design-doc-split {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  align-items: start;
+  height: calc(100vh - 130px);
+}
+
+.design-doc-split .design-doc-rendered {
+  height: 100%;
+  overflow-y: auto;
+  position: relative;
 }
 
 @media (max-width: 800px) {
   .design-doc-split {
     grid-template-columns: 1fr;
+    grid-template-rows: 1fr 1fr;
   }
 }
 
 .design-doc-editor {
   width: 100%;
-  min-height: 70vh;
+  height: 100%;
   box-sizing: border-box;
   font-family: ui-monospace, monospace;
   font-size: 13px;
   line-height: 1.5;
-  resize: vertical;
+  resize: none;
 }
 
 .design-doc-rendered {
@@ -3303,6 +3314,10 @@ th, td {
 
 .design-doc-empty {
   color: var(--text-dim);
+}
+
+.markdown-body blockquote p {
+  margin: 2px 0;
 }
 
 .markdown-body blockquote {
@@ -3384,8 +3399,20 @@ th, td {
   width: 100%;
 }
 
+/* A link to a file that isn't on the site (a repo-relative path): shown as
+   plainly broken, so it gets fixed rather than read past. The target is in
+   the tooltip (title). */
 .doc-ref-dead {
-  border-bottom: 1px dotted var(--text-dim);
+  color: var(--danger);
+  text-decoration: underline wavy var(--danger);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
+.doc-ref-dead::before {
+  content: "⛓ ";
+  font-size: 0.85em;
 }
 
 .doc-ref {
@@ -3497,4 +3524,52 @@ th, td {
 
 .design-doc-title {
   margin-right: 4px;
+}
+
+/* Task lists ("- [ ]" / "- [x]", markdown.ts): the checkbox replaces the
+   bullet; a done item is dimmed. Clickable only in the design doc. */
+.markdown-body li.task-item {
+  list-style: none;
+  margin-left: -1.3em;
+}
+
+.task-check {
+  margin: 0 0.45em 0 0;
+  vertical-align: -0.1em;
+}
+
+.task-check[data-task] {
+  cursor: pointer;
+}
+
+.markdown-body li.task-item.done {
+  color: var(--text-dim);
+}
+
+/* Doc-to-doc links and the picker that writes them (DesignDoc.tsx). */
+.doc-link {
+  color: var(--accent);
+}
+
+.doc-link-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.doc-link-list button {
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  padding: 5px 8px;
+}
+
+.doc-link-list button:hover {
+  background: var(--bg);
+}
+
+.doc-link-whole {
+  font-weight: 600;
 }

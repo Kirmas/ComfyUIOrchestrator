@@ -5,7 +5,7 @@ import { designDocApi, projectsApi } from "./api/endpoints";
 import type { DesignDocSummary, Project } from "./types";
 import { Board } from "./components/Board";
 import { ConnectionBar } from "./components/ConnectionBar";
-import { DesignDoc } from "./components/DesignDoc";
+import { DesignDoc, type DocLanding, type DocLang } from "./components/DesignDoc";
 import { Grid } from "./components/Grid";
 import { Logs } from "./components/Logs";
 import { ProjectsPage } from "./components/ProjectsPage";
@@ -16,6 +16,7 @@ import { cx } from "./utils";
 // "gdoc": a global design doc, opened from its folder on the projects page.
 type View = "projects" | "grid" | "board" | "doc" | "gdoc" | "agent" | "settings" | "logs";
 type AuthStatus = "checking" | "unauthenticated" | "authenticated";
+type DocPlace = { view: "doc"; projectId: string } | { view: "gdoc"; docId: string };
 
 const LAST_PROJECT_KEY = "comfy-orchestrator:lastProjectId";
 const LAST_VIEW_KEY = "comfy-orchestrator:lastView";
@@ -40,6 +41,10 @@ export default function App() {
   const [view, setView] = useState<View>(storedView);
   const [globalDocId, setGlobalDocId] = useState<string | null>(() => localStorage.getItem(LAST_GLOBAL_DOC_KEY));
   const [globalDoc, setGlobalDoc] = useState<DesignDocSummary | null>(null);
+  // Following a doc-to-doc link: where it asked to land (chapter + the
+  // language it was clicked in), and the docs visited on the way, for "back".
+  const [docLanding, setDocLanding] = useState<DocLanding | null>(null);
+  const [docHistory, setDocHistory] = useState<DocPlace[]>([]);
   // Shown on the topbar button that opens the projects page.
   const [projectName, setProjectName] = useState<string | null>(null);
   // On phones the whole topbar (project picker + nav + connection) collapses
@@ -106,6 +111,42 @@ export default function App() {
     goTo("gdoc");
   };
 
+  const currentDocPlace = (): DocPlace | null =>
+    view === "doc" && projectId
+      ? { view: "doc", projectId }
+      : view === "gdoc" && globalDocId
+        ? { view: "gdoc", docId: globalDocId }
+        : null;
+
+  const goToDocPlace = (place: DocPlace) => {
+    if (place.view === "doc") {
+      selectProject(place.projectId);
+      goTo("doc");
+    } else openGlobalDoc(place.docId);
+  };
+
+  /** A `doc:<id>#chapter` link: open that doc -- a project's (switching to the
+   * project) or a global one -- in the same language, at that chapter. */
+  const followDocLink = (docId: string, anchor: string | null, lang: DocLang) => {
+    designDocApi
+      .get(docId)
+      .then((doc) => {
+        const here = currentDocPlace();
+        if (here) setDocHistory((h) => [...h, here]);
+        setDocLanding({ anchor, lang, nonce: Date.now() });
+        goToDocPlace(doc.project_id ? { view: "doc", projectId: doc.project_id } : { view: "gdoc", docId: doc.id });
+      })
+      .catch(() => alert(t("doc.linkMissing")));
+  };
+
+  const docBack = () => {
+    const prev = docHistory[docHistory.length - 1];
+    if (!prev) return;
+    setDocHistory((h) => h.slice(0, -1));
+    setDocLanding(null);
+    goToDocPlace(prev);
+  };
+
   const onProjectsLoaded = (projects: Project[]) => {
     const mine = projects.find((p) => p.id === projectId);
     if (projectId && !mine) selectProject("");
@@ -113,6 +154,12 @@ export default function App() {
   };
 
   const goTo = (next: View) => {
+    // Leaving the docs ends a link-following trail: coming back to the Doc
+    // tab later must not jump to a chapter a link once asked for.
+    if (next !== "doc" && next !== "gdoc") {
+      setDocLanding(null);
+      setDocHistory([]);
+    }
     setView(next);
     localStorage.setItem(LAST_VIEW_KEY, next);
     setMenuOpen(false);
@@ -193,7 +240,13 @@ export default function App() {
           onProjectsLoaded={onProjectsLoaded}
         />
       ) : view === "gdoc" && globalDoc ? (
-        <DesignDoc source={{ kind: "global", docId: globalDoc.id, title: globalDoc.title }} />
+        <DesignDoc
+          key={`g:${globalDoc.id}:${docLanding?.nonce ?? 0}`}
+          source={{ kind: "global", docId: globalDoc.id, title: globalDoc.title }}
+          landing={docLanding}
+          onFollow={followDocLink}
+          onBack={docHistory.length ? docBack : undefined}
+        />
       ) : view === "settings" ? (
         <div className="main-area">
           <Settings />
@@ -206,7 +259,13 @@ export default function App() {
         // Rendered without a project too: dev chats aren't about any project.
         <AgentChat projectId={projectId} />
       ) : view === "doc" && projectId ? (
-        <DesignDoc source={{ kind: "project", projectId }} />
+        <DesignDoc
+          key={`p:${projectId}:${docLanding?.nonce ?? 0}`}
+          source={{ kind: "project", projectId }}
+          landing={docLanding}
+          onFollow={followDocLink}
+          onBack={docHistory.length ? docBack : undefined}
+        />
       ) : view === "board" && projectId ? (
         <Board projectId={projectId} />
       ) : (

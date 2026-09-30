@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, Upload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import asset_response
-from app.core.asset_preview import fit_rendition
+from app.core.asset_preview import fit_rendition, svg_preview
 from app.core.storage import build_asset_url, build_fit_url, build_preview_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Node, NodeKind, NodeStatus
@@ -98,6 +98,10 @@ async def get_asset_preview(request: Request, asset_id: uuid.UUID, db: AsyncSess
         raise HTTPException(404, "Asset file missing")
 
     preview = storage.read_preview(asset.storage_key)
+    if preview is None and "svg" in asset.mime_type:
+        # No prefix preview for a vector; cut one from its cached raster instead
+        # of handing a grid cell the whole SVG to redraw (asset_preview.py).
+        preview = await svg_preview(asset.storage_key, lambda: storage.get_object(asset.storage_key))
     if preview is None:
         return asset_response.stream_payload(
             request,

@@ -16,13 +16,17 @@ already cheap to load.
 """
 
 import asyncio
+import hashlib
 import io
+import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
+import resvg_py
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from app.config import get_settings
 from app.db.models import AssetKind
 
 # The grid renders an asset's face at 118x118 CSS px (a 260px .node-cell minus
@@ -155,46 +159,172 @@ async def build_preview_async(kind: AssetKind, data: bytes, capacity: int) -> tu
 # wrong for anything that shows the whole picture: in the design doc a 16:9
 # character chart came out as its middle two columns. A page wants the whole
 # frame at a width a page can use, so this is a second, uncropped size --
-# produced on demand rather than stored, since only pictures a doc actually
-# embeds ever need it, and kept in a small in-memory LRU (a restart just
-# re-renders; the browser keeps its own copy by ETag anyway).
+# produced on demand rather than stored in the asset, since only pictures a
+# doc or the board actually show ever need it.
+#
+# Cached twice: in memory (a small LRU) and on disk under settings.cache_dir,
+# because for an SVG the render is the expensive part (seconds, see below) and
+# a deploy restarts the process. The browser keeps its own copy by ETag.
 FIT_EDGE = 1600
 FIT_QUALITY = 85
+# Bump to invalidate every cached rendition after changing how they're made.
+_FIT_VERSION = "2"
 _FIT_CACHE_ENTRIES = 48
 _fit_cache: OrderedDict[str, bytes] = OrderedDict()
+_fit_locks: dict[str, asyncio.Lock] = {}
+
+# --- SVG ---------------------------------------------------------------------
+# An SVG is kept as-is -- it's the original, and opening it full size still
+# shows the real vector. But a browser re-rasterises one on every repaint at a
+# new scale, and a city map with ~45k shapes, 73 masks and ~400 clip paths
+# made the board crawl on every zoom step. So everywhere a picture is merely
+# *shown* (board sticker, grid cell, design doc) gets a raster of it instead,
+# drawn once here with resvg (pure Rust, no system cairo). Larger than FIT_EDGE,
+# since a map is exactly the kind of picture people zoom into.
+SVG_FIT_EDGE = 2400
+_SVG_HEAD = 2048
+_SVG_SIZE = re.compile(rb'viewBox\s*=\s*["\']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)')
+
+
+def is_svg(head: bytes) -> bool:
+    """Sniffed from the bytes, not trusted from a mime type: an SVG uploaded
+    as application/octet-stream is still one."""
+    head = head[:_SVG_HEAD].lstrip(b"\xef\xbb\xbf \t\r\n")
+    return head.startswith((b"<?xml", b"<svg", b"<!--", b"<!DOCTYPE svg")) and b"<svg" in head
+
+
+def rasterize_svg(data: bytes, long_edge: int = SVG_FIT_EDGE) -> Image.Image | None:
+    m = _SVG_SIZE.search(data[:_SVG_HEAD])
+    w, h = (float(m.group(1)), float(m.group(2))) if m else (1.0, 1.0)
+    size = {"width": long_edge} if w >= h else {"height": long_edge}
+    try:
+        png = resvg_py.svg_to_bytes(
+            # A string, never a path: with no resources_dir an external
+            # href can't make the renderer read files off this box.
+            svg_string=data.decode("utf-8", errors="replace"),
+            # The box has DejaVu only; without these a generic "serif" asks
+            # for Times New Roman and the labels silently disappear.
+            font_family="DejaVu Sans",
+            serif_family="DejaVu Serif",
+            sans_serif_family="DejaVu Sans",
+            monospace_family="DejaVu Sans Mono",
+            **size,
+        )
+        return Image.open(io.BytesIO(bytes(png)))
+    except (ValueError, UnidentifiedImageError, OSError):
+        return None
 
 
 def build_fit(data: bytes, edge: int = FIT_EDGE) -> bytes | None:
     """The whole picture scaled to fit `edge` on its long side, as WebP. None
     when it isn't a raster or is already that small -- the original is then the
-    right thing to serve."""
+    right thing to serve. An SVG is always rasterised (see above)."""
+    svg = is_svg(data)
     try:
-        with Image.open(io.BytesIO(data)) as img:
+        if svg:
+            img = rasterize_svg(data)
+            if img is None:
+                return None
+            edge = SVG_FIT_EDGE
+        else:
+            img = Image.open(io.BytesIO(data))
             img = ImageOps.exif_transpose(img) or img
             if max(img.size) <= edge:
                 return None
-            mode = "RGBA" if (img.mode in ("RGBA", "LA") or "transparency" in img.info) else "RGB"
-            img = img.convert(mode)
-            # draft-free: thumbnail() keeps the aspect ratio and never upsizes.
-            img.thumbnail((edge, edge), Image.LANCZOS)
+        mode = "RGBA" if (img.mode in ("RGBA", "LA") or "transparency" in img.info) else "RGB"
+        img = img.convert(mode)
+        # thumbnail() keeps the aspect ratio and never upsizes.
+        img.thumbnail((edge, edge), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, "WEBP", quality=FIT_QUALITY, method=4)
+        return buf.getvalue()
+    except (UnidentifiedImageError, OSError, ValueError):
+        return None
+
+
+def build_square_preview(fitted: bytes) -> bytes | None:
+    """The grid's centre square (same shape as the prefix preview) cut from an
+    existing rendition -- for an SVG, whose prefix block holds no preview."""
+    try:
+        with Image.open(io.BytesIO(fitted)) as img:
+            width, height = img.size
+            edge = min(width, height)
+            left, top = (width - edge) // 2, (height - edge) // 2
+            thumb = img.resize((PREVIEW_EDGE, PREVIEW_EDGE), Image.LANCZOS, box=(left, top, left + edge, top + edge))
             buf = io.BytesIO()
-            img.save(buf, "WEBP", quality=FIT_QUALITY, method=4)
+            thumb.save(buf, "WEBP", quality=QUALITY_LADDER[0], method=4)
             return buf.getvalue()
     except (UnidentifiedImageError, OSError, ValueError):
         return None
 
 
-async def fit_rendition(key: str, load: Callable[[], bytes]) -> bytes | None:
-    """Cached build_fit for the asset stored under `key`. `load` is only called
-    on a miss -- reading an 8K original off disk is the expensive half."""
+def _disk_path(key: str) -> Path:
+    name = hashlib.sha1(f"{_FIT_VERSION}:{key}".encode()).hexdigest()
+    return Path(get_settings().cache_dir) / "renditions" / name[:2] / f"{name}.webp"
+
+
+def _read_disk(key: str) -> bytes | None:
+    try:
+        return _disk_path(key).read_bytes()
+    except OSError:
+        return None
+
+
+def _write_disk(key: str, data: bytes) -> None:
+    path = _disk_path(key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+    except OSError:
+        pass  # a cache that can't be written is just a slower cache
+
+
+def _remember(key: str, data: bytes) -> None:
+    _fit_cache[key] = data
+    _fit_cache.move_to_end(key)
+    while len(_fit_cache) > _FIT_CACHE_ENTRIES:
+        _fit_cache.popitem(last=False)
+
+
+async def _cached(key: str, produce: Callable[[], Awaitable[bytes | None]]) -> bytes | None:
     if key in _fit_cache:
         _fit_cache.move_to_end(key)
         return _fit_cache[key]
-    async with _decode_semaphore:
-        data = await asyncio.to_thread(load)
-        fitted = await asyncio.to_thread(build_fit, data)
-    if fitted is not None:
-        _fit_cache[key] = fitted
-        while len(_fit_cache) > _FIT_CACHE_ENTRIES:
-            _fit_cache.popitem(last=False)
-    return fitted
+    # One render per key at a time: a board full of the same map shouldn't
+    # rasterise it once per sticker.
+    async with _fit_locks.setdefault(key, asyncio.Lock()):
+        if key in _fit_cache:
+            return _fit_cache[key]
+        data = await asyncio.to_thread(_read_disk, key)
+        if data is None:
+            data = await produce()
+            if data is not None:
+                await asyncio.to_thread(_write_disk, key, data)
+        if data is not None:
+            _remember(key, data)
+        return data
+
+
+async def fit_rendition(key: str, load: Callable[[], bytes]) -> bytes | None:
+    """Cached build_fit for the asset stored under `key`. `load` is only called
+    on a miss -- reading an 8K original off disk is the expensive half, or for
+    an SVG the render is."""
+
+    async def produce() -> bytes | None:
+        async with _decode_semaphore:
+            data = await asyncio.to_thread(load)
+            return await asyncio.to_thread(build_fit, data)
+
+    return await _cached(key + "#fit", produce)
+
+
+async def svg_preview(key: str, load: Callable[[], bytes]) -> bytes | None:
+    """The grid-square preview of an SVG, cut from its (cached) rendition."""
+
+    async def produce() -> bytes | None:
+        fitted = await fit_rendition(key, load)
+        return await asyncio.to_thread(build_square_preview, fitted) if fitted else None
+
+    return await _cached(key + "#preview", produce)

@@ -11,6 +11,9 @@ websockets==14.1
 httpx==0.28.1
 python-multipart==0.0.32
 Pillow==12.3.0
+# Rasterises SVG assets for display (asset_preview.py). 0.5.0 bundles pyo3
+# 0.29.2, past every pyo3 advisory; all 76 crates in its lock clean on OSV.
+resvg-py==0.5.0
 numpy==2.2.1
 # MCP server (app/mcp/) -- FastMCP lives inside this package; it is not FastAPI.
 # 1.28.1 is the first release with all published transport advisories closed
