@@ -42,6 +42,7 @@ class AgentChatCreate(BaseModel):
 class AgentChatUpdate(BaseModel):
     model: str | None = None
     permission_mode: str | None = None
+    done: bool | None = None  # hidden from the list unless "show done" is on
 
 
 class PermissionDecision(BaseModel):

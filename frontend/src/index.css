@@ -2587,6 +2587,29 @@ th, td {
   visibility: hidden;
 }
 
+.agent-chat-item.done {
+  opacity: 0.55;
+}
+
+.agent-show-done {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.agent-done-toggle {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.agent-done-toggle.active {
+  background: var(--accent-dim);
+}
+
 .agent-chat-item:hover .agent-chat-delete,
 .agent-chat-item.active .agent-chat-delete {
   visibility: visible;

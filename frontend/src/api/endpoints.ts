@@ -381,6 +381,7 @@ export const agentChatsApi = {
   decide: (id: string, requestId: string, decision: PermissionDecision) =>
     api.post<AgentChat>(`/api/agent-chats/${id}/permissions/${requestId}`, { decision }),
   setModel: (id: string, model: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { model }),
+  setDone: (id: string, done: boolean) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { done }),
   remove: (id: string) => api.delete(`/api/agent-chats/${id}`),
   send: (id: string, text: string, images: AgentImageUpload[] = []) =>
     api.post<AgentChat>(`/api/agent-chats/${id}/messages`, { text, images }),

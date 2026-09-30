@@ -546,6 +546,8 @@ export interface AgentChat {
   permission_mode?: string;
   // Whether a message may carry pictures from the person's machine (dev only).
   accepts_images?: boolean;
+  // Filed away by the person: hidden from the list unless "show done" is on.
+  done?: boolean;
   created_at: number;
   updated_at: number;
   last_seq: number;

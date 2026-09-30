@@ -764,6 +764,12 @@ async def update_chat(request: Request):
     if not chat:
         return JSONResponse({"detail": "Chat not found"}, status_code=404)
     body = await request.json()
+    # "Done" only files the chat away from the list; nothing else changes and
+    # a new message takes it back out (post_message).
+    done = body.get("done")
+    if done is not None and bool(done) != bool(chat.meta.get("done")):
+        chat.meta["done"] = bool(done)
+        chat.save_meta()
     model = body.get("model")
     if model is not None and model != chat_model(chat.meta):
         if model not in MODEL_IDS:
@@ -882,6 +888,7 @@ async def post_message(request: Request):
         return JSONResponse({"detail": "This bug report hasn't been worked on yet; wait for its turn"}, status_code=409)
     if not chat.meta.get("title"):
         chat.meta["title"] = text.splitlines()[0][:80] if text else "🖼"
+    chat.meta["done"] = False
     names = save_attachments(chat, images)
     await chat.emit({"type": "user", "text": text, **({"images": names} if names else {})})
     await chat.set_status("running")

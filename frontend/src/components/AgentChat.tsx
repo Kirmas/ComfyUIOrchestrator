@@ -12,6 +12,7 @@ const LAST_CHAT_KEY = "comfy-orchestrator:lastAgentChat";
 const LAST_MODEL_KEY = "comfy-orchestrator:lastAgentModel";
 // Same for a dev chat's permission mode.
 const LAST_MODE_KEY = "comfy-orchestrator:lastAgentPermissionMode";
+const SHOW_DONE_KEY = "comfy-orchestrator:agentShowDone";
 // The runner owns the list (and its order); these are just the names shown.
 const MODE_LABELS: Record<string, TKey> = {
   auto: "agent.mode.auto",
@@ -85,6 +86,7 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
   const [models, setModels] = useState<AgentModel[]>([]);
   const [permissionModes, setPermissionModes] = useState<string[]>([]);
   const [kinds, setKinds] = useState<AgentChatKind[]>([]);
+  const [showDone, setShowDone] = useState(() => localStorage.getItem(SHOW_DONE_KEY) === "1");
 
   useEffect(() => {
     agentChatsApi
@@ -142,19 +144,44 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
     reload();
   };
 
-  const projectChats = chats.filter((c) => c.kind === "project" && c.project_id === projectId);
-  const devChats = chats.filter((c) => c.kind === "dev");
+  const setDone = async (chat: Chat, done: boolean) => {
+    await agentChatsApi.setDone(chat.id, done);
+    reload();
+  };
+
+  const toggleShowDone = (on: boolean) => {
+    setShowDone(on);
+    localStorage.setItem(SHOW_DONE_KEY, on ? "1" : "0");
+  };
+
+  const allProjectChats = chats.filter((c) => c.kind === "project" && c.project_id === projectId);
+  const allDevChats = chats.filter((c) => c.kind === "dev");
   // A remembered project chat from another project isn't in any visible list.
-  const selected = [...projectChats, ...devChats].find((c) => c.id === selectedId) ?? null;
+  // A done one stays open until you leave it; it's only the list that hides it.
+  const selected = [...allProjectChats, ...allDevChats].find((c) => c.id === selectedId) ?? null;
+  const listed = (c: Chat) => showDone || !c.done;
+  const projectChats = allProjectChats.filter(listed);
+  const devChats = allDevChats.filter(listed);
+  const doneCount = chats.filter((c) => c.done && (c.kind === "dev" || c.project_id === projectId)).length;
   const nightSelected = selectedId === NIGHT_ID && kinds.includes("dev");
 
   const renderItem = (c: Chat) => (
-    <div key={c.id} className={cx("agent-chat-item", c.id === selectedId && "active")} onClick={() => select(c.id)}>
+    <div key={c.id} className={cx("agent-chat-item", c.id === selectedId && "active", c.done && "done")} onClick={() => select(c.id)}>
       <span className={cx("agent-status-dot", `agent-status-${c.status}`)} title={statusLabel(t, c.status)} />
       <span className="agent-chat-title">
         {c.origin === "agent" && <span title={t("agent.fromAgent")}>🤖 </span>}
         {c.title || t("agent.untitled")}
       </span>
+      <button
+        className="agent-chat-delete"
+        title={c.done ? t("agent.undone") : t("agent.markDone")}
+        onClick={(e) => {
+          e.stopPropagation();
+          setDone(c, !c.done);
+        }}
+      >
+        {c.done ? "↺" : "✓"}
+      </button>
       <button
         className="agent-chat-delete"
         title={t("agent.delete")}
@@ -201,12 +228,26 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
             {devChats.length === 0 ? <div className="node-cell-hint">{t("agent.noDevChats")}</div> : devChats.map(renderItem)}
           </>
         )}
+        {doneCount > 0 && (
+          <label className="agent-show-done">
+            <input type="checkbox" checked={showDone} onChange={(e) => toggleShowDone(e.target.checked)} />
+            {t("agent.showDone", { count: doneCount })}
+          </label>
+        )}
       </div>
       <div className="agent-main">
         {nightSelected ? (
           <NightPanel onOpenChat={select} onBack={() => select(null)} />
         ) : selected ? (
-          <ChatView key={selected.id} chat={selected} models={models} permissionModes={permissionModes} onBack={() => select(null)} onChanged={reload} />
+          <ChatView
+            key={selected.id}
+            chat={selected}
+            models={models}
+            permissionModes={permissionModes}
+            onBack={() => select(null)}
+            onChanged={reload}
+            onSetDone={(done) => setDone(selected, done)}
+          />
         ) : (
           <div className="agent-empty">{t("agent.pickOrCreate")}</div>
         )}
@@ -279,12 +320,14 @@ function ChatView({
   permissionModes,
   onBack,
   onChanged,
+  onSetDone,
 }: {
   chat: Chat;
   models: AgentModel[];
   permissionModes: string[];
   onBack: () => void;
   onChanged: () => void;
+  onSetDone: (done: boolean) => void;
 }) {
   const t = useT();
   const { events, connected } = useChatEvents(chat.id);
@@ -414,6 +457,13 @@ function ChatView({
             ))}
           </select>
         )}
+        <button
+          className={cx("agent-done-toggle", chat.done && "active")}
+          title={chat.done ? t("agent.undone") : t("agent.markDone")}
+          onClick={() => onSetDone(!chat.done)}
+        >
+          ✓ {t("agent.done")}
+        </button>
         </span>
       </div>
       <div className="agent-transcript" ref={boxRef}>
