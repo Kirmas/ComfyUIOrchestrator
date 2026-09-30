@@ -20,6 +20,8 @@ from pathlib import Path
 from PIL import Image as PILImage
 from sqlalchemy import select
 
+from app.api.routes.design_docs import REF_PATTERN
+from app.core import markdown_sections
 from app.db.base import async_session_maker
 from app.db.models import Asset, Node
 from app.core.storage import get_storage
@@ -929,8 +931,51 @@ async def get_design_doc(project_id: str, lang: str = "uk") -> dict:
     stands for now, `![caption](dashboard:<dashboard id>)` a sub-dashboard's
     current result (follows it when a new result is chosen inside),
     `[text](board:<board item id>)` links a sticker, and `asset:<asset id>`
-    pins one fixed file."""
+    pins one fixed file.
+
+    A long doc can exceed what one tool result carries; to read one to answer
+    a question, use get_design_doc_outline + get_design_doc_section instead."""
     return await _get(f"/api/projects/{project_id}/design-doc", lang=lang)
+
+
+async def _doc_text(project_id: str | None, doc_id: str | None, lang: str) -> dict:
+    if bool(project_id) == bool(doc_id):
+        raise ValueError("Pass exactly one of project_id (the project's own doc) or doc_id (a global doc)")
+    if project_id:
+        return await _get(f"/api/projects/{project_id}/design-doc", lang=lang)
+    return await _get(f"/api/design-docs/{doc_id}/text", lang=lang)
+
+
+@mcp_server.tool()
+async def get_design_doc_outline(project_id: str | None = None, doc_id: str | None = None, lang: str = "uk") -> dict:
+    """The heading tree of a design doc -- a project's own (`project_id`) or a
+    global one (`doc_id`) -- with each section's `id`, `level`, `title` and
+    size in `chars`. Read-only; the way into a doc too long to fetch whole:
+    look here, then get_design_doc_section by id for the parts you need."""
+    return markdown_sections.outline((await _doc_text(project_id, doc_id, lang)).get("content") or "")
+
+
+@mcp_server.tool()
+async def get_design_doc_section(
+    section_id: int | None = None,
+    project_id: str | None = None,
+    doc_id: str | None = None,
+    lang: str = "uk",
+    part: int = 1,
+) -> dict:
+    """One section of a design doc by its id from get_design_doc_outline
+    (with all its subsections), plus the resolved `refs` that occur in it.
+    `section_id` omitted = the text before the first heading.
+
+    A section over ~30k characters doesn't come whole: if it has subsections
+    you get its intro and a `subsections` list to read by id; if not, it
+    comes in `parts` -- ask again with `part=2`, ... `complete` says whether
+    you have all of it. Read-only."""
+    doc = await _doc_text(project_id, doc_id, lang)
+    result = markdown_sections.section(doc.get("content") or "", section_id, part)
+    refs = doc.get("refs") or {}
+    result["refs"] = {r: refs[r] for r in dict.fromkeys(REF_PATTERN.findall(result["content"])) if r in refs}
+    return result
 
 
 @mcp_server.tool()
