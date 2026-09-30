@@ -12,6 +12,8 @@ import type {
   BoardItemKind,
   Capability,
   Dashboard,
+  DesignDoc,
+  DesignDocRef,
   DetectedField,
   DirBrowseResult,
   GridLayout,
@@ -274,6 +276,8 @@ export const assetsApi = {
   // pre-built AssetRead.url around (e.g. Settings' unowned-assets scan,
   // which only returns bare ids/paths, not full asset reads).
   fileUrl: (id: string) => `${getApiBaseUrl()}/api/assets/${id}/file?token=${encodeURIComponent(getApiToken())}`,
+  // Same, for the thumbnail (build_preview_url).
+  previewUrl: (id: string) => `${getApiBaseUrl()}/api/assets/${id}/preview?token=${encodeURIComponent(getApiToken())}`,
 };
 
 // The idea board and the project asset library it owns (roadmap.md §1). Note
@@ -302,6 +306,14 @@ export const boardApi = {
   // the same computation the worker runs -- a macro must never hide what runs.
   resolveMacros: (projectId: string, text: string) =>
     api.post<MacroResolveResult>(`/api/projects/${projectId}/resolve-macros`, { text }),
+};
+
+export const designDocApi = {
+  get: (projectId: string, lang: string) => api.get<DesignDoc>(`/api/projects/${projectId}/design-doc?lang=${lang}`),
+  save: (projectId: string, lang: string, content: string) =>
+    api.put<DesignDoc>(`/api/projects/${projectId}/design-doc?lang=${lang}`, { content }),
+  resolveRefs: (projectId: string, refs: string[]) =>
+    api.post<Record<string, DesignDocRef>>(`/api/projects/${projectId}/design-doc/refs`, { refs }),
 };
 
 export const jobsApi = {

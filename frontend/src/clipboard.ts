@@ -72,6 +72,10 @@ export function useClipboardSlot<T extends object>(slot: ClipboardSlot<T>): T | 
  * say what it is about to place. */
 export interface CopiedAsset {
   assetId: string;
+  /** The grid cell it was copied from. Unused by pasting into the grid (that
+   * places the asset itself); the design doc links the *cell* instead, so the
+   * doc keeps showing whatever that cell stands for as it changes. */
+  nodeId?: string;
   label: string;
   url: string | null;
 }

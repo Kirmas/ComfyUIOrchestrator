@@ -436,7 +436,7 @@ function AssetFaceView({
  * left side, mirrored here so a candidate can be settled right from the zoom
  * view too instead of having to close it and find the same candidate again
  * in the grid. */
-function FullSizeModal({
+export function FullSizeModal({
   url,
   onClose,
   onSelect,
@@ -939,7 +939,7 @@ function BaseAssetNodeView({
           <button
             onClick={() => {
               const asset = outputs.find((o) => o.selected) ?? outputs[0];
-              assetClipboard.copy({ assetId: asset.id, label: node.node_type ?? t("cell.asset"), url: asset.url });
+              assetClipboard.copy({ assetId: asset.id, nodeId: node.id, label: node.node_type ?? t("cell.asset"), url: asset.url });
             }}
             title={t("cell.copyRefTitle")}
           >

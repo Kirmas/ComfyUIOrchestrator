@@ -2802,8 +2802,10 @@ th, td {
 }
 
 /* Model output: tables (markdown.ts) scroll sideways inside the bubble
-   rather than stretching it, and code fences keep their own box. */
-.agent-msg table {
+   rather than stretching it, and code fences keep their own box. The design
+   doc (.markdown-body) renders the same markdown the same way. */
+.agent-msg table,
+.markdown-body table {
   display: block;
   width: max-content;
   max-width: 100%;
@@ -2811,18 +2813,22 @@ th, td {
   margin: 6px 0;
 }
 
-.agent-msg th {
+.agent-msg th,
+.markdown-body th {
   background: var(--bg);
 }
 
 .agent-msg th,
-.agent-msg td {
+.agent-msg td,
+.markdown-body th,
+.markdown-body td {
   border: 1px solid var(--border);
   padding: 4px 8px;
   vertical-align: top;
 }
 
-.agent-msg pre {
+.agent-msg pre,
+.markdown-body pre {
   margin: 6px 0;
   padding: 8px;
   background: var(--bg);
@@ -3162,4 +3168,178 @@ th, td {
   .topbar-project {
     max-width: none;
   }
+}
+
+/* --- Design doc (DesignDoc.tsx) --------------------------------------- */
+
+.design-doc-page {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.design-doc-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg);
+  padding-bottom: 4px;
+}
+
+.design-doc-langs {
+  display: flex;
+}
+
+.design-doc-langs button {
+  border-radius: 0;
+}
+
+.design-doc-langs button:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.design-doc-langs button:last-child {
+  border-radius: 0 6px 6px 0;
+}
+
+.design-doc-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.design-doc-status.error {
+  color: var(--danger);
+}
+
+/* Editor and live preview side by side; stacked on a phone. */
+.design-doc-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  align-items: start;
+}
+
+@media (max-width: 800px) {
+  .design-doc-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.design-doc-editor {
+  width: 100%;
+  min-height: 70vh;
+  box-sizing: border-box;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.design-doc-rendered {
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 20px;
+  box-sizing: border-box;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.design-doc-empty {
+  color: var(--text-dim);
+}
+
+.markdown-body blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text-dim);
+}
+
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+
+.doc-embed {
+  margin: 12px 0;
+}
+
+.doc-embed-media {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  border-radius: 6px;
+}
+
+.doc-embed figcaption {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+.doc-embed-text blockquote {
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* The doc is a page, not a chat bubble: its tables take the full width (the
+   chat's max-content-and-scroll rule would shrink a table of pictures to
+   their alt text), and a picture in a cell fills that cell. */
+.design-doc-rendered table {
+  display: table;
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.doc-inline-media {
+  max-width: 100%;
+  max-height: 360px;
+  vertical-align: middle;
+  border-radius: 4px;
+}
+
+.design-doc-rendered td .doc-inline-media {
+  display: block;
+  width: 100%;
+  max-height: none;
+  object-fit: cover;
+}
+
+.doc-ref-dead {
+  border-bottom: 1px dotted var(--text-dim);
+}
+
+.doc-ref {
+  color: var(--accent);
+  text-decoration: underline dotted;
+}
+
+.doc-ref.pending {
+  color: var(--text-dim);
+}
+
+.doc-ref.missing {
+  color: var(--danger);
+  text-decoration: line-through;
+}
+
+.design-doc-pick-text {
+  display: block;
+  padding: 4px;
+  font-size: 11px;
+  text-align: left;
+  overflow: hidden;
+  height: 100%;
 }

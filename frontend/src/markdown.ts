@@ -1,4 +1,5 @@
-/** Minimal markdown -> HTML for idea-board stickers.
+/** Minimal markdown -> HTML for idea-board stickers, the agent chat and the
+ * design doc.
  *
  * Deliberately not `marked`/`markdown-it`: any real renderer passes raw HTML in
  * the source straight through, so it would have to come with a sanitizer as
@@ -7,26 +8,134 @@
  * small subset, so there is no path from sticker text to live markup at all.
  *
  * The subset is what people actually type on a sticky note: headings, bold,
- * italic, inline code, bullet/numbered lists, links, line breaks -- plus
- * GitHub-style tables and ``` code fences, which the agent chat
- * (AgentChat.tsx) gets from the model all the time.
+ * italic, strikethrough, inline code, bullet/numbered lists, quotes, rules,
+ * links, images, line breaks -- plus GitHub-style tables and ``` code fences,
+ * which the agent chat (AgentChat.tsx) gets from the model all the time.
+ *
+ * Links and images may also target something inside the project instead of a
+ * URL -- `node:<id>`, `dashboard:<id>`, `board:<id>`, `asset:<id>` (the design doc's references,
+ * routes/design_docs.py). What each one stands for is resolved by the caller
+ * and handed in as `refs`; this file only turns it into markup, and only ever
+ * emits an http(s) or same-origin /api URL as a src/href.
  *
  * Note this is display only. Text on its way into a prompt is stripped, not
  * rendered, and that happens on the backend (core/idea_macros.py) so the run
  * and the preview can't disagree.
  */
 
+/** A reference as the renderer needs it: already resolved to URLs. */
+export interface RenderRef {
+  missing: boolean;
+  label: string | null;
+  /** Thumbnail for an inline/embedded picture. */
+  src: string | null;
+  mime: string | null;
+  /** A text sticker's own markdown, embedded as a quote. */
+  text: string | null;
+}
+
+export interface MarkdownOptions {
+  /** Added to a heading's level. A sticker's "# " is a card title, not a page
+   * h1, so stickers and chat keep the old +2; the design doc is a page. */
+  headingOffset?: number;
+  refs?: Record<string, RenderRef>;
+}
+
+/** Same scheme list as REF_PATTERN in backend/app/api/routes/design_docs.py. */
+export const REF_TARGET = /^(?:node|board|asset|dashboard):[0-9a-fA-F-]{36}$/;
+
+/** Every reference target in a markdown text, for resolving them in one call. */
+export const findRefs = (source: string): string[] =>
+  [...new Set([...source.matchAll(/\]\(((?:node|board|asset|dashboard):[0-9a-fA-F-]{36})\)/g)].map((m) => m[1]))];
+
 const escapeHtml = (text: string): string =>
   text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-const inline = (text: string): string =>
+// Only for values that didn't come through escapeHtml already (resolved URLs).
+const attr = (value: string): string => escapeHtml(value);
+
+const isSafeUrl = (url: string): boolean => /^https?:\/\//.test(url) || /^\/api\//.test(url);
+
+const mediaTag = (src: string, mime: string | null, alt: string, cls: string): string =>
+  mime?.startsWith("video/")
+    ? `<video class="${cls}" src="${attr(src)}" controls preload="metadata"></video>`
+    : mime?.startsWith("audio/")
+      ? `<audio class="${cls}" src="${attr(src)}" controls preload="none"></audio>`
+      : `<img class="${cls}" src="${attr(src)}" alt="${alt}" loading="lazy" />`;
+
+/** Emphasis only: runs on text that has no links or code left in it. */
+const emphasis = (text: string): string =>
   text
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/(\*\*|__)(.+?)\1/g, "<strong>$2</strong>")
-    .replace(/(?<!\w)([*_])(?=\S)(.+?)(?<=\S)\1(?!\w)/g, "<em>$2</em>")
-    // Only http(s) links become anchors -- "javascript:" and friends stay as
-    // plain text, which is the whole reason this isn't a general renderer.
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer noopener">$1</a>');
+    .replace(/~~(.+?)~~/g, "<del>$1</del>")
+    .replace(/(?<!\w)([*_])(?=\S)(.+?)(?<=\S)\1(?!\w)/g, "<em>$2</em>");
+
+function inline(text: string, opts: MarkdownOptions): string {
+  // Code spans and links are cut out into placeholders first and put back
+  // last, so the emphasis rules can never reach into a URL or a code sample
+  // (an `_` in an asset token used to be enough to italicise half a link).
+  const held: string[] = [];
+  const hold = (html: string) => `\u0000${held.push(html) - 1}\u0000`;
+
+  const out = text
+    .replace(/`([^`]+)`/g, (_m, code: string) => hold(`<code>${code}</code>`))
+    .replace(/(!?)\[([^\]]*)\]\(([^)\s]+)\)/g, (m, bang: string, label: string, target: string) => {
+      const shown = emphasis(label);
+      if (REF_TARGET.test(target)) {
+        const ref = opts.refs?.[target];
+        if (!ref) return hold(`<span class="doc-ref pending">${shown || "…"}</span>`);
+        if (ref.missing) return hold(`<span class="doc-ref missing" title="${target}">⚠ ${shown || target}</span>`);
+        const name = shown || escapeHtml(ref.label ?? "");
+        if (bang && ref.src && isSafeUrl(ref.src)) {
+          return hold(`<a class="doc-ref-media" data-ref="${target}" href="#">${mediaTag(ref.src, ref.mime, name, "doc-inline-media")}</a>`);
+        }
+        return hold(`<a class="doc-ref" data-ref="${target}" href="#">${name || target}</a>`);
+      }
+      // Anything that isn't http(s) never becomes a live href/src
+      // ("javascript:" and friends), which is the whole reason this isn't a
+      // general renderer. A relative path (a doc pasted from a repo, where
+      // `Chart.png` or `../World/Race.md` meant a file next to it) shows its
+      // caption instead of raw markdown: a link as its text, a picture as a
+      // broken-image marker naming what it wanted.
+      if (!/^https?:\/\//.test(target)) {
+        if (/^[a-z][a-z0-9+.-]*:/i.test(target)) return m;
+        return hold(
+          bang
+            ? `<span class="doc-ref missing" title="${target}">⚠ ${shown || target}</span>`
+            : `<span class="doc-ref-dead" title="${target}">${shown}</span>`,
+        );
+      }
+      return hold(
+        bang
+          ? `<img class="doc-inline-media" src="${target}" alt="${shown}" loading="lazy" />`
+          : `<a href="${target}" target="_blank" rel="noreferrer noopener">${shown}</a>`,
+      );
+    });
+
+  return emphasis(out).replace(/\u0000(\d+)\u0000/g, (_m, i: string) => held[Number(i)]);
+}
+
+/** A line that is nothing but one reference image -- `![caption](node:...)` --
+ * becomes a block: the picture full width with its caption, or a text
+ * sticker's whole note as a quote. Inline, the same syntax is just a thumbnail. */
+function embedBlock(line: string, opts: MarkdownOptions): string | null {
+  const m = /^!\[([^\]]*)\]\(([^)\s]+)\)$/.exec(line.trim());
+  if (!m || !REF_TARGET.test(m[2])) return null;
+  const [, caption, target] = m;
+  const ref = opts.refs?.[target];
+  if (!ref || ref.missing) return null; // inline() already renders both states
+  const cap = emphasis(caption) || escapeHtml(ref.label ?? "");
+  const figcaption = cap ? `<figcaption>${cap}</figcaption>` : "";
+  if (ref.src && isSafeUrl(ref.src)) {
+    return `<figure class="doc-embed"><a class="doc-ref-media" data-ref="${target}" href="#">${mediaTag(ref.src, ref.mime, cap, "doc-embed-media")}</a>${figcaption}</figure>`;
+  }
+  if (ref.text) {
+    // One level only: the sticker's own references aren't resolved here, so
+    // two stickers quoting each other can't recurse.
+    return `<figure class="doc-embed doc-embed-text"><blockquote>${renderMarkdown(ref.text, { headingOffset: 2 })}</blockquote>${figcaption}</figure>`;
+  }
+  return null;
+}
 
 const isTableRow = (line: string): boolean => /^\s*\|.*\|\s*$/.test(line);
 const isTableSeparator = (line: string): boolean => /^\s*\|(\s*:?-+:?\s*\|)+\s*$/.test(line);
@@ -38,7 +147,8 @@ const splitRow = (line: string): string[] =>
     .split("|")
     .map((c) => c.trim());
 
-export function renderMarkdown(source: string): string {
+export function renderMarkdown(source: string, opts: MarkdownOptions = {}): string {
+  const headingOffset = opts.headingOffset ?? 2;
   const lines = escapeHtml(source || "").split("\n");
   const out: string[] = [];
   let listType: "ul" | "ol" | null = null;
@@ -72,7 +182,7 @@ export function renderMarkdown(source: string): string {
       const align = splitRow(lines[i + 1]).map((c) => (/^:-+:$/.test(c) ? "center" : /^-+:$/.test(c) ? "right" : ""));
       const cells = (row: string, tag: "th" | "td") =>
         splitRow(row)
-          .map((c, k) => `<${tag}${align[k] ? ` style="text-align:${align[k]}"` : ""}>${inline(c)}</${tag}>`)
+          .map((c, k) => `<${tag}${align[k] ? ` style="text-align:${align[k]}"` : ""}>${inline(c, opts)}</${tag}>`)
           .join("");
       const body: string[] = [];
       let j = i + 2;
@@ -85,8 +195,31 @@ export function renderMarkdown(source: string): string {
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
       closeList();
-      const level = Math.min(heading[1].length + 2, 6); // a sticker's "# " is a card title, not a page h1
-      out.push(`<h${level}>${inline(heading[2])}</h${level}>`);
+      const level = Math.min(heading[1].length + headingOffset, 6);
+      out.push(`<h${level}>${inline(heading[2], opts)}</h${level}>`);
+      continue;
+    }
+
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      closeList();
+      out.push("<hr />");
+      continue;
+    }
+
+    // Consecutive "> " lines are one quote, rendered as markdown in their own right.
+    if (/^\s*&gt;/.test(line)) {
+      closeList();
+      const quoted: string[] = [];
+      for (; i < lines.length && /^\s*&gt;/.test(lines[i]); i++) quoted.push(lines[i].replace(/^\s*&gt;\s?/, ""));
+      i--;
+      out.push(`<blockquote>${inline(quoted.join("<br />"), opts)}</blockquote>`);
+      continue;
+    }
+
+    const embed = embedBlock(line, opts);
+    if (embed) {
+      closeList();
+      out.push(embed);
       continue;
     }
 
@@ -97,7 +230,7 @@ export function renderMarkdown(source: string): string {
         out.push("<ul>");
         listType = "ul";
       }
-      out.push(`<li>${inline(bullet[1])}</li>`);
+      out.push(`<li>${inline(bullet[1], opts)}</li>`);
       continue;
     }
 
@@ -108,12 +241,12 @@ export function renderMarkdown(source: string): string {
         out.push("<ol>");
         listType = "ol";
       }
-      out.push(`<li>${inline(numbered[1])}</li>`);
+      out.push(`<li>${inline(numbered[1], opts)}</li>`);
       continue;
     }
 
     closeList();
-    out.push(`<p>${inline(line)}</p>`);
+    out.push(`<p>${inline(line, opts)}</p>`);
   }
 
   closeList();

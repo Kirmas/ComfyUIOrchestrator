@@ -738,3 +738,31 @@ class TracksMove(BaseModel):
     track_ids: list[uuid.UUID]
     # Destination scope; None = the project's main grid.
     dashboard_id: uuid.UUID | None = None
+
+
+# ---------- Design doc ----------
+class DesignDocRef(BaseModel):
+    """What a `node:`/`board:`/`asset:` reference in a design doc stands for
+    right now. `missing` = deleted (or never existed); the doc keeps
+    the reference text either way and just shows it as broken."""
+
+    missing: bool = False
+    label: str | None = None
+    asset: AssetRead | None = None
+    # A text sticker's own markdown, for board: refs that point at one.
+    text: str | None = None
+
+
+class DesignDocRead(BaseModel):
+    lang: str
+    content: str
+    updated_at: datetime | None = None
+    refs: dict[str, DesignDocRef] = {}
+
+
+class DesignDocUpdate(BaseModel):
+    content: str
+
+
+class DesignDocRefsRequest(BaseModel):
+    refs: list[str]

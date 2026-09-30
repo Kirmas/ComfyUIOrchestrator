@@ -600,3 +600,19 @@ export interface NightStatus {
   session: NightSession | null;
   history: NightSession[];
 }
+
+/** What a `node:`/`board:`/`asset:` reference in a design doc stands for right
+ * now (routes/design_docs.py). `missing`: deleted, or never existed. */
+export interface DesignDocRef {
+  missing: boolean;
+  label: string | null;
+  asset: Asset | null;
+  text: string | null;
+}
+
+export interface DesignDoc {
+  lang: string;
+  content: string;
+  updated_at: string | null;
+  refs: Record<string, DesignDocRef>;
+}

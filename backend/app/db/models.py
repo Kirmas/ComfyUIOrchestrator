@@ -176,6 +176,31 @@ class Project(Base):
     tracks: Mapped[list["Track"]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
 
+class DesignDoc(Base):
+    """A project's design doc: one markdown text per project *per language*
+    (a Ukrainian and an English version, written side by side rather than
+    translated by the app; the allowed set is `Lang` in routes/design_docs.py). The primary key is (project,
+    lang), so a project can't grow a second doc in the same language. A row
+    is created on first save; a missing one simply reads as an empty doc.
+
+    The text may reference things elsewhere in the project by scheme instead
+    of by URL -- `node:<id>` (a grid cell, shown as whatever picture it stands
+    for *now*), `dashboard:<id>` (a sub-dashboard's current result),
+    `board:<id>` (a sticker) or `asset:<id>` (one fixed file) --
+    resolved at read time by routes/design_docs.py, so the doc follows the
+    project instead of freezing a copy of it.
+    """
+
+    __tablename__ = "design_docs"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    lang: Mapped[str] = mapped_column(String(8), primary_key=True)
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class Dashboard(Base):
     """A grid scope: its own tracks, its own column-parity origin, its own
     coordinate space. A project always has an implicit *main* dashboard --

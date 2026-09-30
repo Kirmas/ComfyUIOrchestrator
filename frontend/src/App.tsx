@@ -5,6 +5,7 @@ import { projectsApi } from "./api/endpoints";
 import type { Project } from "./types";
 import { Board } from "./components/Board";
 import { ConnectionBar } from "./components/ConnectionBar";
+import { DesignDoc } from "./components/DesignDoc";
 import { Grid } from "./components/Grid";
 import { Logs } from "./components/Logs";
 import { ProjectsPage } from "./components/ProjectsPage";
@@ -12,13 +13,13 @@ import { Settings } from "./components/Settings";
 import { useT } from "./i18n";
 import { cx } from "./utils";
 
-type View = "projects" | "grid" | "board" | "agent" | "settings" | "logs";
+type View = "projects" | "grid" | "board" | "doc" | "agent" | "settings" | "logs";
 type AuthStatus = "checking" | "unauthenticated" | "authenticated";
 
 const LAST_PROJECT_KEY = "comfy-orchestrator:lastProjectId";
 const LAST_VIEW_KEY = "comfy-orchestrator:lastView";
 
-const VIEWS: View[] = ["projects", "grid", "board", "agent", "settings", "logs"];
+const VIEWS: View[] = ["projects", "grid", "board", "doc", "agent", "settings", "logs"];
 
 /** Reloading should put you back where you were, the same way the project
  * picker already remembers its selection -- landing back on the grid after
@@ -139,6 +140,9 @@ export default function App() {
           <button onClick={() => goTo(view === "board" ? "grid" : "board")} className={view === "board" ? "active" : ""}>
             {t("app.board")}
           </button>
+          <button onClick={() => goTo(view === "doc" ? "grid" : "doc")} className={view === "doc" ? "active" : ""}>
+            {t("app.doc")}
+          </button>
           <button onClick={() => goTo(view === "agent" ? "grid" : "agent")} className={view === "agent" ? "active" : ""}>
             {t("app.agent")}
           </button>
@@ -151,7 +155,7 @@ export default function App() {
           <ConnectionBar />
         </div>
       </div>
-      {view === "projects" || (!projectId && (view === "grid" || view === "board")) ? (
+      {view === "projects" || (!projectId && (view === "grid" || view === "board" || view === "doc")) ? (
         // Also what a grid/board with no project to show falls back to.
         <ProjectsPage projectId={projectId} onOpen={openProject} onProjectsLoaded={onProjectsLoaded} />
       ) : view === "settings" ? (
@@ -165,6 +169,8 @@ export default function App() {
       ) : view === "agent" ? (
         // Rendered without a project too: dev chats aren't about any project.
         <AgentChat projectId={projectId} />
+      ) : view === "doc" && projectId ? (
+        <DesignDoc projectId={projectId} />
       ) : view === "board" && projectId ? (
         <Board projectId={projectId} />
       ) : (

@@ -51,6 +51,13 @@ async def _patch(path: str, payload: dict):
         return r.json() if r.content else None
 
 
+async def _put(path: str, payload: dict):
+    async with get_client() as client:
+        r = await client.put(path, json=payload)
+        raise_for_api_error(r)
+        return r.json() if r.content else None
+
+
 async def _delete(path: str) -> None:
     async with get_client() as client:
         r = await client.delete(path)
@@ -907,6 +914,33 @@ async def add_capability(node_type_slug: str, backend_id: str, workflow_json: di
         f"/api/node-types/{node_type_slug}/capabilities",
         {"backend_id": backend_id, "workflow_json": workflow_json, "param_mapping": param_mapping},
     )
+
+
+# ---------- design doc ----------
+@mcp_server.tool()
+async def get_design_doc(project_id: str, lang: str = "uk") -> dict:
+    """The project's design doc in one language (`lang`: "uk" or "en" -- the
+    project has one doc per language, kept separately, not auto-translated):
+    its markdown text plus what each reference in it currently resolves to
+    (`refs`, keyed by the reference).
+
+    References are ordinary markdown links/images with a scheme instead of a
+    URL: `![caption](node:<node id>)` embeds a grid cell as whatever picture it
+    stands for now, `![caption](dashboard:<dashboard id>)` a sub-dashboard's
+    current result (follows it when a new result is chosen inside),
+    `[text](board:<board item id>)` links a sticker, and `asset:<asset id>`
+    pins one fixed file."""
+    return await _get(f"/api/projects/{project_id}/design-doc", lang=lang)
+
+
+@mcp_server.tool()
+async def set_design_doc(project_id: str, content: str, lang: str = "uk") -> dict:
+    """Replace the project's design doc in `lang` ("uk"/"en") with `content`
+    (the whole markdown text -- read it with get_design_doc first and edit,
+    don't overwrite blind: it's the person's document). Changing one language
+    doesn't touch the other; keep them in step yourself if that's the task.
+    See get_design_doc for reference syntax."""
+    return await _put(f"/api/projects/{project_id}/design-doc?lang={lang}", {"content": content})
 
 
 # ---------- idea board (roadmap.md §1) ----------
