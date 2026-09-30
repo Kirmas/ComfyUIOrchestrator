@@ -45,8 +45,11 @@ person accepts or rejects the whole night in the morning.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import os
+import re
 import shutil
 import signal
 import time
@@ -254,6 +257,10 @@ class Chat:
     def work_dir(self) -> Path:
         return self.dir / "work"
 
+    @property
+    def attachments_dir(self) -> Path:
+        return self.dir / "attachments"
+
     def save_meta(self) -> None:
         tmp = self.dir / "meta.json.tmp"
         tmp.write_text(json.dumps(self.meta, indent=1))
@@ -326,6 +333,7 @@ def public_meta(chat: Chat) -> dict:
     m["requested_model"] = chat_model(chat.meta)
     if m.get("kind") == "dev":
         m["permission_mode"] = chat_permission_mode(chat.meta)
+    m["accepts_images"] = PROFILES[m["kind"]].accepts_images
     return m
 
 
@@ -359,6 +367,10 @@ class Profile:
     CLI runs, which flags it gets, and whether a turn may start right now."""
 
     kind: str
+    # Pictures from the person's own machine in a message (screenshots). Only
+    # where the chat is the person's own shell anyway: a project chat's world
+    # is the project, whose pictures it already reaches through MCP.
+    accepts_images = False
 
     def new_meta(self, body: dict) -> dict | str:
         """Kind-specific meta fields for a new chat, or an error message."""
@@ -424,6 +436,7 @@ class ProjectProfile(Profile):
 
 class DevProfile(Profile):
     kind = "dev"
+    accepts_images = True
 
     def new_meta(self, body):
         if not DEV_ENABLED:
@@ -588,7 +601,7 @@ async def ask_permission(chat: Chat, proc: asyncio.subprocess.Process, req_id: s
         await proc.stdin.drain()
 
 
-async def run_turn(chat: Chat, text: str) -> None:
+async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
     chat.stop_requested = False
     stderr_tail: list[str] = []
     asks: list[asyncio.Task] = []
@@ -606,7 +619,14 @@ async def run_turn(chat: Chat, text: str) -> None:
         )
         chat.proc = proc
         send_line(proc, {"type": "control_request", "request_id": "init", "request": {"subtype": "initialize", "hooks": None}})
-        send_line(proc, {"type": "user", "message": {"role": "user", "content": text}})
+        content: str | list = text
+        if images:
+            # Straight into the message as image blocks, the same as a paste
+            # into a terminal session -- no tool call needed to see them.
+            content = [image_block(chat, name) for name in images]
+            if text:
+                content.append({"type": "text", "text": text})
+        send_line(proc, {"type": "user", "message": {"role": "user", "content": content}})
         await proc.stdin.drain()
 
         async def read_stderr():
@@ -786,27 +806,87 @@ async def delete_chat(request: Request):
     return Response(status_code=204)
 
 
+IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+# The API's own per-image cap is 5 MB; the page downscales long before that.
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_IMAGES = 10
+ATTACHMENT_NAME = re.compile(r"^[0-9a-f]{32}\.(png|jpg|gif|webp)$")
+
+
+def decode_images(raw) -> list[tuple[str, bytes]] | str:
+    """[(extension, bytes)] from the message body's images, or an error."""
+    if not isinstance(raw, list):
+        return "images must be a list"
+    if len(raw) > MAX_IMAGES:
+        return f"At most {MAX_IMAGES} pictures per message"
+    out = []
+    for item in raw:
+        ext = IMAGE_TYPES.get((item or {}).get("media_type"))
+        if not ext:
+            return f"Unsupported picture type: {(item or {}).get('media_type')!r}"
+        try:
+            data = base64.b64decode(item.get("data") or "", validate=True)
+        except (binascii.Error, ValueError):
+            return "A picture isn't valid base64"
+        if not data or len(data) > MAX_IMAGE_BYTES:
+            return "A picture is empty or over 5 MB"
+        out.append((ext, data))
+    return out
+
+
+def save_attachments(chat: Chat, images: list[tuple[str, bytes]]) -> list[str]:
+    chat.attachments_dir.mkdir(exist_ok=True)
+    names = []
+    for ext, data in images:
+        name = f"{uuid.uuid4().hex}.{ext}"
+        (chat.attachments_dir / name).write_bytes(data)
+        names.append(name)
+    return names
+
+
+def image_block(chat: Chat, name: str) -> dict:
+    ext = name.rsplit(".", 1)[1]
+    media_type = next(t for t, e in IMAGE_TYPES.items() if e == ext)
+    data = base64.b64encode((chat.attachments_dir / name).read_bytes()).decode()
+    return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+
+
+async def read_attachment(request: Request):
+    chat = get_chat(request)
+    name = request.path_params["name"]
+    if not chat or not ATTACHMENT_NAME.match(name) or not (chat.attachments_dir / name).is_file():
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    media_type = next(t for t, e in IMAGE_TYPES.items() if e == name.rsplit(".", 1)[1])
+    return Response((chat.attachments_dir / name).read_bytes(), media_type=media_type, headers={"Cache-Control": "private, max-age=31536000, immutable"})
+
+
 async def post_message(request: Request):
     chat = get_chat(request)
     if not chat:
         return JSONResponse({"detail": "Chat not found"}, status_code=404)
     body = await request.json()
     text = (body.get("text") or "").strip()
-    if not text:
+    images = decode_images(body.get("images") or [])
+    if isinstance(images, str):
+        return JSONResponse({"detail": images}, status_code=400)
+    if images and not PROFILES[chat.meta["kind"]].accepts_images:
+        return JSONResponse({"detail": "This kind of chat doesn't take pictures"}, status_code=400)
+    if not text and not images:
         return JSONResponse({"detail": "Empty message"}, status_code=400)
     if chat.meta.get("status") in BUSY:
         return JSONResponse({"detail": "The agent is still working on the previous message"}, status_code=409)
     blocked = PROFILES[chat.meta["kind"]].check_can_run(chat)
     if blocked:
         return JSONResponse({"detail": blocked}, status_code=409)
-    if not chat.meta.get("title"):
-        chat.meta["title"] = text.splitlines()[0][:80]
     if chat.meta.get("status") == "queued":
         return JSONResponse({"detail": "This bug report hasn't been worked on yet; wait for its turn"}, status_code=409)
-    await chat.emit({"type": "user", "text": text})
+    if not chat.meta.get("title"):
+        chat.meta["title"] = text.splitlines()[0][:80] if text else "🖼"
+    names = save_attachments(chat, images)
+    await chat.emit({"type": "user", "text": text, **({"images": names} if names else {})})
     await chat.set_status("running")
     chat.turn_origin = "person"
-    chat.task = asyncio.create_task(run_turn(chat, text))
+    chat.task = asyncio.create_task(run_turn(chat, text, names))
     return JSONResponse(public_meta(chat), status_code=202)
 
 
@@ -1256,6 +1336,7 @@ routes = [
     Route("/chats/{chat_id}/messages", post_message, methods=["POST"]),
     Route("/chats/{chat_id}/stop", stop, methods=["POST"]),
     Route("/chats/{chat_id}/events", events, methods=["GET"]),
+    Route("/chats/{chat_id}/attachments/{name}", read_attachment, methods=["GET"]),
 ]
 
 app = AuthMiddleware(Starlette(routes=routes, lifespan=lifespan))

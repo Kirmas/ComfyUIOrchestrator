@@ -4,7 +4,7 @@ import { useT } from "../i18n";
 import type { TKey } from "../locales/en";
 import { renderMarkdown } from "../markdown";
 import { NightPanel } from "./NightPanel";
-import type { AgentChat as Chat, AgentChatKind, AgentEvent, AgentModel, PermissionDecision } from "../types";
+import type { AgentChat as Chat, AgentChatKind, AgentEvent, AgentImageUpload, AgentModel, PermissionDecision } from "../types";
 import { cx } from "../utils";
 
 const LAST_CHAT_KEY = "comfy-orchestrator:lastAgentChat";
@@ -37,6 +37,36 @@ const DECIDED: Record<string, TKey> = {
 };
 // Sidebar entry for the night mode panel, selected like a chat.
 const NIGHT_ID = "__night__";
+// The model sees at most ~1568px on the long side anyway; bigger only costs
+// upload time from a phone. Past the byte cap a PNG falls back to JPEG.
+const IMAGE_MAX_SIDE = 1568;
+const IMAGE_MAX_BYTES = 3.5 * 1024 * 1024;
+
+type Attachment = AgentImageUpload & { preview: string };
+
+/** A picture from the person's machine, shrunk to what the model can use. */
+async function readAttachment(file: File): Promise<Attachment> {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, IMAGE_MAX_SIDE / Math.max(bitmap.width, bitmap.height));
+  let blob: Blob = file;
+  if (scale < 1 || file.size > IMAGE_MAX_BYTES || !["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext("2d")!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const encode = (type: string) => new Promise<Blob | null>((ok) => canvas.toBlob(ok, type, 0.9));
+    blob = (file.type === "image/png" && (await encode("image/png"))) || file;
+    if (blob === file || blob.size > IMAGE_MAX_BYTES) blob = (await encode("image/jpeg"))!;
+  }
+  bitmap.close();
+  const dataUrl = await new Promise<string>((ok, fail) => {
+    const reader = new FileReader();
+    reader.onload = () => ok(reader.result as string);
+    reader.onerror = () => fail(reader.error);
+    reader.readAsDataURL(blob);
+  });
+  return { media_type: blob.type, data: dataUrl.slice(dataUrl.indexOf(",") + 1), preview: dataUrl };
+}
 
 /** Agent chats. Two kinds, listed in their own sections:
  * - project: an agent bound to the selected project, working only through the
@@ -259,8 +289,22 @@ function ChatView({
   const t = useT();
   const { events, connected } = useChatEvents(chat.id);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [sending, setSending] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const attach = async (files: Iterable<File>) => {
+    for (const file of files) {
+      if (!file.type.startsWith("image/")) continue;
+      try {
+        const a = await readAttachment(file);
+        setAttachments((list) => [...list, a]);
+      } catch {
+        alert(t("agent.imageFailed", { name: file.name || "image" }));
+      }
+    }
+  };
 
   // The stream is the source of truth for status; the list's copy may be up
   // to one poll behind.
@@ -303,11 +347,16 @@ function ChatView({
 
   const send = async () => {
     const text = draft.trim();
-    if (!text || running || sending) return;
+    if ((!text && !attachments.length) || running || sending) return;
     setSending(true);
     try {
-      await agentChatsApi.send(chat.id, text);
+      await agentChatsApi.send(
+        chat.id,
+        text,
+        attachments.map(({ media_type, data }) => ({ media_type, data })),
+      );
       setDraft("");
+      setAttachments([]);
       onChanged();
     } catch (err) {
       alert(err instanceof Error ? err.message : String(err));
@@ -378,6 +427,18 @@ function ChatView({
                 </div>
               ) : (
                 <div key={e.seq} className="agent-msg agent-msg-user">
+                  {e.images && e.images.length > 0 && (
+                    <div className="agent-images">
+                      {e.images.map((name) => {
+                        const url = agentChatsApi.attachmentUrl(chat.id, name);
+                        return (
+                          <a key={name} href={url} target="_blank" rel="noreferrer">
+                            <img src={url} alt="" />
+                          </a>
+                        );
+                      })}
+                    </div>
+                  )}
                   {e.text}
                 </div>
               );
@@ -474,11 +535,66 @@ function ChatView({
         })}
         {status === "running" && <div className="agent-meta">{t("agent.working")}</div>}
       </div>
-      <div className="agent-input">
+      {attachments.length > 0 && (
+        <div className="agent-images agent-attachments">
+          {attachments.map((a, i) => (
+            <span key={i} className="agent-attachment">
+              <img src={a.preview} alt="" />
+              <button
+                title={t("agent.removeImage")}
+                onClick={() => setAttachments((list) => list.filter((_, j) => j !== i))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div
+        className="agent-input"
+        onDragOver={chat.accepts_images ? (e) => e.preventDefault() : undefined}
+        onDrop={
+          chat.accepts_images
+            ? (e) => {
+                e.preventDefault();
+                attach(e.dataTransfer.files);
+              }
+            : undefined
+        }
+      >
+        {chat.accepts_images && (
+          <>
+            <button className="agent-attach" title={t("agent.attach")} onClick={() => fileRef.current?.click()}>
+              📎
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              multiple
+              hidden
+              onChange={(e) => {
+                attach(Array.from(e.target.files ?? []));
+                e.target.value = "";
+              }}
+            />
+          </>
+        )}
         <textarea
           value={draft}
           placeholder={t("agent.placeholder")}
           onChange={(e) => setDraft(e.target.value)}
+          onPaste={
+            chat.accepts_images
+              ? (e) => {
+                  const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
+                  if (files.length) {
+                    e.preventDefault();
+                    attach(files);
+                  }
+                }
+              : undefined
+          }
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
               e.preventDefault();
@@ -492,7 +608,7 @@ function ChatView({
             {t("agent.stop")}
           </button>
         ) : (
-          <button className="primary" onClick={send} disabled={!draft.trim() || sending}>
+          <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length) || sending}>
             {t("agent.send")}
           </button>
         )}

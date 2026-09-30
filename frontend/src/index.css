@@ -2756,6 +2756,52 @@ th, td {
   font-size: 13px;
 }
 
+.agent-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.agent-images img {
+  display: block;
+  max-width: 220px;
+  max-height: 160px;
+  border-radius: 6px;
+  object-fit: contain;
+}
+
+.agent-attachments {
+  padding: 8px 14px 0;
+  margin: 0;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.agent-attachments img {
+  max-width: 96px;
+  max-height: 72px;
+}
+
+.agent-attachment {
+  position: relative;
+}
+
+.agent-attachment button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  line-height: 1;
+}
+
+.agent-attach {
+  padding: 6px 8px;
+}
+
 .agent-stop {
   border-color: var(--danger);
   color: var(--danger);

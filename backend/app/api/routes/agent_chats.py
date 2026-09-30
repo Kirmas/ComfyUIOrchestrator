@@ -48,8 +48,14 @@ class PermissionDecision(BaseModel):
     decision: str  # allow | allow_session | deny -- the runner validates
 
 
+class AgentImage(BaseModel):
+    media_type: str
+    data: str  # base64; the runner validates type, size and which chats take them
+
+
 class AgentMessage(BaseModel):
-    text: str
+    text: str = ""
+    images: list[AgentImage] = []
 
 
 def _runner() -> httpx.AsyncClient:
@@ -125,7 +131,17 @@ async def delete_chat(chat_id: str):
 
 @router.post("/{chat_id}/messages")
 async def post_message(chat_id: str, payload: AgentMessage):
-    return await _call("POST", f"/chats/{chat_id}/messages", json={"text": payload.text})
+    return await _call("POST", f"/chats/{chat_id}/messages", json=payload.model_dump())
+
+
+@router.get("/{chat_id}/attachments/{name}")
+async def get_attachment(chat_id: str, name: str):
+    """A picture sent in a message, for the transcript (<img>, so the token
+    comes as ?token=, which auth_middleware accepts)."""
+    res = await _call("GET", f"/chats/{chat_id}/attachments/{name}")
+    if res.status_code == 200:
+        res.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+    return res
 
 
 @router.post("/{chat_id}/stop")

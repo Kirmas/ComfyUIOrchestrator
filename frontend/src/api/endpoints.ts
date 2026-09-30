@@ -2,6 +2,7 @@ import { api, getApiBaseUrl, getApiToken } from "./client";
 import type {
   AgentChat,
   AgentChatKind,
+  AgentImageUpload,
   AgentModel,
   NightStatus,
   Annotation,
@@ -356,7 +357,10 @@ export const agentChatsApi = {
     api.post<AgentChat>(`/api/agent-chats/${id}/permissions/${requestId}`, { decision }),
   setModel: (id: string, model: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { model }),
   remove: (id: string) => api.delete(`/api/agent-chats/${id}`),
-  send: (id: string, text: string) => api.post<AgentChat>(`/api/agent-chats/${id}/messages`, { text }),
+  send: (id: string, text: string, images: AgentImageUpload[] = []) =>
+    api.post<AgentChat>(`/api/agent-chats/${id}/messages`, { text, images }),
+  attachmentUrl: (id: string, name: string) =>
+    `${getApiBaseUrl()}/api/agent-chats/${id}/attachments/${name}?token=${encodeURIComponent(getApiToken())}`,
   stop: (id: string) => api.post<AgentChat>(`/api/agent-chats/${id}/stop`),
   // EventSource can't set headers, so the token rides in the query string
   // (auth_middleware accepts either). `after` replays from a known point

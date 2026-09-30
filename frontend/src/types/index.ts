@@ -540,13 +540,22 @@ export interface AgentChat {
   // Dev chats: how tool calls get approved -- auto (classifier), default
   // (ask for everything not allowlisted) or acceptEdits.
   permission_mode?: string;
+  // Whether a message may carry pictures from the person's machine (dev only).
+  accepts_images?: boolean;
   created_at: number;
   updated_at: number;
   last_seq: number;
 }
 
+// A picture going out with a message: base64 without the data: prefix.
+export interface AgentImageUpload {
+  media_type: string;
+  data: string;
+}
+
 export type AgentEvent = { seq: number; ts: number } & (
-  | { type: "user"; text: string; origin?: "agent" }
+  // images: attachment names, served by agentChatsApi.attachmentUrl.
+  | { type: "user"; text: string; origin?: "agent"; images?: string[] }
   | { type: "text"; text: string }
   | { type: "tool_use"; id: string; name: string; input: string }
   | { type: "tool_result"; tool_use_id: string; is_error: boolean; content: string }
