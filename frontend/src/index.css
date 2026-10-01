@@ -231,6 +231,22 @@ input, select, textarea {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+/* A container dashboard's preview: faces of its own child asset nodes, since
+   there's no single result to show instead. */
+.subgraph-collage {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 2px;
+}
+
+.subgraph-collage img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--bg);
+}
+
 .subgraph-empty {
   padding: 12px 4px;
   text-align: center;

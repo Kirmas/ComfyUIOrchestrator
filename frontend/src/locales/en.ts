@@ -716,6 +716,10 @@ export const en = {
   "subgraph.markResultTitle": "Show this image on the subgraph's cell in the outer grid",
   "subgraph.resultSet": "Set as this subgraph's result.",
   "subgraph.resultSetFailed": "Could not set this as the subgraph's result.",
+  "subgraph.excludeFromPreview": "🚫 from preview",
+  "subgraph.excludeFromPreviewTitle": "Don't show this node (or anything inside it) in a parent container's collage preview -- for service content like statues or lanterns that shouldn't stand in for the district itself",
+  "subgraph.excludedFromPreview": "hidden from preview",
+  "subgraph.includeInPreviewTitle": "Count this node again in a parent container's collage preview",
 
   // --- Ideogram 4 caption editor ---------------------------------------
   "ideogram.openEditor": "▦ layout boxes",

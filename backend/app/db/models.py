@@ -258,7 +258,12 @@ class Dashboard(Base):
     # on a different kind than its parent (nodes moved in are re-aligned by
     # shifting a column, never rejected).
     start_kind: Mapped[NodeKind | None] = mapped_column(String(32), nullable=True)
-    # Same purely-cosmetic toggle as Project.asset_only_view, for this scope.
+    # Same grid-display toggle as Project.asset_only_view, for this scope --
+    # but for a dashboard it also doubles as "this is a gallery/container
+    # scope, not a convergent one": routes/dashboards.py's collage preview
+    # (_collect_preview_urls) is gated on this being set, on top of having no
+    # result_asset_id, so a workflow-heavy sub-dashboard that simply hasn't
+    # picked a result yet doesn't start showing an arbitrary picture mosaic.
     asset_only_view: Mapped[bool] = mapped_column(nullable=False, default=False)
     # The main pointer. SET NULL rather than CASCADE: losing the owner must
     # never silently destroy the dashboard's contents -- the delete/auto-promote
@@ -401,6 +406,18 @@ class Node(Base):
     subgraph_dashboard_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("dashboards.id", ondelete="CASCADE"), nullable=True
     )
+    # Opt-out from a parent container dashboard's collage preview
+    # (routes/dashboards.py's _walk_container): set on a node the user has
+    # flagged as "service" content that shouldn't represent its container up
+    # the chain -- e.g. a landmark's own prop/part sub-dashboards (statues,
+    # lanterns) nested inside it, which are real pictures but not what should
+    # stand for the *district* that landmark sits in. Checked for every node
+    # in the walk, not just asset.subgraph ones, since the same "don't bubble
+    # this up" need applies to a plain asset cell kept only as design
+    # reference. Toggled from the node's own card; false (the default, and
+    # the only value any node had before this column existed) is unchanged
+    # legacy behavior -- contribute normally.
+    exclude_from_dashboard_preview: Mapped[bool] = mapped_column(nullable=False, default=False)
     # How many of this workflow's declared OPTIONAL image/file slots are
     # actually reserved+rendered right now -- NULL (the default, and the only
     # value any node had before this column existed) means "reserve/show the

@@ -257,6 +257,10 @@ export interface NodeItem {
   // POST /api/nodes/{id}/recompute-span (see Grid.tsx's shrinkWorkflowToFit).
   // See backend/app/db/models.py's Node.visible_slot_count docstring.
   visible_slot_count: number | null;
+  // Opt-out from a parent container dashboard's collage preview -- see
+  // backend/app/db/models.py's Node.exclude_from_dashboard_preview
+  // docstring. Toggled from the node's own card (SubgraphNodeView).
+  exclude_from_dashboard_preview: boolean;
   created_at: string;
 }
 
@@ -274,6 +278,10 @@ export interface Dashboard {
   // pointer shows. Lives on the dashboard so two pointers can't diverge.
   result_asset_id: string | null;
   result_asset_url: string | null;
+  // Only non-empty when asset_only_view is set AND result_asset_id is null:
+  // a shuffled pool of child asset nodes' faces that SubgraphNodeView rotates
+  // a random few of every couple seconds, container-dashboard style.
+  preview_asset_urls: string[];
   node_count: number;
   pointer_count: number;
 }

@@ -718,6 +718,10 @@ export const uk: Record<TKey, string> = {
   "subgraph.markResultTitle": "Показувати це зображення на клітинці субграфа в зовнішній сітці",
   "subgraph.resultSet": "Обрано як результат цього субграфа.",
   "subgraph.resultSetFailed": "Не вдалося обрати це як результат субграфа.",
+  "subgraph.excludeFromPreview": "🚫 у прев'ю",
+  "subgraph.excludeFromPreviewTitle": "Не показувати цей вузол (і все, що в ньому) у прев'ю батьківського контейнера — для службових частин на кшталт статуй чи ліхтарів, які не мають представляти сам дістрикт",
+  "subgraph.excludedFromPreview": "сховано з прев'ю",
+  "subgraph.includeInPreviewTitle": "Знову враховувати цей вузол у прев'ю батьківського контейнера",
 
   // --- Ideogram 4 caption editor ---------------------------------------
   "ideogram.openEditor": "▦ розмітка боксів",

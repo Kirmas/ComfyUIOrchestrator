@@ -2046,10 +2046,81 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked, onS
  * that still holds work is refused (409), and the alert surfaces that reason.
  * That rule is what keeps a whole chart from being one click from gone.
  */
+// Stable reference so useRandomSample's effect doesn't see a "new" pool (and
+// re-arm its interval) on every render while `info` is still null/has none.
+const EMPTY_PREVIEW_POOL: string[] = [];
+
+function shuffledSlice<T>(pool: T[], size: number): T[] {
+  const copy = [...pool];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy.slice(0, size);
+}
+
+/** The container-dashboard collage's slideshow: `size` random items out of
+ * `pool`, freshly re-picked every `intervalMs` -- so a district with many more
+ * houses than fit the collage still cycles through all of them over time
+ * rather than freezing on whichever 4 happened to load first. No rotation
+ * (and no timer) once the whole pool already fits in one frame. */
+function useRandomSample<T>(pool: T[], size: number, intervalMs: number): T[] {
+  const [sample, setSample] = useState<T[]>(() => shuffledSlice(pool, size));
+
+  useEffect(() => {
+    setSample(shuffledSlice(pool, size));
+    if (pool.length <= size) return;
+    const id = window.setInterval(() => setSample(shuffledSlice(pool, size)), intervalMs);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pool, size, intervalMs]);
+
+  return sample;
+}
+
+// Half of one crossfade leg (fade-out, then swap+fade-in) -- fast enough that
+// four of these finishing back to back still lands well inside the 2s
+// interval between picks, slow enough not to read as a flash cut.
+const COLLAGE_FADE_MS = 250;
+
+/** One collage slot: fades to the new `url` instead of snapping to it --
+ * SubgraphNodeView's slideshow re-picks a random sample every couple seconds,
+ * and an instant pixel swap across several images at once read as an
+ * uncomfortable flash cut. Keyed by slot position (not url) by the caller, so
+ * this stays mounted across picks and its own effect sees the prop change
+ * rather than a remount skipping the fade. */
+function CrossfadeImage({ url, onDoubleClick }: { url: string; onDoubleClick: () => void }) {
+  const [shown, setShown] = useState(url);
+  const [fading, setFading] = useState(false);
+
+  useEffect(() => {
+    if (url === shown) return;
+    setFading(true);
+    const id = window.setTimeout(() => {
+      setShown(url);
+      setFading(false);
+    }, COLLAGE_FADE_MS);
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url]);
+
+  return (
+    <img
+      src={shown}
+      alt=""
+      loading="lazy"
+      draggable={false}
+      onDoubleClick={onDoubleClick}
+      style={{ opacity: fading ? 0 : 1, transition: `opacity ${COLLAGE_FADE_MS}ms ease` }}
+    />
+  );
+}
+
 function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onStartCompare, onStartRef, isRefSource }: Props) {
   const t = useT();
   const removeNode = useProjectStore((s) => s.removeNode);
   const enterDashboard = useProjectStore((s) => s.enterDashboard);
+  const setNode = useProjectStore((s) => s.setNode);
   // The dashboard itself, for the name/counts/ownership row below only -- the
   // picture comes from the kind's own face resolution, not from this payload.
   const [info, setInfo] = useState<Dashboard | null>(null);
@@ -2060,6 +2131,31 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
   // reads as dead: you press it and nothing anywhere visibly changes.
   const [pointerCopied, setPointerCopied] = useState(false);
   const face = useAssetFace(node);
+  const collageSample = useRandomSample(info?.preview_asset_urls ?? EMPTY_PREVIEW_POOL, 4, 2000);
+
+  // The scope THIS node lives in -- i.e. the parent container whose collage
+  // the exclude toggle below would affect. Null means the main project grid,
+  // which has no parent to bubble a preview into at all.
+  const parentDashboardId = useProjectStore((s) => s.dashboardId);
+  const [parentDashboard, setParentDashboard] = useState<Dashboard | null>(null);
+  useEffect(() => {
+    if (!parentDashboardId) {
+      setParentDashboard(null);
+      return;
+    }
+    let cancelled = false;
+    getDashboardFaceCached(parentDashboardId)
+      .then((d) => !cancelled && setParentDashboard(d))
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [parentDashboardId]);
+  // Same two conditions _walk_container itself gates on (asset_only_view +
+  // no result) -- showing the toggle when the parent couldn't show a collage
+  // regardless (not a gallery scope, or already has a single chosen result)
+  // would be a control for a setting with no visible effect.
+  const previewMeaningful = parentDashboardId !== null && !!parentDashboard?.asset_only_view && parentDashboard?.result_asset_id == null;
 
   useEffect(() => {
     if (!node.subgraph_dashboard_id) return;
@@ -2110,6 +2206,10 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
     }
   };
 
+  const toggleExcludeFromPreview = async () => {
+    setNode(await nodesApi.update(node.id, { exclude_from_dashboard_preview: !node.exclude_from_dashboard_preview }));
+  };
+
   return (
     <div
       ref={(el) => registerRef(node.id, el)}
@@ -2130,6 +2230,17 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
           onImageOpen={setFullSizeUrl}
           onCompare={(asset) => onStartCompare(node, asset)}
         />
+      ) : collageSample.length > 0 ? (
+        // A container dashboard (asset_only_view + no chosen result -- e.g. a
+        // district's houses/landmarks). Not a face: not pickable, not
+        // comparable, not ref-able (see useAssetFace/face() above, which
+        // stays null here on purpose) -- purely a preview, and a rotating one
+        // (useRandomSample re-picks from the full pool every 2s).
+        <div className="subgraph-collage">
+          {collageSample.map((url, i) => (
+            <CrossfadeImage key={i} url={url} onDoubleClick={() => setFullSizeUrl(url)} />
+          ))}
+        </div>
       ) : (
         <div className="subgraph-empty">{t("subgraph.noFace")}</div>
       )}
@@ -2182,6 +2293,24 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
             title={t("subgraph.copyPointerTitle")}
           >
             {pointerCopied ? t("subgraph.pointerCopied") : t("subgraph.copyPointer")}
+          </button>
+        )}
+        {/* Opts this node out of a parent container dashboard's collage
+            preview (routes/dashboards.py's _walk_container) -- for "service"
+            content like a landmark's own prop sub-dashboards, which are real
+            pictures but shouldn't stand in for the district they sit in.
+            Hidden on the main grid (no parent to bubble into) and whenever
+            the parent couldn't show a collage anyway (not asset_only_view,
+            or it already has its own single result) -- previewMeaningful
+            mirrors _collect_preview_urls' own gate exactly, so the control
+            only ever appears when toggling it would be visible. */}
+        {previewMeaningful && (
+          <button
+            className={cx(node.exclude_from_dashboard_preview && "active")}
+            onClick={toggleExcludeFromPreview}
+            title={node.exclude_from_dashboard_preview ? t("subgraph.includeInPreviewTitle") : t("subgraph.excludeFromPreviewTitle")}
+          >
+            {node.exclude_from_dashboard_preview ? t("subgraph.excludedFromPreview") : t("subgraph.excludeFromPreview")}
           </button>
         )}
         <button onClick={deleteCell} disabled={busy} title={t("subgraph.deleteTitle")}>

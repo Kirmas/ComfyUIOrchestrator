@@ -18,6 +18,7 @@ main grid, so every non-empty dashboard has a path home. Every additional
 pointer is a non-tree edge, which is exactly why deleting one is always safe.
 """
 
+import random
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -25,9 +26,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import get_db
-from app.core.asset_types import SUBGRAPH_NODE_TYPE
+from app.core.asset_types import ASSET_NODE_TYPES, SUBGRAPH_NODE_TYPE
 from app.core.subgraph_copy import copy_dashboard_contents
 from app.core.storage import build_asset_url
+from app.core.track_order import ordered_tracks
 from app.db.models import Asset, Dashboard, Node, NodeKind, NodeStatus, Track
 from app.schemas.schemas import (
     DashboardCreate,
@@ -101,12 +103,96 @@ async def _owner_chain_reaches_root(db: AsyncSession, start_dashboard_id, *, for
     return True
 
 
-def _read(dashboard: Dashboard, node_count: int, pointer_count: int) -> DashboardRead:
+async def _collect_preview_urls(db: AsyncSession, dashboard: Dashboard, *, pool_limit: int = 40) -> list[str]:
+    """A container-style sub-dashboard -- many settled pieces and no single
+    "the" result (e.g. a district holding several landmarks) -- gets a
+    collage preview instead of demanding one asset be chosen: the faces of
+    its own descendant asset nodes, first `pool_limit` that actually resolve
+    to something.
+
+    Requires TWO things at every level of the walk, both deliberate (see
+    Dashboard.asset_only_view in models.py): a result already set means it's
+    a convergent dashboard, not a container, and that single face is
+    authoritative; `asset_only_view` is the explicit "this is a gallery"
+    opt-in, so a workflow-heavy sub-dashboard that simply hasn't picked a
+    result yet doesn't start showing an arbitrary picture mosaic instead of
+    its normal empty state.
+
+    Containers nest (a district holding landmarks, each holding its own
+    front/back/left/right shots), and a direct child's own `face()` only
+    reads *its* result_asset_id -- null for a container child -- so a naive
+    one-level lookup goes empty the moment the chain is more than one
+    subgraph deep. `_walk_container` descends through such children instead
+    of stopping at them.
+
+    Returned shuffled -- the frontend rotates a random few of these every few
+    seconds (SubgraphNodeView's collage slideshow), and this is also the pool
+    it rotates within, so a pool capped below the dashboard's true descendant
+    count already only shows a random subset across the dashboard's whole
+    lifetime, not just within one page load.
+    """
+    if dashboard.result_asset_id is not None or not dashboard.asset_only_view:
+        return []
+    urls = await _walk_container(db, dashboard, pool_limit=pool_limit, visited={dashboard.id})
+    random.shuffle(urls)
+    return urls
+
+
+async def _walk_container(
+    db: AsyncSession, dashboard: Dashboard, *, pool_limit: int, visited: set[uuid.UUID], depth: int = 0
+) -> list[str]:
+    """The actual descent for _collect_preview_urls, split out so only the
+    outer call pays for the shuffle. `visited` guards a pointer loop (A -> B
+    -> A is legal structure, per Dashboard's own docstring) and `depth` is a
+    belt-and-suspenders cap -- cheap insurance against a very deep chain
+    costing an unbounded number of queries even without a literal cycle.
+    """
+    if depth > 8:
+        return []
+    urls: list[str] = []
+    for track in await ordered_tracks(db, dashboard.project_id, dashboard.id):
+        result = await db.execute(
+            select(Node)
+            .where(Node.track_id == track.id, Node.kind == NodeKind.asset, Node.status != NodeStatus.discarded)
+            .order_by(Node.step_index)
+        )
+        for node in result.scalars().all():
+            if node.exclude_from_dashboard_preview:
+                # Opted out from the node's own card -- "service" content
+                # (e.g. a landmark's own prop sub-dashboards) that's a real
+                # picture but shouldn't stand in for the container it sits in.
+                continue
+            backend = ASSET_NODE_TYPES.get(node.node_type or "")
+            if backend is None:
+                continue
+            asset = await backend.face(db, node)
+            if asset is not None:
+                urls.append(build_asset_url(asset.id))
+            elif (
+                node.node_type == SUBGRAPH_NODE_TYPE
+                and node.subgraph_dashboard_id is not None
+                and node.subgraph_dashboard_id not in visited
+            ):
+                child = await db.get(Dashboard, node.subgraph_dashboard_id)
+                if child is not None and child.result_asset_id is None and child.asset_only_view:
+                    urls.extend(
+                        await _walk_container(
+                            db, child, pool_limit=pool_limit - len(urls), visited=visited | {child.id}, depth=depth + 1
+                        )
+                    )
+            if len(urls) >= pool_limit:
+                return urls
+    return urls
+
+
+async def _read(db: AsyncSession, dashboard: Dashboard, node_count: int, pointer_count: int) -> DashboardRead:
     item = DashboardRead.model_validate(dashboard)
     item.node_count = node_count
     item.pointer_count = pointer_count
     if dashboard.result_asset_id is not None:
         item.result_asset_url = build_asset_url(dashboard.result_asset_id)
+    else:
+        item.preview_asset_urls = await _collect_preview_urls(db, dashboard)
     return item
 
 
@@ -153,7 +239,7 @@ async def create_dashboard(payload: DashboardCreate, db: AsyncSession = Depends(
     dashboard.owner_node_id = node.id
     await db.commit()
     await db.refresh(dashboard)
-    return _read(dashboard, 0, 1)
+    return await _read(db, dashboard, 0, 1)
 
 
 @router.post("/dashboards/{dashboard_id}/pointers", response_model=DashboardRead, status_code=201)
@@ -180,7 +266,7 @@ async def add_pointer(dashboard_id: uuid.UUID, payload: PointerCreate, db: Async
     node.subgraph_dashboard_id = dashboard.id
     await db.commit()
     await db.refresh(dashboard)
-    return _read(dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
+    return await _read(db, dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
 
 
 @router.post("/dashboards/{dashboard_id}/copy", response_model=DashboardRead, status_code=201)
@@ -233,7 +319,7 @@ async def copy_dashboard(dashboard_id: uuid.UUID, payload: DashboardCreate, db: 
 
     await db.commit()
     await db.refresh(dashboard)
-    return _read(dashboard, await _live_node_count(db, dashboard.id), 1)
+    return await _read(db, dashboard, await _live_node_count(db, dashboard.id), 1)
 
 
 @router.get("/dashboards/{dashboard_id}", response_model=DashboardRead)
@@ -241,7 +327,7 @@ async def get_dashboard(dashboard_id: uuid.UUID, db: AsyncSession = Depends(get_
     dashboard = await db.get(Dashboard, dashboard_id)
     if dashboard is None:
         raise HTTPException(404, "Dashboard not found")
-    return _read(dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
+    return await _read(db, dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
 
 
 @router.patch("/dashboards/{dashboard_id}", response_model=DashboardRead)
@@ -255,7 +341,7 @@ async def rename_dashboard(dashboard_id: uuid.UUID, payload: DashboardRename, db
         dashboard.asset_only_view = payload.asset_only_view
     await db.commit()
     await db.refresh(dashboard)
-    return _read(dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
+    return await _read(db, dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
 
 
 @router.post("/dashboards/{dashboard_id}/result", response_model=DashboardRead)
@@ -286,7 +372,7 @@ async def set_dashboard_result(dashboard_id: uuid.UUID, payload: SetDashboardRes
 
     await db.commit()
     await db.refresh(dashboard)
-    return _read(dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
+    return await _read(db, dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
 
 
 @router.post("/dashboards/{dashboard_id}/transfer-ownership", response_model=DashboardRead)
@@ -306,7 +392,7 @@ async def transfer_ownership(dashboard_id: uuid.UUID, payload: TransferOwnership
     if new_owner.subgraph_dashboard_id != dashboard.id:
         raise HTTPException(409, "That node doesn't point at this dashboard.")
     if dashboard.owner_node_id == new_owner.id:
-        return _read(dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
+        return await _read(db, dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
 
     host = await _dashboard_of_node(db, new_owner)
     if not await _owner_chain_reaches_root(db, host, forbidden_id=dashboard.id):
@@ -318,7 +404,7 @@ async def transfer_ownership(dashboard_id: uuid.UUID, payload: TransferOwnership
     dashboard.owner_node_id = new_owner.id
     await db.commit()
     await db.refresh(dashboard)
-    return _read(dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
+    return await _read(db, dashboard, await _live_node_count(db, dashboard.id), len(await _pointers_to(db, dashboard.id)))
 
 
 async def enforce_pointer_deletion(db: AsyncSession, node: Node) -> None:

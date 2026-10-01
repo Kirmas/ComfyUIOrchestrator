@@ -422,6 +422,9 @@ class NodeUpdate(BaseModel):
     backend_mode: str | None = None
     manual_backend_id: uuid.UUID | None = None
     use_api: bool | None = None
+    # Opt this node out of a parent container dashboard's collage preview --
+    # see Node.exclude_from_dashboard_preview in db/models.py.
+    exclude_from_dashboard_preview: bool | None = None
     # Explicit unbind only -- NodeCell.tsx's "detach & remove workflow"
     # button sends `created_by_node_id: null` right before deleting the
     # creator workflow node, so delete_node's own_output_nodes sweep no
@@ -447,6 +450,7 @@ class NodeRead(ORMModel):
     backend_mode: str
     manual_backend_id: uuid.UUID | None
     use_api: bool
+    exclude_from_dashboard_preview: bool
     error: str | None
     # Read-only -- see db/models.py's Node.created_by_node_id docstring.
     # Never appears on NodeCreate/NodeUpdate; the only writer is
@@ -730,6 +734,12 @@ class DashboardRead(BaseModel):
     result_asset_id: uuid.UUID | None = None
     # Resolved here so a pointer can render the face without a second lookup.
     result_asset_url: str | None = None
+    # Only populated when asset_only_view is set AND result_asset_id is
+    # unset: an explicit "container" dashboard (several settled pieces, no
+    # single chosen result -- e.g. a district holding several house/landmark
+    # sub-dashboards) gets a shuffled pool of its own child asset nodes'
+    # faces instead of demanding one be picked. See _collect_preview_urls.
+    preview_asset_urls: list[str] = []
     # Derived, not stored: node_count drives the "can't delete the main pointer
     # while it still holds work" rule, pointer_count tells the UI whether this
     # is the last way in.
