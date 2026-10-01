@@ -96,7 +96,10 @@ async def list_kinds():
 
 @router.post("")
 async def create_chat(payload: AgentChatCreate, db: AsyncSession = Depends(get_db)):
-    body: dict = {"kind": payload.kind, "model": payload.model, "permission_mode": payload.permission_mode}
+    # api_url/api_token (this instance's own, same as the night self-check
+    # below) let the runner call back POST /api/push/notify when a turn
+    # finishes -- see runner.py's Chat.set_status.
+    body: dict = {"kind": payload.kind, "model": payload.model, "permission_mode": payload.permission_mode, **_self_check()}
     if payload.kind == "project":
         if not payload.project_id:
             raise HTTPException(400, "A project chat needs project_id")

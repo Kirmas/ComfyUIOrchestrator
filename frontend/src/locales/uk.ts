@@ -130,6 +130,11 @@ export const uk: Record<TKey, string> = {
   "agent.markDone": "Позначити завершеним: сховати зі списку (нове повідомлення поверне його)",
   "agent.undone": "Не завершено: повернути у список",
   "agent.showDone": "Показувати завершені ({count})",
+  "agent.notify.enable": "🔕 Увімкнути сповіщення",
+  "agent.notify.enabled": "🔔 Сповіщення увімкнено",
+  "agent.notify.unsupported": "Цей браузер не підтримує push-сповіщення.",
+  "agent.notify.denied": "Сповіщення заблоковані для цього сайту в налаштуваннях браузера.",
+  "agent.notify.failed": "Не вдалося увімкнути сповіщення: {error}",
   "agent.confirmDelete": "Видалити чат «{title}»? Його історію буде втрачено назавжди.",
   "agent.status.idle": "чекає на вас",
   "agent.status.running": "працює",
@@ -208,6 +213,8 @@ export const uk: Record<TKey, string> = {
   // --- Settings: language ---------------------------------------------
   "settings.language": "Мова",
   "settings.languageHint": "Мова інтерфейсу. За замовчуванням — англійська.",
+  "settings.notifications": "Сповіщення",
+  "settings.notificationsHint": "Push-сповіщення на цей пристрій, коли агент дописав відповідь або завершилась генерація — навіть якщо вкладку закрито.",
   "settings.langEn": "English",
   "settings.langUk": "Українська",
 

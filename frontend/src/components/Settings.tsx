@@ -15,6 +15,8 @@ import { NodeTypeWizard } from "./NodeTypeWizard";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
 import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
 import { LANGS, tr, useLangStore, useT } from "../i18n";
+import { currentPushSubscription, disablePushNotifications, enablePushNotifications, pushSupported } from "../pushNotifications";
+import type { TKey } from "../locales/en";
 
 // Only one provider is actually wired up backend-side right now
 // (GeminiImageBackend, api_backend.py's PROVIDERS registry) -- a friendly
@@ -58,6 +60,56 @@ function LanguageSection() {
           ))}
         </select>
         <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("settings.languageHint")}</span>
+      </div>
+    </div>
+  );
+}
+
+/** Also a per-device property, same reasoning as LanguageSection above: a
+ * push subscription belongs to this browser install, not the shared account.
+ * Covers both agent-chat turns finishing and generations finishing (worker/
+ * tasks.py's _finalize_node_if_done) -- one subscription, two triggers. */
+function NotificationsSection() {
+  const t = useT();
+  const [notifyOn, setNotifyOn] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!pushSupported()) return;
+    currentPushSubscription()
+      .then((sub) => setNotifyOn(!!sub))
+      .catch(() => setNotifyOn(false));
+  }, []);
+
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      if (notifyOn) {
+        await disablePushNotifications();
+        setNotifyOn(false);
+      } else {
+        await enablePushNotifications();
+        setNotifyOn(true);
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      const key: TKey = reason === "denied" ? "agent.notify.denied" : reason === "unsupported" ? "agent.notify.unsupported" : "agent.notify.failed";
+      alert(t(key, { error: reason }));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!pushSupported()) return null;
+
+  return (
+    <div className="settings-section">
+      <h2>{t("settings.notifications")}</h2>
+      <div className="inline-form">
+        <button disabled={busy} onClick={toggle}>
+          {t(notifyOn ? "agent.notify.enabled" : "agent.notify.enable")}
+        </button>
+        <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("settings.notificationsHint")}</span>
       </div>
     </div>
   );
@@ -1432,6 +1484,7 @@ export function Settings() {
     <div className="settings-panel">
       {loadError && <div className="error-text">{loadError}</div>}
       <LanguageSection />
+      <NotificationsSection />
       <StorageSection />
       <BackendsSection items={backends} reload={reloadBackends} />
       <NodeTypesSection

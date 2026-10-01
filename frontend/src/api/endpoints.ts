@@ -403,3 +403,9 @@ export const nightApi = {
   // may well die with it; callers poll status() afterwards.
   finish: (action: "accept" | "reject") => api.post<{ steps: string[] }>(`/api/agent-night/${action}`),
 };
+
+export const pushApi = {
+  vapidPublicKey: () => api.get<{ key: string }>("/api/push/vapid-public-key"),
+  subscribe: (subscription: PushSubscriptionJSON) => api.post<void>("/api/push/subscribe", subscription),
+  unsubscribe: (endpoint: string) => api.post<void>("/api/push/unsubscribe", { endpoint }),
+};

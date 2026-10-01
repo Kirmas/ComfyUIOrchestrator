@@ -2622,6 +2622,7 @@ th, td {
   white-space: nowrap;
 }
 
+
 .agent-done-toggle.active {
   background: var(--accent-dim);
 }

@@ -133,6 +133,11 @@ export const en = {
   "agent.markDone": "Mark done: hide from the list (a new message brings it back)",
   "agent.undone": "Not done: back into the list",
   "agent.showDone": "Show done chats ({count})",
+  "agent.notify.enable": "🔕 Enable notifications",
+  "agent.notify.enabled": "🔔 Notifications on",
+  "agent.notify.unsupported": "This browser doesn't support push notifications.",
+  "agent.notify.denied": "Notifications are blocked for this site in the browser's own settings.",
+  "agent.notify.failed": "Couldn't turn on notifications: {error}",
   "agent.confirmDelete": "Delete the chat \"{title}\"? Its transcript is removed for good.",
   "agent.status.idle": "waiting for you",
   "agent.status.running": "working",
@@ -211,6 +216,8 @@ export const en = {
   // --- Settings: language ---------------------------------------------
   "settings.language": "Language",
   "settings.languageHint": "Interface language. English is the default.",
+  "settings.notifications": "Notifications",
+  "settings.notificationsHint": "Push notifications to this device when an agent chat finishes replying or a generation finishes, even with the tab closed.",
   "settings.langEn": "English",
   "settings.langUk": "Українська",
 

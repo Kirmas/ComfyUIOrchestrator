@@ -63,6 +63,8 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
+from urllib.error import URLError
+from urllib.request import Request as UrlRequest, urlopen
 
 DATA_DIR = Path(os.environ.get("RUNNER_DATA_DIR", Path.home() / ".local/share/comfy-agent-runner"))
 CHATS_DIR = DATA_DIR / "chats"
@@ -86,6 +88,48 @@ DEV_ENABLED = os.environ.get("RUNNER_DEV_ENABLED") == "1"
 # A turn is "busy" in either state: the CLI is working, or it is paused on a
 # question only the person can answer.
 BUSY = {"running", "awaiting_approval"}
+
+# Push notifications (app/core/push.py on the orchestrator side): which status
+# transitions are worth nudging the phone for. Not "stopped"/"interrupted" --
+# those fire on a person's own Stop click or on this very runner restarting
+# (mark_interrupted below), which happens on every dev-chat deploy and would
+# turn routine development into a push every time.
+NOTIFY_STATUSES = {"idle", "error", "awaiting_approval"}
+NOTIFY_BODY = {
+    "idle": "Finished replying.",
+    "error": "Hit an error.",
+    "awaiting_approval": "Needs a permission decision.",
+}
+# Keeps a reference to each fire-and-forget push task so it isn't garbage
+# collected mid-flight (asyncio.create_task's own warning about this).
+_push_tasks: set[asyncio.Task] = set()
+
+
+def _post_notify(api_url: str, token: str, title: str, body: str) -> None:
+    """Blocking; only ever called via asyncio.to_thread. Best-effort: the main
+    app may be mid-restart (every deploy does this) and silently missing one
+    notification is better than this call ever disrupting a chat turn."""
+    data = json.dumps({"title": title, "body": body, "url": "/"}).encode()
+    req = UrlRequest(
+        f"{api_url}/api/push/notify",
+        data=data,
+        method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    try:
+        urlopen(req, timeout=10).close()
+    except (URLError, OSError):
+        pass
+
+
+def fire_push_notification(chat: "Chat", status: str) -> None:
+    api_url, token = chat.meta.get("api_url"), chat.meta.get("api_token")
+    if not api_url or not token:
+        return  # a chat created before this feature shipped
+    title = chat.meta.get("title") or "Agent chat"
+    task = asyncio.create_task(asyncio.to_thread(_post_notify, api_url, token, title, NOTIFY_BODY[status]))
+    _push_tasks.add(task)
+    task.add_done_callback(_push_tasks.discard)
 
 # Night mode: bug reports from other agents (MCP report_bug) become dev chats
 # worked unattended, one at a time; night.py does the git/backup/deploy part.
@@ -292,6 +336,8 @@ class Chat:
         self.meta["status"] = status
         await self.emit({"type": "status", "status": status})
         self.save_meta()
+        if status in NOTIFY_STATUSES:
+            fire_push_notification(self, status)
 
 
 chats: dict[str, Chat] = {}
@@ -328,6 +374,7 @@ def public_meta(chat: Chat) -> dict:
     m = dict(chat.meta)
     m.pop("mcp_token", None)
     m.pop("api_token", None)
+    m.pop("api_url", None)
     m.pop("report_prompt", None)
     m["last_seq"] = chat.seq
     m["requested_model"] = chat_model(chat.meta)
@@ -739,6 +786,10 @@ async def create_chat(request: Request):
         **extra,
         "requested_model": model,
         **({"permission_mode": body["permission_mode"]} if profile.kind == "dev" and body.get("permission_mode") in PERMISSION_MODES else {}),
+        # This orchestrator instance's own base URL/token, so a finished turn
+        # can POST itself to /api/push/notify (fire_push_notification above).
+        "api_url": body.get("api_url"),
+        "api_token": body.get("api_token"),
         "session_id": str(uuid.uuid4()),
         "session_started": False,
         "status": "idle",

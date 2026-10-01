@@ -9,7 +9,7 @@ import httpx
 from sqlalchemy import delete, select, update
 
 from app.config import get_settings
-from app.core import dispatch_stats, dispatcher
+from app.core import dispatch_stats, dispatcher, push
 from app.core.asset_types import (
     SelectAssetNode,
     SingleAssetNode,
@@ -37,6 +37,7 @@ from app.db.models import (
     Node,
     NodeKind,
     NodeStatus,
+    Project,
     Track,
 )
 
@@ -1131,6 +1132,16 @@ async def _finalize_node_if_done(db, node_id, project_id: str) -> None:
     await ws_manager.broadcast(project_id, {"type": "node", "node_id": str(node_id), "status": node.status.value})
     if asset_node is not None:
         await ws_manager.broadcast(project_id, {"type": "node", "node_id": str(asset_node.id), "status": asset_node.status.value})
+
+    # Not on `discarded` -- that's every variant being deliberately cancelled,
+    # the generation equivalent of the agent-chat "stopped" status that's
+    # likewise excluded from push (app/core/push.py's counterpart hook is
+    # agent_runner's Chat.set_status).
+    if node.status in (NodeStatus.done, NodeStatus.error):
+        project = await db.get(Project, project_id)
+        title = project.name if project else "ComfyUI Orchestrator"
+        body = "Generation finished." if node.status == NodeStatus.done else "Generation failed."
+        await push.send_to_all(db, title, body, "/")
 
 
 async def _fail_orphaned_job(db, job: Job, project_id: str, reason: str) -> None:

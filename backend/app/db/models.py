@@ -755,3 +755,32 @@ class NodeTypeDescription(Base):
     description_source: Mapped[DescriptionSource] = mapped_column(String(16), default=DescriptionSource.auto, nullable=False)
     config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class PushSubscription(Base):
+    """A browser's Web Push subscription (navigator.serviceWorker +
+    PushManager), so agent_runner can nudge a finished agent-chat turn to a
+    phone's lock screen even when the tab isn't open. One row per browser
+    install; `endpoint` is what the push service keys by, so it's the natural
+    unique key (re-subscribing updates the keys in place rather than
+    duplicating)."""
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    endpoint: Mapped[str] = mapped_column(Text, unique=True)
+    p256dh: Mapped[str] = mapped_column(Text)
+    auth: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class VapidKeypair(Base):
+    """This instance's own Web Push signing key (core/push.py), generated once
+    on first use and kept here rather than in .env -- nothing to configure by
+    hand on dev or prod. Singleton: always id=1."""
+
+    __tablename__ = "vapid_keypair"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    private_key_b64: Mapped[str] = mapped_column(Text)
+    public_key_b64: Mapped[str] = mapped_column(Text)

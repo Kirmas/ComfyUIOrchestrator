@@ -20,3 +20,10 @@ numpy==2.2.1
 # (unverified-session and DNS-rebinding fixes landed in 1.27.2, Host/Origin
 # validation in 1.28.1) -- do not pin lower.
 mcp==1.28.1
+# Web Push (app/core/push.py, app/api/routes/push.py). Both 0 known OSV
+# advisories at their latest release; cryptography pinned explicitly (not just
+# pulled in transitively) because pywebpush needs a recent one -- 49.0.0 (what
+# was already installed via mcp's own deps) carries 2 open advisories,
+# 50.0.2 carries none.
+pywebpush==2.5.0
+cryptography==50.0.2
