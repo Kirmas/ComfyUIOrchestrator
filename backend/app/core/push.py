@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 # real address, and the push service has no legitimate reason to need it.
 VAPID_SUBJECT = "mailto:admin@orchestrator.local"
 
+# How long the push service may hold an undelivered message for an offline
+# device. pywebpush's default is 0, which Windows' WNS rejects with a bare
+# 400 (2026-10-04: same payload, 400 with ttl 0, 201 with ttl 86400).
+PUSH_TTL_SECONDS = 86400
+
 
 async def get_or_create_vapid_keys(db: AsyncSession) -> VapidKeypair:
     row = await db.get(VapidKeypair, 1)
@@ -58,6 +63,7 @@ def _send_one(endpoint: str, p256dh: str, auth: str, payload: str, private_key_b
             data=payload,
             vapid_private_key=private_key_b64,
             vapid_claims={"sub": VAPID_SUBJECT},
+            ttl=PUSH_TTL_SECONDS,
             timeout=10,
         )
     except WebPushException as exc:
