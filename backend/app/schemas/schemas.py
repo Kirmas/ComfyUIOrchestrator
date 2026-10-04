@@ -493,6 +493,11 @@ class AssetRead(ORMModel):
     # block. None until that file has been migrated -- see assets.py::_to_read.
     width: int | None = None
     height: int | None = None
+    # A mesh's size, read off its GLB (prefix block, or the file's own JSON for
+    # one that predates it). None for every other kind, and for a file that
+    # isn't a GLB.
+    vertex_count: int | None = None
+    triangle_count: int | None = None
 
 
 class AssetTagsUpdate(BaseModel):

@@ -12,11 +12,13 @@
     "@google/model-viewer": "^4.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "three": "0.183.2",
     "zustand": "^5.0.2"
   },
   "devDependencies": {
     "@types/react": "^18.3.17",
     "@types/react-dom": "^18.3.5",
+    "@types/three": "0.183.1",
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.7.2",
     "vite": "^6.0.5"

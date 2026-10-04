@@ -22,7 +22,7 @@ import { MaskPreview } from "./MaskPreview";
 import { TransplantPreview } from "./TransplantPreview";
 import { IdeaTextPicker, MacroPreview } from "./IdeaTextPicker";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
-import { Model3DThumb } from "./Model3DThumb";
+import { MeshThumb, MeshViewer, meshDownloadName } from "./Mesh3D";
 import { ReferencePicker } from "./ReferencePicker";
 import { ZoomableImage } from "./ZoomableImage";
 
@@ -138,9 +138,8 @@ function AssetMetaTag({
   // so it's left unbadged -- anything else (mask, mesh, other, and whatever
   // AssetKind grows next) is worth flagging, generically, without a new
   // branch here every time a kind is added. Mesh doesn't actually reach this
-  // component today (it renders via Model3DThumb instead, a whole different
-  // element that's self-evidently not a flat picture), but the check isn't
-  // hand-tied to "mask" either way.
+  // component today (it renders via MeshThumb instead, which carries its own
+  // vertex/triangle line), but the check isn't hand-tied to "mask" either way.
   const showKind = Boolean(kind) && kind !== "image";
   if (!dims && !backendName && !showKind) return null;
   const parts = [dims ? `${dims.w}×${dims.h}` : null, backendName ?? null].filter((p): p is string => p !== null);
@@ -230,7 +229,11 @@ function CandidatesGrid({
       {outputs.map((asset) => (
         <div key={asset.id} className="output-item">
           {asset.kind === "mesh" ? (
-            <Model3DThumb url={resolveAssetUrl(asset.url)} />
+            <MeshThumb
+              asset={asset}
+              onOpen={() => onImageOpen(resolveAssetUrl(asset.url), asset)}
+              onCompare={() => onCompare(asset)}
+            />
           ) : (
             <div className="output-thumb">
               <img
@@ -359,7 +362,12 @@ function AssetFaceView({
     <div className="output-grid">
       <div className="output-item">
         {asset.kind === "mesh" ? (
-          <Model3DThumb url={url} />
+          <MeshThumb
+            asset={asset}
+            downloadName={downloadName}
+            onOpen={() => onImageOpen(url, asset)}
+            onCompare={() => onCompare(asset)}
+          />
         ) : (
           <div className="output-thumb">
             <img
@@ -438,11 +446,15 @@ function AssetFaceView({
  * in the grid. */
 export function FullSizeModal({
   url,
+  asset,
   onClose,
   onSelect,
   onDiscard,
 }: {
   url: string;
+  // The asset being shown when the caller has it. Only its kind matters here:
+  // a mesh gets the 3D viewer, anything else the zoomable picture.
+  asset?: Asset;
   onClose: () => void;
   onSelect?: () => void;
   onDiscard?: () => void;
@@ -454,7 +466,7 @@ export function FullSizeModal({
         <button type="button" className="image-modal-close" onClick={onClose} title={t("cell.closeFullSize")}>
           ×
         </button>
-        <ZoomableImage src={url} />
+        {asset?.kind === "mesh" ? <MeshViewer url={url} asset={asset} /> : <ZoomableImage src={url} />}
         {(onSelect || onDiscard) && (
           <div className="candidate-actions">
             {onSelect && (
@@ -473,6 +485,18 @@ export function FullSizeModal({
     </div>,
     document.body,
   );
+}
+
+/** What the zoom modal currently shows, and how to open/close it. Every asset
+ * view holds one of these; the url is kept beside the asset so a caller that
+ * only has a url (a collage thumbnail) can still open the picture. */
+function useFullSizeState() {
+  const [fullSize, setFullSize] = useState<{ url: string; asset?: Asset } | null>(null);
+  return {
+    fullSize,
+    openFullSize: (url: string, asset?: Asset) => setFullSize({ url, asset }),
+    closeFullSize: () => setFullSize(null),
+  };
 }
 
 /** This cell's face, resolved by its own asset kind (assetNodes.ts): its own
@@ -534,21 +558,11 @@ function BaseAssetNodeView({
   const downloadName =
     isDashboardResult && dashboardName && outputs[0] ? `${dashboardName}.${extensionForMimeType(outputs[0].mime_type)}` : undefined;
 
-  const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
-  // Set only when the opened image is one candidate of an asset.select picker
-  // (CandidatesGrid passes it, AssetFaceView never does) -- lets FullSizeModal
-  // offer the same select/discard actions the grid card already does, without
-  // it having to know about candidates itself.
-  const [fullSizeCandidate, setFullSizeCandidate] = useState<Asset | null>(null);
-
-  const openImage = (url: string, candidate?: Asset) => {
-    setFullSizeUrl(url);
-    setFullSizeCandidate(candidate ?? null);
-  };
-  const closeImage = () => {
-    setFullSizeUrl(null);
-    setFullSizeCandidate(null);
-  };
+  const { fullSize, openFullSize: openImage, closeFullSize: closeImage } = useFullSizeState();
+  // Only an asset.select picker's own candidates get select/discard actions
+  // here -- the picker is the one place where the opened asset is a decision
+  // still to be made, so FullSizeModal needn't know about candidates itself.
+  const fullSizeCandidate = isCandidatesGrid && fullSize?.asset ? fullSize.asset : null;
 
   // Starting a compare here just arms Grid-level state (compareFor) -- the
   // second asset comes from clicking a *different* asset node cell anywhere
@@ -891,7 +905,7 @@ function BaseAssetNodeView({
             className="primary"
             style={{ textDecoration: "none", padding: "4px 8px" }}
             href={resolveAssetUrl(outputs[0].url)}
-            download={downloadName ?? true}
+            download={outputs[0].kind === "mesh" ? meshDownloadName(outputs[0], downloadName) : (downloadName ?? true)}
           >
             {t("cell.download")}
           </a>
@@ -1020,9 +1034,10 @@ function BaseAssetNodeView({
         <div style={{ fontSize: 10, color: "var(--warning)" }}>{t("cell.clickToPlaceRef")}</div>
       )}
 
-      {fullSizeUrl && (
+      {fullSize && (
         <FullSizeModal
-          url={fullSizeUrl}
+          url={fullSize.url}
+          asset={fullSize.asset}
           onClose={closeImage}
           onSelect={fullSizeCandidate ? () => selectCandidate(fullSizeCandidate) : undefined}
           onDiscard={fullSizeCandidate ? () => discardCandidate(fullSizeCandidate) : undefined}
@@ -1987,7 +2002,7 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked, onS
   const t = useT();
   const removeNode = useProjectStore((s) => s.removeNode);
   const resolved = useAssetFace(node);
-  const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
+  const { fullSize, openFullSize, closeFullSize } = useFullSizeState();
 
   const deleteCell = async () => {
     if (!confirm(t("cell.confirmRemoveRef"))) return;
@@ -2007,7 +2022,7 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked, onS
       </div>
 
       {resolved && (
-        <AssetFaceView asset={resolved} borrowed onImageOpen={setFullSizeUrl} onCompare={(asset) => onStartCompare(node, asset)} />
+        <AssetFaceView asset={resolved} borrowed onImageOpen={openFullSize} onCompare={(asset) => onStartCompare(node, asset)} />
       )}
 
       <div className="node-actions">
@@ -2028,7 +2043,7 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked, onS
 
       {isRefSource && <div style={{ fontSize: 10, color: "var(--warning)" }}>{t("cell.clickToPlaceRef")}</div>}
 
-      {fullSizeUrl && <FullSizeModal url={fullSizeUrl} onClose={() => setFullSizeUrl(null)} />}
+      {fullSize && <FullSizeModal url={fullSize.url} asset={fullSize.asset} onClose={closeFullSize} />}
     </div>
   );
 }
@@ -2124,7 +2139,7 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
   // The dashboard itself, for the name/counts/ownership row below only -- the
   // picture comes from the kind's own face resolution, not from this payload.
   const [info, setInfo] = useState<Dashboard | null>(null);
-  const [fullSizeUrl, setFullSizeUrl] = useState<string | null>(null);
+  const { fullSize, openFullSize, closeFullSize } = useFullSizeState();
   const [busy, setBusy] = useState(false);
   // Copying only writes to localStorage, and what it enables shows up in some
   // other cell -- often in another grid entirely. Without this the button
@@ -2227,7 +2242,7 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
         <AssetFaceView
           asset={face}
           downloadName={info?.name ? `${info.name}.${extensionForMimeType(face.mime_type)}` : undefined}
-          onImageOpen={setFullSizeUrl}
+          onImageOpen={openFullSize}
           onCompare={(asset) => onStartCompare(node, asset)}
         />
       ) : collageSample.length > 0 ? (
@@ -2238,7 +2253,7 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
         // (useRandomSample re-picks from the full pool every 2s).
         <div className="subgraph-collage">
           {collageSample.map((url, i) => (
-            <CrossfadeImage key={i} url={url} onDoubleClick={() => setFullSizeUrl(url)} />
+            <CrossfadeImage key={i} url={url} onDoubleClick={() => openFullSize(url)} />
           ))}
         </div>
       ) : (
@@ -2321,7 +2336,7 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
       {isRefSource && <div style={{ fontSize: 10, color: "var(--warning)" }}>{t("cell.clickToPlaceRef")}</div>}
       {pointerCopied && <div style={{ fontSize: 10, color: "var(--warning)" }}>{t("subgraph.pointerCopiedHint")}</div>}
 
-      {fullSizeUrl && <FullSizeModal url={fullSizeUrl} onClose={() => setFullSizeUrl(null)} />}
+      {fullSize && <FullSizeModal url={fullSize.url} asset={fullSize.asset} onClose={closeFullSize} />}
     </div>
   );
 }

@@ -27,6 +27,7 @@ import resvg_py
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.config import get_settings
+from app.core import glb_stats
 from app.db.models import AssetKind
 
 # The grid renders an asset's face at 118x118 CSS px (a 260px .node-cell minus
@@ -110,13 +111,9 @@ class RasterPreviewProducer(PreviewProducer):
 
 
 class NoPreviewProducer(PreviewProducer):
-    """The honest answer for a kind we can't turn into a picture yet.
-
-    mesh belongs here for now: rendering one server-side would mean a new
-    heavyweight dependency, and Model3DThumb.tsx already renders it in the
-    browser. The slot is what matters -- when a mesh (or a video) does grow a
-    producer, the format already accepts the raster and the descriptor already
-    has a layout waiting for its vertex/face counts."""
+    """The honest answer for a kind we can't turn into a picture yet. A video
+    gets its own producer when it grows one; the format already accepts the
+    raster for it."""
 
     def wants_preview(self, path: Path) -> bool:
         return False
@@ -125,10 +122,28 @@ class NoPreviewProducer(PreviewProducer):
         return None
 
 
+class MeshProducer(PreviewProducer):
+    """A mesh has no picture: rendering one server-side would mean a heavyweight
+    dependency, and the browser renders it (MeshThumb). What it *does* get is a
+    descriptor -- its vertex and triangle counts, which the UI can't learn
+    without loading the whole file. The preview is empty, so the prefix block
+    carries the counts and no WebP (read_preview returns None for it)."""
+
+    def wants_preview(self, path: Path) -> bool:
+        return False
+
+    def build(self, data: bytes, capacity: int) -> tuple[bytes, dict] | None:
+        counts = glb_stats.counts_from_bytes(data)
+        if counts is None:
+            return None
+        vertices, triangles = counts
+        return b"", {"verts": vertices, "faces": triangles}
+
+
 PREVIEW_PRODUCERS: dict[AssetKind, PreviewProducer] = {
     AssetKind.image: RasterPreviewProducer(),
     AssetKind.mask: RasterPreviewProducer(),
-    AssetKind.mesh: NoPreviewProducer(),
+    AssetKind.mesh: MeshProducer(),
     AssetKind.other: NoPreviewProducer(),
 }
 

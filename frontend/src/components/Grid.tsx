@@ -13,6 +13,7 @@ import { AnnotationThread } from "./AnnotationThread";
 import { ReferencePicker } from "./ReferencePicker";
 import { ArrowsOverlay, type Edge } from "./ArrowsOverlay";
 import { CompareModal } from "./CompareModal";
+import { MeshCompareModal } from "./Mesh3D";
 import { NodeCell } from "./NodeCell";
 
 // Discrete zoom levels for the grid canvas (index 2 == 100%). Module-scope so
@@ -918,6 +919,12 @@ export function Grid({ projectId }: { projectId: string }) {
       const asset = await resolvePrimaryOutput(node);
       if (!asset) {
         alert(t("grid.noOutputsYet"));
+        return;
+      }
+      // A picture and a 3D model have nothing to line up against each other.
+      // Compare stays armed, so the person can still click a matching cell.
+      if ((asset.kind === "mesh") !== (compareFor.asset.kind === "mesh")) {
+        alert(t("cell.compareKindMismatch"));
         return;
       }
       setComparePair({ left: compareFor.asset, right: asset, leftNodeId: compareFor.nodeId });
@@ -2015,6 +2022,11 @@ export function Grid({ projectId }: { projectId: string }) {
 
       {comparePair &&
         (() => {
+          if (comparePair.left.kind === "mesh") {
+            // Two meshes share one camera instead of a picture slider. Mesh
+            // compares don't offer select/discard yet -- see MeshCompareModal.
+            return <MeshCompareModal left={comparePair.left} right={comparePair.right} onClose={() => setComparePair(null)} />;
+          }
           // Only an asset.select picker's own candidates get select/discard
           // here -- everything else (asset.single/refasset/subgraph faces)
           // is already settled, so there's no "which one" decision left to

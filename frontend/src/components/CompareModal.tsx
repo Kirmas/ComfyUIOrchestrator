@@ -30,7 +30,8 @@ const aspectMismatch = (l: Dims, r: Dims): boolean => {
  *    it only recenters the divider under the screen's own center, wherever
  *    that now lands in image content, so it's reachable for dragging again.
  *
- * Image-vs-image only -- mesh assets aren't offered as compare candidates.
+ * Image-vs-image only. A mesh pair opens MeshCompareModal instead (Grid picks
+ * it), and a picture can't be compared with a mesh at all.
  *
  * onSelectLeft/onDiscardLeft: only supplied by the caller when `left` is one
  * candidate of an asset.select picker (Grid.tsx derives that from the source

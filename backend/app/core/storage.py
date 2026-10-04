@@ -6,7 +6,7 @@ from pathlib import Path
 from PIL import Image, UnidentifiedImageError
 
 from app.config import get_settings
-from app.core import asset_prefix
+from app.core import asset_prefix, glb_stats
 from app.core.asset_preview import build_preview_async, wants_preview
 from app.db.models import AssetKind
 
@@ -95,6 +95,18 @@ class Storage:
                 return img.size
         except (UnidentifiedImageError, OSError):
             return None
+
+    def mesh_counts(self, key: str) -> tuple[int, int] | None:
+        """(vertices, triangles) of a mesh asset. Off the prefix block for every
+        mesh written since the descriptor learned them; parsed from the GLB's own
+        JSON chunk for a file that predates that (no prefix at all). None for a
+        file that isn't a GLB, or that is a different kind of asset."""
+        header = self.read_header(key)
+        if header is not None:
+            if header.kind is not AssetKind.mesh:
+                return None
+            return header.descriptor["verts"], header.descriptor["faces"]
+        return glb_stats.counts_from_file(self._safe_path(key), 0)
 
     def read_preview(self, key: str) -> bytes | None:
         return asset_prefix.read_preview(self._safe_path(key))

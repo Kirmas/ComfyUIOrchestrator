@@ -311,6 +311,10 @@ export interface Asset {
    * a 384x384 preview. */
   width?: number | null;
   height?: number | null;
+  /** A mesh's size, read off its GLB file (null for other kinds, or a file that
+   * isn't a GLB). */
+  vertex_count?: number | null;
+  triangle_count?: number | null;
 }
 
 // ---------- Idea board ----------

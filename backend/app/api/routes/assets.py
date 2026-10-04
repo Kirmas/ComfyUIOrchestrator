@@ -28,6 +28,12 @@ def to_asset_read(asset: Asset) -> AssetRead:
     size = get_storage().dimensions(asset.storage_key)
     if size:
         item.width, item.height = size
+    # == not `is`: the column is a plain String, so a row comes back as a str,
+    # which is never the enum member itself.
+    if asset.kind == AssetKind.mesh:
+        counts = get_storage().mesh_counts(asset.storage_key)
+        if counts:
+            item.vertex_count, item.triangle_count = counts
     return item
 
 

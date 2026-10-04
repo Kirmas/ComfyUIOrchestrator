@@ -431,6 +431,16 @@ input, select, textarea {
   text-decoration: none;
 }
 
+.refresh-button {
+  right: auto;
+  left: 30px;
+}
+
+.refresh-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* Resolution (read client-side off the loaded <img>) and, when known,
    which backend generated this asset (Asset.meta.backend_name, stamped by
    worker/tasks.py's _materialize_job_result) -- UI-only overlay, never
@@ -989,6 +999,10 @@ th, td {
     right: 42px;
   }
 
+  .refresh-button {
+    left: 42px;
+  }
+
   .zoom-controls {
     bottom: 12px;
     padding: 6px 8px;
@@ -1161,6 +1175,14 @@ th, td {
     max-width: 100vw;
     max-height: 100vh;
     max-height: 100dvh;
+  }
+
+  .image-modal-fullscreen .mesh-viewer,
+  .image-modal-fullscreen .mesh-compare-stage {
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    border-radius: 0;
   }
 }
 
@@ -2028,6 +2050,97 @@ th, td {
   background: var(--panel);
   border: 1px dashed var(--border);
   border-radius: 4px;
+}
+
+/* ---- 3D meshes (Mesh3D.tsx) ----
+   The fullscreen phone rules for these live inside the .image-modal-fullscreen
+   media query below; this is the desktop size, a card-sized stage. */
+.mesh-viewer,
+.mesh-compare-stage {
+  position: relative;
+  width: min(92vw, 1200px);
+  height: 82vh;
+  background: #15171c;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mesh-viewer model-viewer,
+.mesh-compare-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.mesh-viewer-toolbar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 52px;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.mesh-tool {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: pointer;
+}
+
+/* button.active (above) paints the text in the accent colour, which vanishes
+   on an accent background -- this class keeps its own white text. */
+.mesh-tool.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.mesh-viewer-stats {
+  font-size: 12px;
+  color: #fff;
+  opacity: 0.85;
+  text-shadow: 0 1px 2px #000;
+}
+
+.mesh-viewer-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ccc;
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.mesh-compare-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 24px;
+  margin-left: -12px;
+  z-index: 1;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.mesh-compare-divider::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 11px;
+  width: 2px;
+  background: #fff;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
 }
 
 /* Sibling of the scaled grid wrapper, same reasoning as .zoom-indicator. */
