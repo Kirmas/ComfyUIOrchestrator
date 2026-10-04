@@ -2569,6 +2569,55 @@ th, td {
   flex-wrap: wrap;
 }
 
+.agent-question-card strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.agent-question-item {
+  margin: 8px 0;
+}
+
+.agent-question-header {
+  font-weight: 600;
+  opacity: 0.8;
+}
+
+.agent-question-text {
+  margin: 2px 0 6px;
+}
+
+.agent-question-options {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.agent-question-option {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.agent-question-option.selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.agent-question-other {
+  width: 100%;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: inherit;
+}
+
 .agent-chat-item {
   display: flex;
   align-items: center;

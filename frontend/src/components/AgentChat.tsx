@@ -4,7 +4,16 @@ import { useT } from "../i18n";
 import type { TKey } from "../locales/en";
 import { renderMarkdown } from "../markdown";
 import { NightPanel } from "./NightPanel";
-import type { AgentChat as Chat, AgentChatKind, AgentEvent, AgentImageUpload, AgentModel, PermissionDecision } from "../types";
+import type {
+  AgentChat as Chat,
+  AgentChatKind,
+  AgentEvent,
+  AgentImageUpload,
+  AgentModel,
+  AskUserQuestionInput,
+  AskUserQuestionItem,
+  PermissionDecision,
+} from "../types";
 import { cx } from "../utils";
 
 const LAST_CHAT_KEY = "comfy-orchestrator:lastAgentChat";
@@ -314,6 +323,77 @@ function useChatEvents(chatId: string) {
   return { events, connected };
 }
 
+/** One question/options card for the built-in AskUserQuestion tool. Picking
+ * an option toggles it (multiSelect: several at once, joined with ", " to
+ * match exactly what the CLI's own answer format uses -- verified live,
+ * 2026-10-01); typing free text clears any picks for that question and vice
+ * versa. Submit is disabled until every question has an answer. */
+function AskUserQuestionCard({
+  input,
+  onSubmit,
+  t,
+}: {
+  input: AskUserQuestionInput;
+  onSubmit: (answers: Record<string, string>) => void;
+  t: ReturnType<typeof useT>;
+}) {
+  const [picked, setPicked] = useState<Record<string, string[]>>({});
+  const [freeText, setFreeText] = useState<Record<string, string>>({});
+
+  const answerFor = (q: AskUserQuestionItem): string => (picked[q.question]?.length ? picked[q.question].join(", ") : (freeText[q.question] ?? "").trim());
+  const complete = input.questions.every((q) => answerFor(q));
+
+  const toggle = (q: AskUserQuestionItem, label: string) => {
+    setPicked((m) => {
+      const cur = m[q.question] ?? [];
+      const next = q.multiSelect ? (cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label]) : cur[0] === label ? [] : [label];
+      return { ...m, [q.question]: next };
+    });
+    setFreeText((m) => ({ ...m, [q.question]: "" }));
+  };
+
+  return (
+    <div className="agent-question">
+      {input.questions.map((q) => (
+        <div key={q.question} className="agent-question-item">
+          <div className="agent-question-header">{q.header}</div>
+          <div className="agent-question-text">{q.question}</div>
+          <div className="agent-question-options">
+            {q.options.map((opt) => (
+              <button
+                key={opt.label}
+                type="button"
+                className={cx("agent-question-option", (picked[q.question] ?? []).includes(opt.label) && "selected")}
+                title={opt.description}
+                onClick={() => toggle(q, opt.label)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <input
+            className="agent-question-other"
+            placeholder={t("agent.question.other")}
+            value={freeText[q.question] ?? ""}
+            onChange={(e) => {
+              const value = e.target.value;
+              setFreeText((m) => ({ ...m, [q.question]: value }));
+              setPicked((m) => ({ ...m, [q.question]: [] }));
+            }}
+          />
+        </div>
+      ))}
+      <button
+        className="primary"
+        disabled={!complete}
+        onClick={() => onSubmit(Object.fromEntries(input.questions.map((q) => [q.question, answerFor(q)])))}
+      >
+        {t("agent.question.submit")}
+      </button>
+    </div>
+  );
+}
+
 function ChatView({
   chat,
   models,
@@ -368,6 +448,22 @@ function ChatView({
 
   const decide = (requestId: string, decision: PermissionDecision) =>
     agentChatsApi.decide(chat.id, requestId, decision).then(onChanged, (err) => alert(err instanceof Error ? err.message : String(err)));
+
+  // "cancelled" shares the generic permission_decision event (the turn-end
+  // cleanup in runner.py doesn't know which kind of question a pending
+  // request_id was) -- the !map.has guard just means a real answer, which
+  // can't coexist with a cancellation for the same request_id, always wins.
+  const questionAnswers = useMemo(() => {
+    const map = new Map<string, Record<string, string> | "cancelled">();
+    for (const e of events) {
+      if (e.type === "ask_user_answer") map.set(e.request_id, e.answers);
+      else if (e.type === "permission_decision" && e.decision === "cancelled" && !map.has(e.request_id)) map.set(e.request_id, "cancelled");
+    }
+    return map;
+  }, [events]);
+
+  const answerQuestion = (requestId: string, answers: Record<string, string>) =>
+    agentChatsApi.answerQuestion(chat.id, requestId, answers).then(onChanged, (err) => alert(err instanceof Error ? err.message : String(err)));
 
   const results = useMemo(() => {
     const map = new Map<string, Extract<AgentEvent, { type: "tool_result" }>>();
@@ -560,6 +656,30 @@ function ChatView({
               );
             }
             case "permission_decision":
+              return null;
+            case "ask_user_question": {
+              const resolved = questionAnswers.get(e.request_id);
+              return (
+                <div key={e.seq} className={cx("agent-permission", "agent-question-card", !resolved && "pending")}>
+                  <strong>{t("agent.permission.asks", { tool: "AskUserQuestion" })}</strong>
+                  {resolved === "cancelled" ? (
+                    <div className="agent-meta">{t("agent.question.cancelled")}</div>
+                  ) : resolved ? (
+                    <div className="agent-meta">
+                      {t("agent.question.answered")}
+                      {Object.entries(resolved).map(([q, a]) => (
+                        <div key={q}>
+                          — {q}: {a}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <AskUserQuestionCard input={e.input} t={t} onSubmit={(answers) => answerQuestion(e.request_id, answers)} />
+                  )}
+                </div>
+              );
+            }
+            case "ask_user_answer":
               return null;
             case "model":
               return (

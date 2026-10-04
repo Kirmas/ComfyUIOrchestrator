@@ -380,6 +380,8 @@ export const agentChatsApi = {
   setPermissionMode: (id: string, mode: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { permission_mode: mode }),
   decide: (id: string, requestId: string, decision: PermissionDecision) =>
     api.post<AgentChat>(`/api/agent-chats/${id}/permissions/${requestId}`, { decision }),
+  answerQuestion: (id: string, requestId: string, answers: Record<string, string>) =>
+    api.post<AgentChat>(`/api/agent-chats/${id}/questions/${requestId}`, { answers }),
   setModel: (id: string, model: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { model }),
   setDone: (id: string, done: boolean) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { done }),
   remove: (id: string) => api.delete(`/api/agent-chats/${id}`),

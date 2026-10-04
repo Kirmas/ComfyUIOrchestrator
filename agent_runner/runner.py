@@ -468,15 +468,20 @@ class ProjectProfile(Profile):
         mcp_path.write_text(json.dumps(mcp_config))
         mcp_path.chmod(0o600)
         return [
-            # No built-in tools at all (no Bash/Read/Edit), only the MCP server
-            # below, and none of the user's own settings/CLAUDE.md/plugins leak
-            # into a project chat. Nothing here ever needs approving, so any
-            # prompt is denied outright rather than parked on the page.
-            "--tools", "",
+            # Exactly one built-in tool (AskUserQuestion) plus the MCP server
+            # below -- no Bash/Read/Edit/WebFetch/etc, and none of the user's
+            # own settings/CLAUDE.md/plugins leak into a project chat.
+            # AskUserQuestion always rides can_use_tool regardless of
+            # --allowedTools (that's how its answer gets delivered back, see
+            # ask_permission's is_question branch), hence
+            # --permission-prompt-tool stdio here; every other tool call this
+            # chat can make is already pre-allowed, so nothing else reaches
+            # that channel or gets parked on the page.
+            "--tools", "AskUserQuestion",
             "--setting-sources", "",
             "--strict-mcp-config", "--mcp-config", str(mcp_path),
-            "--allowedTools", "mcp__orchestrator",
-            "--permission-prompts", "none",
+            "--allowedTools", "mcp__orchestrator", "AskUserQuestion",
+            "--permission-prompt-tool", "stdio",
             "--append-system-prompt", PROJECT_PROMPT.format(project_name=meta["project_name"], project_id=meta["project_id"]),
         ]
 
@@ -600,21 +605,34 @@ def send_line(proc: asyncio.subprocess.Process, obj: dict) -> None:
 async def ask_permission(chat: Chat, proc: asyncio.subprocess.Process, req_id: str, request: dict) -> None:
     """Parks one can_use_tool question on the page and answers the CLI with
     whatever the person picks. Runs as its own task so the stdout reader
-    keeps draining meanwhile."""
-    question = {
-        "type": "permission_request",
-        "request_id": req_id,
-        "tool": request.get("tool_name"),
-        "description": request.get("description") or "",
-        "input": snippet(request.get("input")),
-    }
+    keeps draining meanwhile.
+
+    AskUserQuestion rides the same can_use_tool round trip as a plain
+    permission check (marked by requires_user_interaction=true), but the
+    CLI doesn't want allow/deny for it -- it wants the person's actual
+    picks, delivered back as request["input"] plus an "answers" dict keyed
+    by each question's literal text (comma-joined labels for multiSelect;
+    verified against a live `claude -p --input-format stream-json` run,
+    2026-10-01 -- the CLI then synthesizes the tool_result itself)."""
+    is_question = request.get("tool_name") == "AskUserQuestion" and request.get("requires_user_interaction")
+    question = (
+        {"type": "ask_user_question", "request_id": req_id, "input": request.get("input") or {}}
+        if is_question
+        else {
+            "type": "permission_request",
+            "request_id": req_id,
+            "tool": request.get("tool_name"),
+            "description": request.get("description") or "",
+            "input": snippet(request.get("input")),
+        }
+    )
     auto = PROFILES[chat.meta["kind"]].auto_decide(chat, request)
     if auto:
         await chat.emit(question)
         await chat.emit({"type": "permission_decision", "request_id": req_id, "decision": auto})
         answer = {
             "behavior": "deny",
-            "message": "Nobody is available to approve this: the turn was started by an agent's bug report. Don't retry it; say in your report that it needs a person.",
+            "message": "Nobody is available to answer this: the turn was started by an agent's bug report. Don't retry it; say in your report that it needs a person.",
         }
         send_line(proc, {"type": "control_response", "response": {"subtype": "success", "request_id": req_id, "response": answer}})
         await proc.stdin.drain()
@@ -629,18 +647,24 @@ async def ask_permission(chat: Chat, proc: asyncio.subprocess.Process, req_id: s
         return
     finally:
         chat.pending.pop(req_id, None)
-    await chat.emit({"type": "permission_decision", "request_id": req_id, "decision": decision})
-    if decision == "deny":
-        answer = {"behavior": "deny", "message": "The person denied this from the web page."}
+    if is_question:
+        await chat.emit({"type": "ask_user_answer", "request_id": req_id, "answers": decision})
+        updated_input = dict(request.get("input") or {})
+        updated_input["answers"] = decision
+        answer = {"behavior": "allow", "updatedInput": updated_input}
     else:
-        answer = {"behavior": "allow", "updatedInput": request.get("input", {})}
-        if decision == "allow_session":
-            # The CLI's own suggestions ("allow `git status`", "accept edits"),
-            # kept for this session only -- never written into a settings file
-            # from a button on a web page.
-            answer["updatedPermissions"] = [
-                {**sugg, "destination": "session"} for sugg in request.get("permission_suggestions") or []
-            ]
+        await chat.emit({"type": "permission_decision", "request_id": req_id, "decision": decision})
+        if decision == "deny":
+            answer = {"behavior": "deny", "message": "The person denied this from the web page."}
+        else:
+            answer = {"behavior": "allow", "updatedInput": request.get("input", {})}
+            if decision == "allow_session":
+                # The CLI's own suggestions ("allow `git status`", "accept edits"),
+                # kept for this session only -- never written into a settings file
+                # from a button on a web page.
+                answer["updatedPermissions"] = [
+                    {**sugg, "destination": "session"} for sugg in request.get("permission_suggestions") or []
+                ]
     if not chat.pending:
         await chat.set_status("running")
     if proc.returncode is None:
@@ -967,6 +991,20 @@ async def decide(request: Request):
     if not future or future.done():
         return JSONResponse({"detail": "That question is no longer pending"}, status_code=409)
     future.set_result(decision)
+    return JSONResponse(public_meta(chat))
+
+
+async def answer_question(request: Request):
+    chat = get_chat(request)
+    if not chat:
+        return JSONResponse({"detail": "Chat not found"}, status_code=404)
+    answers = (await request.json()).get("answers")
+    if not isinstance(answers, dict) or not answers or not all(isinstance(v, str) and v for v in answers.values()):
+        return JSONResponse({"detail": "answers must be a non-empty object of non-empty strings"}, status_code=400)
+    future = chat.pending.get(request.path_params["request_id"])
+    if not future or future.done():
+        return JSONResponse({"detail": "That question is no longer pending"}, status_code=409)
+    future.set_result(answers)
     return JSONResponse(public_meta(chat))
 
 
@@ -1391,6 +1429,7 @@ routes = [
     Route("/night/diff", night_diff, methods=["GET"]),
     Route("/night/{action}", night_finish, methods=["POST"]),
     Route("/chats/{chat_id}/permissions/{request_id}", decide, methods=["POST"]),
+    Route("/chats/{chat_id}/questions/{request_id}", answer_question, methods=["POST"]),
     Route("/chats/{chat_id}/messages", post_message, methods=["POST"]),
     Route("/chats/{chat_id}/stop", stop, methods=["POST"]),
     Route("/chats/{chat_id}/events", events, methods=["GET"]),

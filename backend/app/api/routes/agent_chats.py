@@ -49,6 +49,10 @@ class PermissionDecision(BaseModel):
     decision: str  # allow | allow_session | deny -- the runner validates
 
 
+class QuestionAnswer(BaseModel):
+    answers: dict[str, str]  # question text -> answer; the runner validates
+
+
 class AgentImage(BaseModel):
     media_type: str
     data: str  # base64; the runner validates type, size and which chats take them
@@ -156,6 +160,11 @@ async def stop_chat(chat_id: str):
 @router.post("/{chat_id}/permissions/{request_id}")
 async def decide_permission(chat_id: str, request_id: str, payload: PermissionDecision):
     return await _call("POST", f"/chats/{chat_id}/permissions/{request_id}", json={"decision": payload.decision})
+
+
+@router.post("/{chat_id}/questions/{request_id}")
+async def answer_question(chat_id: str, request_id: str, payload: QuestionAnswer):
+    return await _call("POST", f"/chats/{chat_id}/questions/{request_id}", json={"answers": payload.answers})
 
 
 # --- night mode (agent_runner/night.py) -------------------------------------

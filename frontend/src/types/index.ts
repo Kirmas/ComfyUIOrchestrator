@@ -580,10 +580,29 @@ export type AgentEvent = { seq: number; ts: number } & (
   | { type: "mode"; mode: string }
   | { type: "permission_request"; request_id: string; tool: string; description: string; input: string }
   | { type: "permission_decision"; request_id: string; decision: PermissionDecision | "cancelled" | "deny_unattended" }
+  | { type: "ask_user_question"; request_id: string; input: AskUserQuestionInput }
+  | { type: "ask_user_answer"; request_id: string; answers: Record<string, string> }
   | { type: "night"; text: string }
 );
 
 export type PermissionDecision = "allow" | "allow_session" | "deny";
+
+// The built-in AskUserQuestion tool's own input schema (reverse-engineered
+// against a live `claude -p --input-format stream-json` run, 2026-10-01 --
+// not documented anywhere the runner could import it from).
+export interface AskUserQuestionOption {
+  label: string;
+  description?: string;
+}
+export interface AskUserQuestionItem {
+  question: string;
+  header: string;
+  options: AskUserQuestionOption[];
+  multiSelect?: boolean;
+}
+export interface AskUserQuestionInput {
+  questions: AskUserQuestionItem[];
+}
 
 export interface AgentModel {
   id: string;
