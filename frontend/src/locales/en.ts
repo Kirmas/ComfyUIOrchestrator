@@ -351,7 +351,7 @@ export const en = {
   "wizard.chooseBackend": "choose backend…",
   "wizard.inputSlots": "Input image slots (0 or more -- e.g. a reference photo)",
   "wizard.addInputSlot": "+ input slot",
-  "wizard.expectedOutputs": "Expected output count (SaveImage/PreviewImage nodes in the workflow)",
+  "wizard.expectedOutputs": "Expected output count (SaveImage/PreviewImage/Save3D nodes in the workflow)",
   "wizard.nextUpload": "Next: upload workflow.json",
   "wizard.back": "← back",
   "wizard.duplicateTitles":
@@ -369,6 +369,8 @@ export const en = {
   "wizard.cropOption": "{label} (crop)",
   "wizard.missingTitles": "Some assigned nodes have no title in ComfyUI -- rename them and re-upload before saving.",
   "wizard.approve": "Approve",
+  "wizard.optional": "Optional",
+  "wizard.optionalHint": "a grid cell may leave this slot empty -- the LoadImage is skipped at run time",
   "wizard.fixed": "Fixed",
   "wizard.fixedHint": "baked into the node type -- same picture every run, no grid row",
   "wizard.fixedUploaded": "{name} ({size} KB)",

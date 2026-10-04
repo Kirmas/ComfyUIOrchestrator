@@ -27,7 +27,7 @@ from PIL import Image
 
 from app.core.job_backend import AssetRef, CapacityInfo, JobStatus
 from app.core.template_engine import build_workflow
-from app.core.workflow_analyzer import SAVE_IMAGE_CLASS_TYPES
+from app.core.workflow_analyzer import SAVE_IMAGE_CLASS_TYPES, SAVE_MESH_CLASS_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -219,11 +219,12 @@ class ComfyUIBackend:
             # [number, prompt_id, {node_id: node, ...}, ...] -- the exact graph
             # that was submitted, so it's an honest source of each node's
             # class_type regardless of what workflow_json in our own capability
-            # config looked like at edit time. Only "images" is gated on this --
-            # no capability actually produces meshes yet, so there's no known
-            # save-node class_type to allow-list for that branch.
+            # config looked like at edit time. Images and meshes are each gated
+            # on their own save-node class_types (SAVE_IMAGE / SAVE_MESH), so a
+            # leftover Preview3D or stray SaveImage can't leak its output in.
             prompt = history.get("prompt")
             save_node_ids: set[str] | None = None
+            mesh_node_ids: set[str] | None = None
             mask_node_ids: set[str] = set()
             if isinstance(prompt, list) and len(prompt) > 2 and isinstance(prompt[2], dict):
                 graph = prompt[2]
@@ -231,6 +232,11 @@ class ComfyUIBackend:
                     node_id
                     for node_id, node in graph.items()
                     if isinstance(node, dict) and node.get("class_type") in SAVE_IMAGE_CLASS_TYPES
+                }
+                mesh_node_ids = {
+                    node_id
+                    for node_id, node in graph.items()
+                    if isinstance(node, dict) and node.get("class_type") in SAVE_MESH_CLASS_TYPES
                 }
                 mask_node_ids = self._mask_save_node_ids(graph)
 
@@ -254,7 +260,8 @@ class ComfyUIBackend:
                         data = self._flatten_to_grayscale_png(data)
                         mime_type = "image/png"
                     assets.append(AssetRef(data=data, mime_type=mime_type, kind=kind, meta=image))
-                for mesh_key in ("3d", "meshes", "gltf"):
+                is_mesh_node = mesh_node_ids is None or node_id in mesh_node_ids
+                for mesh_key in ("3d", "meshes", "gltf") if is_mesh_node else ():
                     for mesh in node_output.get(mesh_key, []):
                         resp = await client.get(
                             "/view",

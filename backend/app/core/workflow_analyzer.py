@@ -63,7 +63,11 @@ INPUT_IMAGE_CLASS_TYPES = {"LoadImage"}
 # result() filter dropped their images on the floor: the job "succeeded"
 # with nothing to show for it (2026-09-25).
 SAVE_IMAGE_CLASS_TYPES = {"SaveImage", "SaveImageAdvanced"}
-OUTPUT_CLASS_TYPES = SAVE_IMAGE_CLASS_TYPES | {"PreviewImage"}
+# 3D counterparts: write a mesh file (their result lands under history's "3d"
+# key, see comfyui_backend.py result()). Save3DAdvanced is ComfyUI's newer
+# viewport-aware variant of Save3D, same shape as SaveImageAdvanced above.
+SAVE_MESH_CLASS_TYPES = {"Save3D", "Save3DAdvanced", "SaveGLB"}
+OUTPUT_CLASS_TYPES = SAVE_IMAGE_CLASS_TYPES | SAVE_MESH_CLASS_TYPES | {"PreviewImage"}
 SAMPLER_CLASS_TYPES = {"KSampler", "KSamplerAdvanced", "SamplerCustomAdvanced"}
 # SamplerCustomAdvanced-style graphs (Flux2, Ideogram 4) carry no
 # positive/negative of their own -- conditioning reaches the sampler through a

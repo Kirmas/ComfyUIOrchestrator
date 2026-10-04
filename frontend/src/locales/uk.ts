@@ -350,7 +350,7 @@ export const uk: Record<TKey, string> = {
   "wizard.chooseBackend": "оберіть бекенд…",
   "wizard.inputSlots": "Вхідні слоти зображень (0 або більше — напр. референсне фото)",
   "wizard.addInputSlot": "+ вхідний слот",
-  "wizard.expectedOutputs": "Очікувана кількість виходів (вузли SaveImage/PreviewImage у воркфлоу)",
+  "wizard.expectedOutputs": "Очікувана кількість виходів (вузли SaveImage/PreviewImage/Save3D у воркфлоу)",
   "wizard.nextUpload": "Далі: завантажити workflow.json",
   "wizard.back": "← назад",
   "wizard.duplicateTitles":
@@ -369,6 +369,8 @@ export const uk: Record<TKey, string> = {
   "wizard.missingTitles":
     "Деякі призначені вузли не мають назви в ComfyUI — перейменуйте їх і завантажте файл ще раз перед збереженням.",
   "wizard.approve": "Підтвердити",
+  "wizard.optional": "Необов'язкове",
+  "wizard.optionalHint": "клітинка гріда може залишити цей слот порожнім -- LoadImage пропускається під час запуску",
   "wizard.fixed": "Фіксоване",
   "wizard.fixedHint": "вшите в тип вузла — та сама картинка щоразу, без рядка в гріді",
   "wizard.fixedUploaded": "{name} ({size} КБ)",

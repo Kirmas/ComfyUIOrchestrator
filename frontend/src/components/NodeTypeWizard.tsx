@@ -32,6 +32,10 @@ interface InputSlot {
   // per-instance picker. See core/node_types.is_slot_field on the backend.
   fixed: boolean;
   fixedImage: FixedImagePayload | null;
+  // An optional slot may be left empty per grid cell (param_schema required:
+  // false) -- its LoadImage is pruned at run time instead of submitting the
+  // workflow's placeholder. Ignored for fixed slots, which are always filled.
+  optional: boolean;
 }
 
 // The only signal available before a slot has a backing node yet: what the
@@ -159,7 +163,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
     if (!slugTouched) setNodeTypeSlug(slugify(value));
   };
 
-  const addInputSlot = () => setInputSlots((s) => [...s, { label: `Image ${s.length + 1}`, nodeId: "", fixed: false, fixedImage: null }]);
+  const addInputSlot = () => setInputSlots((s) => [...s, { label: `Image ${s.length + 1}`, nodeId: "", fixed: false, fixedImage: null, optional: false }]);
   const removeInputSlot = (i: number) => setInputSlots((s) => s.filter((_, idx) => idx !== i));
   const setFixedImageFile = async (i: number, file: File) => {
     const dataBase64 = await readFileAsBase64(file);
@@ -231,7 +235,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
       }
       if (result.output_nodes.length !== expectedOutputCount) {
         setAnalyzeError(
-          `Expected ${expectedOutputCount} output node(s), but the workflow has ${result.output_nodes.length} SaveImage/PreviewImage node(s). Go back and adjust, or upload a different file.`,
+          `Expected ${expectedOutputCount} output node(s), but the workflow has ${result.output_nodes.length} SaveImage/PreviewImage/Save3D node(s). Go back and adjust, or upload a different file.`,
         );
         return;
       }
@@ -357,7 +361,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
         paramFields.push({ name: fieldName, type: "image", label: slot.label, fixed: true, ...expectsKind });
         defaults[fieldName] = slot.fixedImage.dataBase64;
       } else {
-        paramFields.push({ name: fieldName, type: "image", label: slot.label, required: true, ...expectsKind });
+        paramFields.push({ name: fieldName, type: "image", label: slot.label, required: !slot.optional, ...expectsKind });
       }
       paramMapping[fieldName] = { node_id: node.node_id, title: node.title, input_key: "image" };
     });
@@ -501,6 +505,15 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
                       value={slot.label}
                       onChange={(e) => setInputSlots((s) => s.map((x, idx) => (idx === i ? { ...x, label: e.target.value } : x)))}
                     />
+                    <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title={t("wizard.optionalHint")}>
+                      <input
+                        type="checkbox"
+                        checked={slot.optional}
+                        disabled={slot.fixed}
+                        onChange={(e) => setInputSlots((s) => s.map((x, idx) => (idx === i ? { ...x, optional: e.target.checked } : x)))}
+                      />
+                      {t("wizard.optional")}
+                    </label>
                     <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title={t("wizard.fixedHint")}>
                       <input
                         type="checkbox"
