@@ -48,16 +48,11 @@ class Settings(BaseSettings):
     # Limits
     max_variants_per_node: int = 8
     # Bounds the *network calls* around a ComfyUI generation (submit, fetch
-    # result) -- not the generation itself, see stall_timeout_seconds for that.
+    # result, API-backend polling) -- never the ComfyUI generation itself. A
+    # generation has no fixed duration; _wait_with_stall_detection in
+    # worker/tasks.py asks ComfyUI whether the prompt is still alive and only
+    # gives up on it when it's really gone or the backend is unreachable.
     job_timeout_seconds: int = 600
-    # A ComfyUI generation has no fixed duration -- a busy shared GPU or a big
-    # batch can legitimately take hours. So instead of a flat wall-clock limit,
-    # a running job is only considered stuck once its execution progress *and*
-    # its position in ComfyUI's own queue have both stopped moving for this
-    # long (see _wait_with_stall_detection in worker/tasks.py). 30 minutes
-    # comfortably covers a stalled model load or a wedged queue without ever
-    # tripping on a merely slow-but-alive generation.
-    stall_timeout_seconds: int = 1800
     max_retries: int = 2
     heartbeat_interval_seconds: int = 15
     dispatch_poll_interval_seconds: int = 3

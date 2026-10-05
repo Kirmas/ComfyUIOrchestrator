@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 # only marking the DB row and hoping the backend's own /interrupt call (which
 # a wedged or merely slow-to-react backend can simply not honor) eventually
 # makes status() polling notice. Without this, a cancelled-but-still-running
-# job kept occupying one of job_queue's worker_concurrency slots for up to
-# stall_timeout_seconds (30 min) -- and with several such zombies (e.g. every
+# job kept occupying one of job_queue's worker_concurrency slots until the
+# backend finished on its own -- and with several such zombies (e.g. every
 # job cancelled while still queued-but-not-started on a slow backend, which
 # status() can't ever distinguish from "not picked up yet", see its
 # docstring) the whole queue stopped dispatching anything at all (2026-09-14
@@ -650,15 +650,21 @@ async def _wait_for_completion(instance: ComfyUIBackend, external_job_id: str, o
 
 
 _STALL_POLL_INTERVAL_SECONDS = 60
+# Consecutive watchdog checks that find a prompt neither queued nor in history
+# before it's treated as lost. Queued prompts are visible to /queue the moment
+# /prompt accepts them, so a single miss could only be a racing finish -- which
+# finished_status() already covers -- but waiting a few checks keeps one
+# flaky snapshot from costing a retry.
+_LOST_CHECKS_BEFORE_GIVING_UP = 3
 _UNREACHABLE_GRACE_SECONDS = 10
 _UNREACHABLE_RETRY_INTERVAL_SECONDS = 2
 
 
 async def _queue_position_with_grace(instance: ComfyUIBackend, external_job_id: str) -> int | None:
     """A lone dropped/slow response (the 2026-08-14 asusi9 blip) self-heals
-    almost immediately and shouldn't cost a job the full stall_seconds wait
-    just to notice -- but a backend that's genuinely gone shouldn't get
-    stall_seconds either. Retries queue_position for up to
+    almost immediately and shouldn't cost a job a retry just to notice -- but
+    a backend that's genuinely gone shouldn't get to hang the watchdog either.
+    Retries queue_position for up to
     _UNREACHABLE_GRACE_SECONDS before giving up and re-raising, so the caller
     can tell "one flaky request" (recovers well within the grace window)
     apart from "backend is actually down" (still failing after it)."""
@@ -673,25 +679,26 @@ async def _queue_position_with_grace(instance: ComfyUIBackend, external_job_id: 
             await asyncio.sleep(_UNREACHABLE_RETRY_INTERVAL_SECONDS)
 
 
-async def _wait_with_stall_detection(
-    instance: ComfyUIBackend, external_job_id: str, on_progress, job: Job, stall_seconds: int
-) -> BackendJobStatus:
-    """Replaces a flat wall-clock timeout on the generation itself: a job is only
-    given up on once neither its execution progress (job.progress, updated by
-    on_progress from WS messages) nor its position in ComfyUI's own /queue has
-    moved for `stall_seconds`. That lets a single generation run for however
-    long it actually needs -- minutes or hours -- while still catching a
-    genuinely wedged backend (queue frozen, or executing but no progress
-    events) within `stall_seconds` of it happening.
+async def _wait_with_stall_detection(instance: ComfyUIBackend, external_job_id: str, on_progress) -> BackendJobStatus:
+    """Waits for a ComfyUI generation for however long it actually takes, and
+    gives up on it only for a real reason -- never because the progress feed
+    has been quiet for a while. A 3D generation can run ~45 minutes with no
+    WebSocket progress at all (its work happens in a subprocess that reports
+    to ComfyUI's console, not to the progress feed), so silence alone says
+    nothing about whether the job is alive.
 
-    A backend that's stopped answering at all is a different failure mode
-    from one that's merely wedged, and waiting out the full stall_seconds for
-    it is needless -- _queue_position_with_grace gives it
-    _UNREACHABLE_GRACE_SECONDS to come back before this gives up on it."""
+    Every _STALL_POLL_INTERVAL_SECONDS the watchdog asks ComfyUI itself:
+    - still queued or executing -> keep waiting, nothing to do;
+    - finished (in /history) while our listener missed the event -> return that
+      terminal status, so the caller fetches the result instead of waiting
+      on a completion that already happened;
+    - neither queued nor in history for _LOST_CHECKS_BEFORE_GIVING_UP checks
+      in a row -> the prompt is really gone, raise so the job is retried;
+    - backend unreachable for _UNREACHABLE_GRACE_SECONDS -> raise, considered down.
+    """
     completion_task = asyncio.create_task(_wait_for_completion(instance, external_job_id, on_progress))
     loop = asyncio.get_running_loop()
-    last_signal: tuple[int, int | None] | None = None
-    last_change = loop.time()
+    lost_checks = 0
 
     try:
         while True:
@@ -708,15 +715,23 @@ async def _wait_with_stall_detection(
                     f"backend unreachable for {_UNREACHABLE_GRACE_SECONDS}s -- considered down"
                 ) from exc
 
-            signal = (job.progress, position)
-            now = loop.time()
-            if signal != last_signal:
-                last_signal = signal
-                last_change = now
-            elif now - last_change >= stall_seconds:
+            if position is not None:
+                lost_checks = 0
+                continue
+
+            terminal = await instance.finished_status(external_job_id)
+            if terminal is not None:
                 completion_task.cancel()
                 await asyncio.gather(completion_task, return_exceptions=True)
-                raise TimeoutError(f"no progress for {stall_seconds}s -- backend considered stalled")
+                return terminal
+
+            lost_checks += 1
+            if lost_checks >= _LOST_CHECKS_BEFORE_GIVING_UP:
+                completion_task.cancel()
+                await asyncio.gather(completion_task, return_exceptions=True)
+                raise TimeoutError(
+                    f"prompt neither queued nor in history for {lost_checks} checks -- lost on backend"
+                )
     except asyncio.CancelledError:
         completion_task.cancel()
         await asyncio.gather(completion_task, return_exceptions=True)
@@ -898,10 +913,9 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                     step = data.get("value", 0)
                     total = data.get("max") or 1
                     pct = min(100, int(100 * step / total))
-                    # In memory only on this session's `job` -- it's what
-                    # _wait_with_stall_detection watches for movement. The DB
-                    # copy goes through _save_progress's own session; see its
-                    # docstring for why this one must never commit from here.
+                    # In memory only on this session's `job`. The DB copy goes
+                    # through _save_progress's own session; see its docstring
+                    # for why this one must never commit from here.
                     job.progress = pct
                     job.progress_step = step
                     job.progress_max = total
@@ -919,9 +933,7 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                         },
                     )
 
-                status = await _wait_with_stall_detection(
-                    choice.instance, external_job_id, on_progress, job, settings.stall_timeout_seconds
-                )
+                status = await _wait_with_stall_detection(choice.instance, external_job_id, on_progress)
             else:
                 status = await wait_with_timeout(
                     _poll_until_terminal(choice.instance, external_job_id), settings.job_timeout_seconds
@@ -1162,6 +1174,10 @@ async def _fail_orphaned_job(db, job: Job, project_id: str, reason: str) -> None
     )
 
 
+async def _ignore_progress(message: dict) -> None:
+    """on_progress for paths that don't mirror progress into the DB."""
+
+
 async def _resume_orphaned_job(job_id: str) -> None:
     """Background continuation for an orphaned job recover_orphaned_jobs found
     still genuinely in flight on its backend (ComfyUI wasn't restarted along
@@ -1190,9 +1206,14 @@ async def _resume_orphaned_job(job_id: str) -> None:
 
         settings = get_settings()
         try:
-            status = await wait_with_timeout(
-                _poll_until_terminal(instance, job.external_job_id), settings.job_timeout_seconds
-            )
+            # Same watchdog as the normal dispatch path -- a 3D generation can
+            # run for close to an hour, far past job_timeout_seconds.
+            if isinstance(instance, ComfyUIBackend):
+                status = await _wait_with_stall_detection(instance, job.external_job_id, _ignore_progress)
+            else:
+                status = await wait_with_timeout(
+                    _poll_until_terminal(instance, job.external_job_id), settings.job_timeout_seconds
+                )
             if status == BackendJobStatus.error:
                 detail = await instance.error_detail(job.external_job_id)
                 raise RuntimeError(detail or "backend reported execution error")

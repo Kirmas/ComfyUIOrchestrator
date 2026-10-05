@@ -95,14 +95,8 @@ class ComfyUIBackend:
         try:
             async with httpx.AsyncClient(base_url=self.base_url, timeout=30) as client:
                 history = await self._get_history_entry(client, job_id)
-                if history is not None:
-                    status_info = history.get("status", {})
-                    if status_info.get("status_str") == "error" or any(
-                        m[0] == "execution_error" for m in status_info.get("messages", [])
-                    ):
-                        return JobStatus.error
-                    if history.get("outputs"):
-                        return JobStatus.done
+                if history is not None and (terminal := self._terminal_from_history(history)) is not None:
+                    return terminal
 
                 running_ids, pending_ids = await self._queue_snapshot(client)
                 if job_id in running_ids:
@@ -120,6 +114,35 @@ class ComfyUIBackend:
         except httpx.TransportError:
             logger.warning("status check failed for %s on %s", job_id, self.base_url, exc_info=True)
             return JobStatus.pending
+
+    async def finished_status(self, job_id: str) -> JobStatus | None:
+        """Terminal status if ComfyUI's own records say this prompt is over and
+        it is no longer queued, else None. Lets the watchdog in worker/tasks.py
+        tell a prompt that is still running (queued or in history-less
+        execution) from one that finished while nobody was watching, and
+        from one that has disappeared altogether (None from both queue and
+        history -- see _wait_with_stall_detection)."""
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=30) as client:
+            running_ids, pending_ids = await self._queue_snapshot(client)
+            if job_id in running_ids or job_id in pending_ids:
+                return None
+            history = await self._get_history_entry(client, job_id)
+            if history is None:
+                return None
+            return self._terminal_from_history(history) or JobStatus.error
+
+    @staticmethod
+    def _terminal_from_history(history: dict) -> JobStatus | None:
+        """Terminal status a history entry already carries, or None if it carries
+        none (no outputs and no error -- the caller decides what that means)."""
+        status_info = history.get("status", {})
+        if status_info.get("status_str") == "error" or any(
+            m[0] == "execution_error" for m in status_info.get("messages", [])
+        ):
+            return JobStatus.error
+        if history.get("outputs"):
+            return JobStatus.done
+        return None
 
     async def error_detail(self, job_id: str) -> str | None:
         """Pulls the "execution_error" message's exception_message/node_type
