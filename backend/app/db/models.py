@@ -56,12 +56,11 @@ class AssetKind(str, enum.Enum):
 
     @classmethod
     def for_mime(cls, mime_type: str) -> "AssetKind":
-        """What every ingest path records for a file it only knows the MIME
-        type of. Never `mesh` or `mask`: a .glb arrives as
-        application/octet-stream, and a mask is just an image/png with no
-        MIME-visible distinction from any other picture -- both kinds are
-        only ever set by the producer that knows what it actually made
-        (comfyui_backend.py), never guessed here."""
+        """Kind for a file known only by its MIME type. Never `mesh` or `mask`
+        from MIME alone: a .glb arrives as application/octet-stream, and a
+        mask is just an image/png. Uploads decide mesh from the bytes instead
+        (core/upload_type.py's resolve_upload); masks are only ever set by the
+        producer that made them (comfyui_backend.py)."""
         return cls.image if mime_type.startswith("image/") else cls.other
 
 

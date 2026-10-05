@@ -9,6 +9,7 @@ from app.core.storage import build_asset_url, build_fit_url, build_preview_url, 
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Node, NodeKind, NodeStatus
 from app.schemas.schemas import AssetMoveUpdate, AssetRead, AssetSelectUpdate
+from app.core.upload_type import resolve_upload
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
 
@@ -40,8 +41,7 @@ def to_asset_read(asset: Asset) -> AssetRead:
 @router.post("/upload", response_model=AssetRead, status_code=201)
 async def upload_asset(file: UploadFile, db: AsyncSession = Depends(get_db)):
     data = await file.read()
-    mime_type = file.content_type or "application/octet-stream"
-    kind = AssetKind.for_mime(mime_type)
+    mime_type, kind = resolve_upload(data, file.content_type)
     storage = get_storage()
     key = await storage.put_object(data, mime_type, prefix="uploads", kind=kind)
     asset = Asset(node_id=None, storage_key=key, mime_type=mime_type, kind=kind, selected=False, meta={})

@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,7 @@ from app.core.queue import job_queue
 from app.core.track_order import ordered_tracks, scope_of, splice_after
 from app.core.subgraph_copy import workflow_node_copy
 from app.core.storage import build_asset_url, get_storage
+from app.core.upload_type import resolve_upload
 from app.api.routes.assets import to_asset_read
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Dashboard, Job, JobStatusEnum, Node, NodeKind, NodeStatus, Track
@@ -839,7 +840,12 @@ async def list_node_jobs(node_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 
 
 @router.post("/{node_id}/upload-asset", response_model=AssetRead, status_code=201)
-async def upload_asset_to_node(node_id: uuid.UUID, file: UploadFile, db: AsyncSession = Depends(get_db)):
+async def upload_asset_to_node(
+    node_id: uuid.UUID,
+    file: UploadFile,
+    kind: str | None = Form(None),
+    db: AsyncSession = Depends(get_db),
+):
     """Manual fill for an asset-kind node (the grid's start cell) -- no
     workflow/backend involved. Can be called repeatedly to add more lines to
     the same asset cell.
@@ -880,8 +886,14 @@ async def upload_asset_to_node(node_id: uuid.UUID, file: UploadFile, db: AsyncSe
         node.inputs = []
 
     data = await file.read()
-    mime_type = file.content_type or "application/octet-stream"
-    kind = AssetKind.for_mime(mime_type)
+    mime_type, asset_kind = resolve_upload(data, file.content_type)
+    # An explicit kind is an override for a caller that knows better than the
+    # bytes do; without it the kind comes from the file itself (core/upload_type.py).
+    if kind is not None:
+        try:
+            asset_kind = AssetKind(kind)
+        except ValueError:
+            raise HTTPException(400, f"Unknown asset kind: {kind}")
     storage = get_storage()
     # projects/<project_id>/nodes/<node_id>/... -- nests under the owning
     # project instead of a global nodes/ bucket, so a project's whole disk
@@ -889,8 +901,8 @@ async def upload_asset_to_node(node_id: uuid.UUID, file: UploadFile, db: AsyncSe
     # projects/<id> subtree (2026-08-07, see core/node_path_migration.py for
     # the one-off reorg of pre-existing rows).
     track = await db.get(Track, node.track_id)
-    key = await storage.put_object(data, mime_type, prefix=f"projects/{track.project_id}/nodes/{node.id}", kind=kind)
-    asset = Asset(node_id=node.id, storage_key=key, mime_type=mime_type, kind=kind, selected=True, meta={})
+    key = await storage.put_object(data, mime_type, prefix=f"projects/{track.project_id}/nodes/{node.id}", kind=asset_kind)
+    asset = Asset(node_id=node.id, storage_key=key, mime_type=mime_type, kind=asset_kind, selected=True, meta={})
     db.add(asset)
     node.status = NodeStatus.done
     node.error = None
