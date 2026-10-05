@@ -105,8 +105,12 @@ class Storage:
         if header is not None:
             if header.kind is not AssetKind.mesh:
                 return None
-            return header.descriptor["verts"], header.descriptor["faces"]
-        return glb_stats.counts_from_file(self._safe_path(key), 0)
+            verts, faces = header.descriptor["verts"], header.descriptor["faces"]
+            if verts or faces:
+                return verts, faces
+            # A zero descriptor was written before the kind-comparison fix in
+            # build_prefix. The file itself still has the counts, so count those.
+        return glb_stats.counts_from_file(self._safe_path(key), self.payload_offset(key))
 
     def read_preview(self, key: str) -> bytes | None:
         return asset_prefix.read_preview(self._safe_path(key))

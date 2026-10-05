@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { ElementType, PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties, ElementType, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import type { Material, Mesh, MeshNormalMaterial, Object3D } from "three";
 import { resolveAssetUrl } from "../api/client";
@@ -384,10 +384,22 @@ export function MeshViewer({ url, asset }: { url: string; asset: Asset }) {
   );
 }
 
+// Attribute strings for the camera, written as fixed decimals. A plain
+// Number#toString() writes tiny values as exponents ("1e-7m"), which
+// <model-viewer>'s attribute parser doesn't read.
+const orbitOf = (viewer: ModelViewerElement): string => {
+  const o = viewer.getCameraOrbit();
+  return `${o.theta.toFixed(6)}rad ${o.phi.toFixed(6)}rad ${o.radius.toFixed(6)}m`;
+};
 const targetOf = (viewer: ModelViewerElement): string => {
   const p = viewer.getCameraTarget();
-  return `${p.x}m ${p.y}m ${p.z}m`;
+  return `${p.x.toFixed(6)}m ${p.y.toFixed(6)}m ${p.z.toFixed(6)}m`;
 };
+
+// Inline on purpose, not a class: React 18 writes className on a custom element
+// as a `classname` attribute, so the stylesheet rule for .mesh-compare-layer never
+// applied. Without absolute positioning the two layers stacked in normal flow.
+const LAYER_STYLE: CSSProperties = { position: "absolute", inset: 0, width: "100%", height: "100%" };
 
 /** Side-by-side compare of two meshes, split by a divider the user drags. Both
  * models share one camera: orbiting, zooming or panning either side moves the
@@ -411,7 +423,7 @@ export function MeshCompareModal({ left, right, onClose }: { left: Asset; right:
     // pair of listeners from chasing each other forever.
     const mirror = (from: ModelViewerElement, to: ModelViewerElement) => (e: Event) => {
       if ((e as CustomEvent<{ source: string }>).detail?.source !== "user-interaction") return;
-      to.cameraOrbit = from.getCameraOrbit().toString();
+      to.cameraOrbit = orbitOf(from);
       to.cameraTarget = targetOf(from);
     };
     const onLeft = mirror(a, b);
@@ -419,7 +431,7 @@ export function MeshCompareModal({ left, right, onClose }: { left: Asset; right:
     // Each side that finishes loading snaps the other to the reference view, so
     // a model that arrives second doesn't keep its own default framing.
     const alignToLeft = () => {
-      b.cameraOrbit = a.getCameraOrbit().toString();
+      b.cameraOrbit = orbitOf(a);
       b.cameraTarget = targetOf(a);
     };
     a.addEventListener("camera-change", onLeft);
@@ -465,21 +477,19 @@ export function MeshCompareModal({ left, right, onClose }: { left: Asset; right:
             <>
               <ModelViewer
                 ref={leftRef}
-                className="mesh-compare-layer"
                 src={resolveAssetUrl(left.url)}
                 camera-controls
                 camera-orbit={FRONT_ORBIT}
                 environment-image="neutral"
-                style={{ clipPath: `inset(0 ${(1 - split) * 100}% 0 0)` }}
+                style={{ ...LAYER_STYLE, clipPath: `inset(0 ${(1 - split) * 100}% 0 0)` }}
               />
               <ModelViewer
                 ref={rightRef}
-                className="mesh-compare-layer"
                 src={resolveAssetUrl(right.url)}
                 camera-controls
                 camera-orbit={FRONT_ORBIT}
                 environment-image="neutral"
-                style={{ clipPath: `inset(0 0 0 ${split * 100}%)` }}
+                style={{ ...LAYER_STYLE, clipPath: `inset(0 0 0 ${split * 100}%)` }}
               />
             </>
           )}

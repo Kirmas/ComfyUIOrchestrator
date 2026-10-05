@@ -85,7 +85,7 @@ class AssetHeader:
 def _pack_descriptor(kind: AssetKind, descriptor: dict) -> bytes:
     if kind in _RASTER_KINDS:
         body = struct.pack("<II", int(descriptor.get("width", 0)), int(descriptor.get("height", 0)))
-    elif kind is AssetKind.mesh:
+    elif kind == AssetKind.mesh:
         body = struct.pack("<II", int(descriptor.get("verts", 0)), int(descriptor.get("faces", 0)))
     else:
         body = b""
@@ -96,7 +96,7 @@ def _unpack_descriptor(kind: AssetKind, body: bytes) -> dict:
     if kind in _RASTER_KINDS:
         width, height = struct.unpack_from("<II", body, 0)
         return {"width": width, "height": height}
-    if kind is AssetKind.mesh:
+    if kind == AssetKind.mesh:
         verts, faces = struct.unpack_from("<II", body, 0)
         return {"verts": verts, "faces": faces}
     return {}
@@ -104,6 +104,10 @@ def _unpack_descriptor(kind: AssetKind, body: bytes) -> dict:
 
 def build_prefix(kind: AssetKind, preview: bytes, descriptor: dict) -> bytes:
     """The complete PREFIX_SIZE-byte block to write in front of the payload."""
+    # Callers pass the kind as a plain string too (comfyui_backend's AssetRef
+    # does). The descriptor branches below compare with `is`, which a string
+    # never satisfies -- a mesh was silently written with a zero descriptor.
+    kind = AssetKind(kind)
     if len(preview) > PREVIEW_CAPACITY:
         raise ValueError(f"preview of {len(preview)} B exceeds {PREVIEW_CAPACITY} B capacity")
     header = MAGIC + struct.pack("<BBH", VERSION, _KIND_TO_CODE[kind], len(preview))
