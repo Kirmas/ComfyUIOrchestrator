@@ -39,11 +39,15 @@ class AgentChatCreate(BaseModel):
     permission_mode: str | None = None  # dev chats only
     # Which agent CLI answers (claude | codex | agy); None = the runner's default.
     provider: str | None = None
+    effort: str | None = None  # the runner validates against the provider's list
+    fast_mode: bool | None = None
 
 
 class AgentChatUpdate(BaseModel):
     model: str | None = None
     permission_mode: str | None = None
+    effort: str | None = None  # "" = the CLI's own default
+    fast_mode: bool | None = None
     done: bool | None = None  # hidden from the list unless "show done" is on
 
 
@@ -100,6 +104,18 @@ async def list_kinds():
     return await _call("GET", "/kinds")
 
 
+@router.get("/limits")
+async def get_limits():
+    """The last usage-limit reading per provider (session / weekly windows)."""
+    return await _call("GET", "/limits")
+
+
+@router.post("/limits/{provider}")
+async def refresh_limits(provider: str):
+    """Take a fresh reading now: a tiny turn on that CLI, a few seconds."""
+    return await _call("POST", f"/limits/{provider}", timeout=httpx.Timeout(120.0))
+
+
 @router.post("")
 async def create_chat(payload: AgentChatCreate, db: AsyncSession = Depends(get_db)):
     # api_url/api_token (this instance's own, same as the night self-check
@@ -109,6 +125,8 @@ async def create_chat(payload: AgentChatCreate, db: AsyncSession = Depends(get_d
         "kind": payload.kind,
         "provider": payload.provider,
         "model": payload.model,
+        "effort": payload.effort,
+        "fast_mode": payload.fast_mode,
         "permission_mode": payload.permission_mode,
         **_self_check(),
     }

@@ -7,6 +7,7 @@ import { AgentProviderIcon } from "./AgentProviderIcon";
 import { NightPanel } from "./NightPanel";
 import type {
   AgentChat as Chat,
+  AgentLimits,
   AgentChatKind,
   AgentEvent,
   AgentImageUpload,
@@ -24,6 +25,15 @@ const LAST_CHAT_KEY = "comfy-orchestrator:lastAgentChat";
 const lastModelKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentModel:${provider}`;
 // Same for a dev chat's permission mode.
 const lastModeKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentPermissionMode:${provider}`;
+const lastEffortKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentEffort:${provider}`;
+const lastFastKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentFast:${provider}`;
+const LIMITS_POLL_MS = 30000;
+// The CLI's own picker calls xhigh "Extra"; ids stay what --effort takes.
+const EFFORT_LABELS: Record<string, string> = { xhigh: "xhigh (Extra)", ultracode: "ultracode ✦" };
+const LIMIT_LABELS: Record<string, TKey> = {
+  five_hour: "agent.limits.fiveHour",
+  seven_day: "agent.limits.sevenDay",
+};
 const SHOW_DONE_KEY = "comfy-orchestrator:agentShowDone";
 // The runner owns the list (and its order); these are just the names shown.
 const MODE_LABELS: Record<string, TKey> = {
@@ -147,7 +157,16 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
       const model = provider.models.some((m) => m.id === lastModel) ? lastModel! : undefined;
       const lastMode = localStorage.getItem(lastModeKey(provider.id));
       const permissionMode = kind === "dev" && lastMode && provider.permission_modes.includes(lastMode) ? lastMode : undefined;
-      const chat = await agentChatsApi.create(kind, kind === "project" ? projectId : null, { provider: provider.id, model, permissionMode });
+      const lastEffort = localStorage.getItem(lastEffortKey(provider.id));
+      const effort = lastEffort && provider.efforts.includes(lastEffort) ? lastEffort : undefined;
+      const fastMode = provider.fast_models.length > 0 && localStorage.getItem(lastFastKey(provider.id)) === "1";
+      const chat = await agentChatsApi.create(kind, kind === "project" ? projectId : null, {
+        provider: provider.id,
+        model,
+        permissionMode,
+        effort,
+        fastMode,
+      });
       setChats((cs) => [chat, ...cs]);
       select(chat.id);
     } catch (err) {
@@ -172,9 +191,9 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
     localStorage.setItem(SHOW_DONE_KEY, on ? "1" : "0");
   };
 
-  // Project chats need a CLI that can be limited to the orchestrator's tools
-  // (today only Claude); dev chats can run on any installed one.
-  const projectProvider = providers.find((p) => p.available && p.supports_project);
+  // Project chats need a CLI that can be limited to the orchestrator's tools;
+  // dev chats can run on any installed one.
+  const projectProviders = providers.filter((p) => p.available && p.supports_project);
   const devProviders = providers.filter((p) => p.available);
   const allProjectChats = chats.filter((c) => c.kind === "project" && c.project_id === projectId);
   const allDevChats = chats.filter((c) => c.kind === "dev");
@@ -192,7 +211,7 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
       <span className={cx("agent-status-dot", `agent-status-${c.status}`)} title={statusLabel(t, c.status)} />
       <span className="agent-chat-title">
         {c.origin === "agent" && <span title={t("agent.fromAgent")}>🤖 </span>}
-        {c.kind === "dev" && <AgentProviderIcon provider={c.provider} size={13} />}{" "}
+        <AgentProviderIcon provider={c.provider} size={13} />{" "}
         {c.title || t("agent.untitled")}
       </span>
       <button
@@ -224,10 +243,14 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
         {error && <div className="error-text">{error}</div>}
         <div className="agent-section-head">
           <span>{t("agent.section.project")}</span>
-          {projectId && projectProvider && (
-            <button onClick={() => createChat("project", projectProvider)} title={t("agent.newProjectChat")}>
-              +
-            </button>
+          {projectId && (
+            <span className="agent-provider-buttons">
+              {projectProviders.map((p) => (
+                <button key={p.id} onClick={() => createChat("project", p)} title={t("agent.newProjectChatWith", { provider: p.label })}>
+                  <AgentProviderIcon provider={p.id} />
+                </button>
+              ))}
+            </span>
           )}
         </div>
         {!projectId ? (
@@ -255,6 +278,7 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
             {devChats.length === 0 ? <div className="node-cell-hint">{t("agent.noDevChats")}</div> : devChats.map(renderItem)}
           </>
         )}
+        <LimitsPanel providers={providers} />
         {doneCount > 0 && (
           <label className="agent-show-done">
             <input type="checkbox" checked={showDone} onChange={(e) => toggleShowDone(e.target.checked)} />
@@ -278,6 +302,86 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
           <div className="agent-empty">{t("agent.pickOrCreate")}</div>
         )}
       </div>
+    </div>
+  );
+}
+
+/** "in 2 h 2 min" / "in 3 d 4 h" until an epoch-seconds moment. */
+function untilText(t: ReturnType<typeof useT>, epochSeconds: number): string {
+  const minutes = Math.max(0, Math.round((epochSeconds * 1000 - Date.now()) / 60000));
+  if (minutes < 60) return t("agent.limits.inMin", { m: minutes });
+  if (minutes < 24 * 60) return t("agent.limits.inHourMin", { h: Math.floor(minutes / 60), m: minutes % 60 });
+  return t("agent.limits.inDayHour", { d: Math.floor(minutes / 1440), h: Math.floor((minutes % 1440) / 60) });
+}
+
+/** "5 min ago" for an epoch-seconds moment in the past. */
+function agoText(t: ReturnType<typeof useT>, epochSeconds: number): string {
+  const minutes = Math.max(0, Math.round((Date.now() - epochSeconds * 1000) / 60000));
+  return minutes < 60 ? t("agent.limits.minAgo", { m: minutes }) : t("agent.limits.hourAgo", { h: Math.floor(minutes / 60) });
+}
+
+/** Plan usage per provider: how much of each window is used and when it
+ * resets. The runner keeps the last reading (every turn brings a fresh one for
+ * free); the refresh button spends a tiny turn to take one now. Only providers
+ * that report limits show up. */
+function LimitsPanel({ providers }: { providers: AgentProviderInfo[] }) {
+  const t = useT();
+  const [limits, setLimits] = useState<Record<string, AgentLimits>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    const load = () => agentChatsApi.limits().then(setLimits, () => {});
+    load();
+    const id = setInterval(load, LIMITS_POLL_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  const refresh = async (provider: AgentProviderInfo) => {
+    setBusy(provider.id);
+    try {
+      setLimits(await agentChatsApi.refreshLimits(provider.id));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const shown = providers.filter((p) => p.available && (limits[p.id] || p.id === "claude"));
+  if (shown.length === 0) return null;
+  return (
+    <div className="agent-limits">
+      {shown.map((p) => {
+        const reading = limits[p.id];
+        return (
+          <div key={p.id} className="agent-limits-provider">
+            <div className="agent-limits-head">
+              <AgentProviderIcon provider={p.id} size={13} /> <span>{t("agent.limits.title")}</span>
+              <button className="agent-chat-delete" title={t("agent.limits.refresh")} disabled={busy === p.id} onClick={() => refresh(p)}>
+                {busy === p.id ? "…" : "↻"}
+              </button>
+            </div>
+            {!reading && <div className="node-cell-hint">{t("agent.limits.none")}</div>}
+            {reading?.windows.map((w) => {
+              const pct = w.utilization === null ? null : Math.round(w.utilization * 100);
+              return (
+                <div key={w.id} className="agent-limit-row">
+                  <div className="agent-limit-label">
+                    <span>{LIMIT_LABELS[w.id] ? t(LIMIT_LABELS[w.id]) : w.id}</span>
+                    <span className="node-cell-hint">
+                      {w.resets_at ? t("agent.limits.resets", { when: untilText(t, w.resets_at) }) : ""} · {pct === null ? "?" : `${pct}%`}
+                    </span>
+                  </div>
+                  <div className="agent-limit-bar">
+                    <div className={cx("agent-limit-fill", pct !== null && pct >= 90 && "hot")} style={{ width: `${pct ?? 0}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+            {reading && <div className="node-cell-hint">{t("agent.limits.asOf", { ago: agoText(t, reading.updated_at) })}</div>}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -551,6 +655,41 @@ function ChatView({
               </option>
             ))}
           </select>
+        )}
+        {provider && provider.efforts.length > 0 && (
+          <select
+            className="agent-model"
+            value={chat.effort ?? ""}
+            title={t("agent.effortHint")}
+            onChange={async (e) => {
+              const effort = e.target.value;
+              localStorage.setItem(lastEffortKey(chat.provider ?? "claude"), effort);
+              await agentChatsApi.setEffort(chat.id, effort);
+              onChanged();
+            }}
+          >
+            <option value="">{t("agent.effort.default")}</option>
+            {provider.efforts.map((level) => (
+              <option key={level} value={level}>
+                {EFFORT_LABELS[level] ?? level}
+              </option>
+            ))}
+          </select>
+        )}
+        {provider && provider.fast_models.length > 0 && (
+          <button
+            className={cx("agent-done-toggle", chat.fast_mode && "active")}
+            disabled={!provider.fast_models.includes(chat.requested_model)}
+            title={provider.fast_models.includes(chat.requested_model) ? t("agent.fastHint") : t("agent.fastOnlyOn", { models: provider.fast_models.join(", ") })}
+            onClick={async () => {
+              const on = !chat.fast_mode;
+              localStorage.setItem(lastFastKey(chat.provider ?? "claude"), on ? "1" : "0");
+              await agentChatsApi.setFastMode(chat.id, on);
+              onChanged();
+            }}
+          >
+            ⚡ {t("agent.fast")}
+          </button>
         )}
         {provider && provider.models.length > 0 && (
           <select

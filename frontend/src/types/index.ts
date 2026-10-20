@@ -571,6 +571,10 @@ export interface AgentChat {
   model?: string;
   // Absent on chats from before providers existed: those are Claude.
   provider?: AgentProviderId;
+  // Per-chat knobs, where the provider has them: reasoning effort (null = the
+  // CLI's own default) and the faster-output mode.
+  effort?: string | null;
+  fast_mode?: boolean;
   // Dev chats: how tool calls get approved -- auto (classifier), default
   // (ask for everything not allowlisted) or acceptEdits.
   permission_mode?: string;
@@ -645,6 +649,23 @@ export interface AgentProviderInfo {
   permission_modes: string[];
   // Project chats need a CLI that can be limited to the orchestrator's tools.
   supports_project: boolean;
+  // Reasoning-effort levels the CLI takes (empty = no such knob) and the
+  // models that have its faster-output mode (empty = no fast mode).
+  efforts: string[];
+  fast_models: string[];
+}
+
+// Usage limits per provider, as the runner last read them (providers.py
+// LimitsStore). Utilization is 0..1; times are epoch seconds.
+export interface AgentLimitWindow {
+  id: string;
+  utilization: number | null;
+  resets_at: number | null;
+}
+export interface AgentLimits {
+  status: string | null;
+  updated_at: number;
+  windows: AgentLimitWindow[];
 }
 
 // Night mode (agent_runner/night.py): one session per night, decided as a

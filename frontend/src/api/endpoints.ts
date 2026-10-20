@@ -3,6 +3,7 @@ import type {
   AgentChat,
   AgentChatKind,
   AgentImageUpload,
+  AgentLimits,
   AgentProviderId,
   AgentProviderInfo,
   NightStatus,
@@ -382,13 +383,23 @@ export const agentChatsApi = {
   list: () => api.get<AgentChat[]>("/api/agent-chats"),
   providers: () => api.get<{ providers: AgentProviderInfo[] }>("/api/agent-chats/models"),
   kinds: () => api.get<{ kinds: AgentChatKind[] }>("/api/agent-chats/kinds"),
-  create: (kind: AgentChatKind, projectId: string | null, opts: { provider?: AgentProviderId; model?: string; permissionMode?: string } = {}) =>
+  limits: () => api.get<Record<string, AgentLimits>>("/api/agent-chats/limits"),
+  refreshLimits: (provider: AgentProviderId) => api.post<Record<string, AgentLimits>>(`/api/agent-chats/limits/${provider}`),
+  setEffort: (id: string, effort: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { effort }),
+  setFastMode: (id: string, fastMode: boolean) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { fast_mode: fastMode }),
+  create: (
+    kind: AgentChatKind,
+    projectId: string | null,
+    opts: { provider?: AgentProviderId; model?: string; permissionMode?: string; effort?: string; fastMode?: boolean } = {},
+  ) =>
     api.post<AgentChat>("/api/agent-chats", {
       kind,
       project_id: projectId,
       provider: opts.provider,
       model: opts.model,
       permission_mode: opts.permissionMode,
+      effort: opts.effort,
+      fast_mode: opts.fastMode,
     }),
   setPermissionMode: (id: string, mode: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { permission_mode: mode }),
   decide: (id: string, requestId: string, decision: PermissionDecision) =>

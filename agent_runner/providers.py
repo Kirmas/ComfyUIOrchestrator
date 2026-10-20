@@ -27,9 +27,12 @@ import base64
 import json
 import os
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+
+DATA_DIR = Path(os.environ.get("RUNNER_DATA_DIR", Path.home() / ".local/share/comfy-agent-runner"))
 
 # A tool result or tool input can be megabytes (a recipe read, a workflow
 # JSON). The transcript is for a person to skim, so it keeps a prefix.
@@ -68,6 +71,37 @@ def find_binary(env_var: str, name: str) -> str | None:
     if explicit:
         return explicit
     return shutil.which(name) or (str(p) if (p := Path.home() / ".local/bin" / name).exists() else None)
+
+
+class LimitsStore:
+    """The last usage-limit reading per provider, kept on disk so the page has
+    something to show right after a runner restart. A reading arrives for free
+    with every turn (Claude reports it in its stream); `probe_limits` asks for
+    one on demand. Shape, the same for every provider:
+    {"status": str|None, "updated_at": ts,
+     "windows": [{"id": "five_hour", "utilization": 0..1|None, "resets_at": ts|None}]}"""
+
+    def __init__(self, path: Path):
+        self.path = path
+        try:
+            self.data: dict[str, dict] = json.loads(path.read_text())
+        except (OSError, ValueError):
+            self.data = {}
+
+    def update(self, provider_id: str, status: str | None, windows: list[dict]) -> None:
+        self.data[provider_id] = {"status": status, "updated_at": time.time(), "windows": windows}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.data))
+        tmp.replace(self.path)
+
+
+limits = LimitsStore(DATA_DIR / "limits.json")
+
+
+class SetupError(Exception):
+    """The CLI needs a one-time setting only the person should make; the
+    message says which. Shown in the transcript as is."""
 
 
 @dataclass
@@ -109,6 +143,10 @@ class Provider:
     accepts_images = False
     # A project chat needs the isolation above, which not every CLI can give.
     supports_project = False
+    # Reasoning effort levels the CLI takes (empty = no such knob), and whether
+    # it has a faster-output mode. Both are per-chat picks, remembered in meta.
+    efforts: list[str] = []
+    supports_fast = False
 
     @property
     def binary(self) -> str | None:
@@ -136,6 +174,21 @@ class Provider:
         mode = meta.get("permission_mode")
         return mode if mode in self.permission_modes else self.permission_modes[0]
 
+    def effort_for(self, meta: dict) -> str | None:
+        effort = meta.get("effort")
+        return effort if effort in self.efforts else None
+
+    def fast_allowed(self, model: str) -> bool:
+        """Does this model have the faster-output mode at all?"""
+        return False
+
+    def fast_for(self, meta: dict) -> bool:
+        return bool(self.supports_fast and meta.get("fast_mode") and self.fast_allowed(self.model_for(meta)))
+
+    async def probe_limits(self) -> None:
+        """Take a usage-limit reading now (into `limits`); CLIs that can't
+        report one leave it be."""
+
     def describe(self) -> dict:
         return {
             "id": self.id,
@@ -146,6 +199,9 @@ class Provider:
             "permission_modes": self.permission_modes,
             "supports_project": self.supports_project,
             "accepts_images": self.accepts_images,
+            "efforts": self.efforts,
+            "supports_fast": self.supports_fast,
+            "fast_models": [m["id"] for m in self.models if self.fast_allowed(m["id"])],
         }
 
     # -- sessions ------------------------------------------------------------
@@ -163,6 +219,10 @@ class Provider:
         chat.save_meta()
 
     # -- one turn ------------------------------------------------------------
+
+    def cwd(self, chat, spec: TurnSpec, default: Path) -> Path:
+        """Where the process runs; the profile's pick unless the CLI needs better."""
+        return default
 
     def launch(self, chat, spec: TurnSpec, text: str, images: list[Path]) -> Launch:
         raise NotImplementedError
@@ -185,8 +245,9 @@ class Provider:
         return (
             f"{spec.system_prompt}\n"
             "You cannot ask the person for permission mid-turn: if an action is refused or denied, "
-            "say so plainly and stop instead of working around it. Read CLAUDE.md in the repo root first.\n\n"
-            f"---\n{text}"
+            "say so plainly and stop instead of working around it."
+            + ("" if spec.isolated else " Read CLAUDE.md in the repo root first.")
+            + f"\n\n---\n{text}"
         )
 
 
@@ -213,6 +274,16 @@ class ClaudeProvider(Provider):
     interactive = True
     accepts_images = True
     supports_project = True
+    # "ultracode" is not a level but a session mode the same flag turns on: the
+    # model orchestrates dynamic workflows on every substantial task, optimizing
+    # for the most exhaustive answer with no regard for token cost.
+    efforts = ["low", "medium", "high", "xhigh", "max", "ultracode"]
+    # Fast mode: the same Opus, answering faster, at a higher price per token
+    # (a research preview of the CLI; `/fast` in a terminal). Only Opus has it.
+    supports_fast = True
+
+    def fast_allowed(self, model):
+        return model == "opus"
 
     def model_for(self, meta):
         """Chats created before the switch to aliases stored an exact id
@@ -287,6 +358,12 @@ class ClaudeProvider(Provider):
                 args += ["--max-budget-usd", spec.budget_usd]
             if spec.disallowed:
                 args += ["--disallowedTools", *spec.disallowed]
+        if effort := self.effort_for(chat.meta):
+            args += ["--effort", effort]
+        if self.fast_for(chat.meta):
+            # --settings layers on top of every setting source, including a
+            # project chat's empty one.
+            args += ["--settings", json.dumps({"fastMode": True})]
         args += ["--append-system-prompt", spec.system_prompt, *self.session_args(chat.meta)]
         return Launch(args)
 
@@ -347,6 +424,8 @@ class ClaudeProvider(Provider):
                             "is_error": bool(c.get("is_error")),
                             "content": snippet(tool_result_text(c.get("content"))),
                         })
+        elif t == "rate_limit_event":
+            self.record_limits(e.get("rate_limit_info") or {})
         elif t == "result":
             await chat.emit({
                 "type": "result",
@@ -358,6 +437,41 @@ class ClaudeProvider(Provider):
             })
             # The turn is over; closing stdin is what lets the CLI exit.
             proc.stdin.close()
+
+    def record_limits(self, info: dict) -> None:
+        """rate_limit_info: `unifiedWindows` holds each window the plan has
+        (five_hour, seven_day...) with its utilization 0..1 and reset time;
+        older shapes only name the window that's closest to its limit."""
+        windows = [
+            {"id": name, "utilization": w.get("utilization"), "resets_at": w.get("resetsAt")}
+            for name, w in (info.get("unifiedWindows") or {}).items()
+        ]
+        if not windows and info.get("rateLimitType"):
+            windows = [{"id": info["rateLimitType"], "utilization": None, "resets_at": info.get("resetsAt")}]
+        if windows:
+            limits.update(self.id, info.get("status"), windows)
+
+    async def probe_limits(self):
+        # The cheapest possible turn (Haiku, no tools, no settings): the limits
+        # reading is part of every turn's stream.
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        proc = await asyncio.create_subprocess_exec(
+            self.binary, "-p", ".", "--output-format", "stream-json", "--verbose",
+            "--model", "haiku", "--tools", "", "--setting-sources", "", "--no-session-persistence",
+            cwd=DATA_DIR, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), 90)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise
+        for line in out.splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("type") == "rate_limit_event":
+                self.record_limits(e.get("rate_limit_info") or {})
 
     async def switch_mode(self, proc, mode):
         import uuid
@@ -387,26 +501,43 @@ class CodexProvider(Provider):
     ]
     permission_modes = ["workspace", "full", "readOnly"]
     accepts_images = True
+    # A project chat: read-only sandbox, the user's own config (other MCP
+    # servers, plugins) not loaded, the orchestrator's MCP the only tool that
+    # reaches anything. The shell is still there, but it can only read.
+    supports_project = True
+    MCP_TOKEN_ENV = "ORCH_MCP_TOKEN"
 
     SANDBOX = {"workspace": "workspace-write", "full": "danger-full-access", "readOnly": "read-only"}
 
     def launch(self, chat, spec, text, images):
         resume = ["resume", chat.meta["session_id"]] if chat.meta.get("session_started") else []
+        mode = "readOnly" if spec.isolated else self.mode_for(chat.meta)
         args = [
             self.binary, "exec", *resume, "--json", "--skip-git-repo-check",
             "-m", self.model_for(chat.meta),
             # Sandbox and approvals through -c, which `exec resume` also takes
             # (its own flag set is smaller than a fresh exec's).
-            "-c", f'sandbox_mode="{self.SANDBOX[self.mode_for(chat.meta)]}"',
+            "-c", f'sandbox_mode="{self.SANDBOX[mode]}"',
             "-c", 'approval_policy="never"',
         ]
+        env: dict[str, str] = {}
+        if spec.isolated:
+            args += [
+                "--ignore-user-config",
+                "-c", f"mcp_servers.orchestrator.url={json.dumps(spec.mcp_url)}",
+                "-c", f'mcp_servers.orchestrator.bearer_token_env_var="{self.MCP_TOKEN_ENV}"',
+                # Headless, "never" would otherwise fail every MCP call with
+                # "requires approval".
+                "-c", 'mcp_servers.orchestrator.default_tools_approval_mode="approve"',
+            ]
+            env[self.MCP_TOKEN_ENV] = spec.mcp_token
         # "-" = the prompt comes on stdin, which keeps a long message (and one
         # starting with a dash) off the command line. It goes before -i, which
         # would swallow it as one more file.
         args.append("-")
         for path in images:
             args += ["-i", str(path)]
-        return Launch(args)
+        return Launch(args, env)
 
     async def begin(self, chat, proc, spec, text, images):
         proc.stdin.write(self.prompt_for(chat, spec, text).encode())
@@ -460,6 +591,10 @@ class CodexProvider(Provider):
         if kind == "mcp_tool_call":
             failed = item.get("status") == "failed" or bool(item.get("error"))
             body = item.get("error") if failed else item.get("result")
+            if isinstance(body, dict) and "content" in body:
+                body = tool_result_text(body["content"])
+            elif isinstance(body, dict) and "message" in body:
+                body = body["message"]
             return {"is_error": failed, "content": snippet(body if isinstance(body, str) else json.dumps(body, ensure_ascii=False, default=str))}
         return {"is_error": item.get("status") == "failed", "content": item.get("status") or "done"}
 
@@ -489,9 +624,49 @@ class AgyProvider(Provider):
         {"id": "gpt-oss-120b-medium", "label": "GPT-OSS 120B"},
     ]
     permission_modes = ["edits", "full", "plan"]
+    # A project chat: edits-only (so a command is refused, not run), the
+    # orchestrator's MCP from a workspace config. Two one-time settings belong
+    # to the person, not to this code (an agent's permission rules and trusted
+    # folders are theirs to grant): the workspace must be trusted, and MCP
+    # calls allowed -- _check_project_setup says exactly what to add.
+    supports_project = True
+    SETTINGS = Path.home() / ".gemini/antigravity-cli/settings.json"
+    MCP_RULE = "mcp(orchestrator/*)"
+    # One fixed folder for every project chat (they share the same MCP
+    # server), so there is a single path to trust instead of one per chat.
+    PROJECT_DIR = DATA_DIR / "agy-project"
+
+    def cwd(self, chat, spec, default):
+        return self.PROJECT_DIR if spec.isolated else default
+
+    def _check_project_setup(self, spec) -> None:
+        self.PROJECT_DIR.mkdir(parents=True, exist_ok=True)
+        config = self.PROJECT_DIR / ".agents" / "mcp_config.json"
+        config.parent.mkdir(exist_ok=True)
+        config.write_text(json.dumps({"mcpServers": {"orchestrator": {
+            "serverUrl": spec.mcp_url,
+            "headers": {"Authorization": f"Bearer {spec.mcp_token}"},
+        }}}))
+        config.chmod(0o600)
+        try:
+            settings = json.loads(self.SETTINGS.read_text())
+        except (OSError, ValueError):
+            settings = {}
+        missing = []
+        if str(self.PROJECT_DIR) not in settings.get("trustedWorkspaces", []):
+            missing.append(f'add "{self.PROJECT_DIR}" to "trustedWorkspaces"')
+        if self.MCP_RULE not in (settings.get("permissions") or {}).get("allow", []):
+            missing.append(f'add "{self.MCP_RULE}" to "permissions" -> "allow"')
+        if missing:
+            raise SetupError(
+                f"Antigravity project chats need a one-time setting in {self.SETTINGS}: " + "; ".join(missing)
+                + ". (Headless, it can't ask, so without them it refuses the folder and the MCP tools.)"
+            )
 
     def launch(self, chat, spec, text, images):
-        mode = self.mode_for(chat.meta)
+        if spec.isolated:
+            self._check_project_setup(spec)
+        mode = "edits" if spec.isolated else self.mode_for(chat.meta)
         args = [self.binary, "--output-format", "stream-json", "--model", self.model_for(chat.meta)]
         if mode == "full":
             args.append("--dangerously-skip-permissions")

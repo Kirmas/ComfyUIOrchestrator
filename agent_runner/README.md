@@ -24,16 +24,36 @@ what a chat needs in neutral terms (`TurnSpec`), the provider turns it into
 flags. A new CLI is one new class + a line in `PROVIDERS`.
 
 - `claude` -- the protocol described below; the only one that can ask the page
-  (Allow / Deny) and the only one a project chat or a night report runs on
-  (they need to be limited to the orchestrator's MCP tools).
+  (Allow / Deny), the only one with no shell in a project chat, and the only
+  one a night report runs on.
 - `codex` -- `codex exec [resume <thread>] --json`, prompt on stdin. Headless:
   the permission mode *is* the sandbox (`workspace` / `full` / `readOnly`, as
-  `-c sandbox_mode=...` + `approval_policy="never"`).
+  `-c sandbox_mode=...` + `approval_policy="never"`). Project chat: read-only
+  sandbox, `--ignore-user-config`, the orchestrator's MCP via `-c
+  mcp_servers.orchestrator.*` (token in env `ORCH_MCP_TOKEN`, tool approval
+  `approve`). The shell exists but can only read.
 - `agy` -- `agy -p=<prompt> --output-format stream-json [--conversation <id>]`.
   Headless, a tool that needs permission is auto-denied (the final `result`
   lists it as `denied_actions`; the transcript says so), so modes are
   `edits` / `full` (`--dangerously-skip-permissions`) / `plan`. Quotas are per
   model; a quota error ends the turn as `error` with the CLI's message.
+  Project chat: mode `edits`, run in one fixed folder
+  (`<data dir>/agy-project`, MCP from its `.agents/mcp_config.json`). **Two
+  one-time entries in `~/.gemini/antigravity-cli/settings.json` are the
+  person's to add** (the runner won't edit an agent's permission settings
+  itself; it refuses the turn and says what is missing): that folder under
+  `trustedWorkspaces`, and `"mcp(orchestrator/*)"` in `permissions.allow`.
+
+Per-chat knobs and limits are part of the same interface, opt-in per class:
+`efforts` (the CLI's reasoning levels; Claude `--effort`), `supports_fast` +
+`fast_allowed(model)` (Claude: `--settings '{"fastMode":true}'`, Opus only),
+and `record_limits` / `probe_limits` feeding `LimitsStore`
+(`<data dir>/limits.json`, `GET /limits`, `POST /limits/<provider>`). Claude
+reports plan usage in its stream (`rate_limit_event.unifiedWindows`:
+`five_hour` / `seven_day`, utilization 0..1), so every turn refreshes it and
+`probe_limits` is a 1-token Haiku turn. Codex and Antigravity don't implement
+any of the three yet; the page shows each control only when `describe()` says
+the provider has it.
 
 The CLIs have no system-prompt flag, so for codex/agy the dev prompt (plus
 "read CLAUDE.md") rides in the conversation's first message. Their session id

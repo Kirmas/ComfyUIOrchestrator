@@ -59,7 +59,7 @@ from pathlib import Path
 
 import night as night_ops
 from night import NightState
-from providers import DEFAULT_PROVIDER, IMAGE_TYPES, PROVIDERS, TurnSpec, provider_of, send_line, snippet
+from providers import DATA_DIR, DEFAULT_PROVIDER, IMAGE_TYPES, PROVIDERS, SetupError, TurnSpec, limits, provider_of, send_line, snippet
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -67,7 +67,6 @@ from starlette.routing import Route
 from urllib.error import URLError
 from urllib.request import Request as UrlRequest, urlopen
 
-DATA_DIR = Path(os.environ.get("RUNNER_DATA_DIR", Path.home() / ".local/share/comfy-agent-runner"))
 CHATS_DIR = DATA_DIR / "chats"
 # Accepted bearer tokens, comma separated. The orchestrator authenticates with
 # its own API_TOKEN, so one runner can serve both the prod and the dev
@@ -349,6 +348,8 @@ def public_meta(chat: Chat) -> dict:
     m["requested_model"] = provider.model_for(chat.meta)
     if m.get("kind") == "dev":
         m["permission_mode"] = provider.mode_for(chat.meta)
+    m["effort"] = provider.effort_for(chat.meta)
+    m["fast_mode"] = provider.fast_for(chat.meta)
     m["accepts_images"] = PROFILES[m["kind"]].accepts_images and provider.accepts_images
     return m
 
@@ -537,7 +538,7 @@ async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
         launch = provider.launch(chat, spec, text, paths)
         proc = await asyncio.create_subprocess_exec(
             *launch.args,
-            cwd=profile.cwd(chat),
+            cwd=provider.cwd(chat, spec, profile.cwd(chat)),
             env={**os.environ, **launch.env},
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -563,6 +564,10 @@ async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
             await provider.on_event(chat, proc, event, ask)
         code = await proc.wait()
         await stderr_task
+    except SetupError as exc:
+        await chat.emit({"type": "error", "text": str(exc)})
+        await chat.set_status("error")
+        return
     except Exception as exc:  # noqa: BLE001 -- anything here must end the turn visibly
         await chat.emit({"type": "error", "text": f"Runner failed to run the turn: {exc!r}"})
         await chat.set_status("error")
@@ -646,6 +651,9 @@ async def create_chat(request: Request):
     model = body.get("model") or provider.default_model
     if model not in provider.model_ids:
         return JSONResponse({"detail": f"Unknown model for {provider.label}: {model!r}"}, status_code=400)
+    effort = body.get("effort") or None
+    if effort and effort not in provider.efforts:
+        return JSONResponse({"detail": f"{provider.label} has no effort level {effort!r}"}, status_code=400)
     chat_id = uuid.uuid4().hex[:12]
     d = CHATS_DIR / chat_id
     d.mkdir(parents=True)
@@ -657,6 +665,8 @@ async def create_chat(request: Request):
         **extra,
         "provider": provider.id,
         "requested_model": model,
+        **({"effort": effort} if effort else {}),
+        **({"fast_mode": True} if body.get("fast_mode") and provider.supports_fast else {}),
         **({"permission_mode": body["permission_mode"]} if profile.kind == "dev" and body.get("permission_mode") in provider.permission_modes else {}),
         # This orchestrator instance's own base URL/token, so a finished turn
         # can POST itself to /api/push/notify (fire_push_notification above).
@@ -703,6 +713,17 @@ async def update_chat(request: Request):
         # In the transcript too, so it's clear which answers came from which.
         await chat.emit({"type": "model", "model": model})
         chat.save_meta()
+    if "effort" in body:
+        effort = body["effort"] or None
+        if effort and effort not in provider.efforts:
+            return JSONResponse({"detail": f"{provider.label} has no effort level {effort!r}"}, status_code=400)
+        chat.meta["effort"] = effort
+        chat.save_meta()
+    if "fast_mode" in body:
+        if body["fast_mode"] and not provider.supports_fast:
+            return JSONResponse({"detail": f"{provider.label} has no fast mode"}, status_code=400)
+        chat.meta["fast_mode"] = bool(body["fast_mode"])
+        chat.save_meta()
     mode = body.get("permission_mode")
     if mode is not None and chat.meta.get("kind") == "dev" and mode != provider.mode_for(chat.meta):
         if chat.meta.get("origin") == "agent":
@@ -731,6 +752,22 @@ async def list_models(request: Request):
         "default": claude.default_model,
         "permission_modes": claude.permission_modes,
     })
+
+
+async def get_limits(request: Request):
+    return JSONResponse(limits.data)
+
+
+async def refresh_limits(request: Request):
+    """Take a fresh reading for one provider (a tiny turn, see probe_limits)."""
+    provider = PROVIDERS.get(request.path_params["provider"])
+    if not provider or not provider.available:
+        return JSONResponse({"detail": "Unknown or not installed provider"}, status_code=404)
+    try:
+        await provider.probe_limits()
+    except (OSError, asyncio.TimeoutError) as exc:
+        return JSONResponse({"detail": f"Couldn't read the limits: {exc!r}"}, status_code=502)
+    return JSONResponse(limits.data)
 
 
 async def delete_chat(request: Request):
@@ -1272,6 +1309,8 @@ routes = [
     Route("/chats/{chat_id}", delete_chat, methods=["DELETE"]),
     Route("/models", list_models, methods=["GET"]),
     Route("/kinds", list_kinds, methods=["GET"]),
+    Route("/limits", get_limits, methods=["GET"]),
+    Route("/limits/{provider}", refresh_limits, methods=["POST"]),
     Route("/reports", create_report, methods=["POST"]),
     Route("/reports/{report_id}", read_report, methods=["GET"]),
     Route("/night", night_status, methods=["GET"]),

@@ -3049,6 +3049,51 @@ th, td {
   font-size: 12px;
 }
 
+.agent-limits {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.agent-limits-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.agent-limits-head .agent-chat-delete {
+  margin-left: auto;
+}
+
+.agent-limit-row {
+  margin-bottom: 6px;
+}
+
+.agent-limit-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.agent-limit-bar {
+  height: 5px;
+  margin-top: 2px;
+  border-radius: 3px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.agent-limit-fill {
+  height: 100%;
+  background: var(--accent, #4a8cf7);
+}
+
+.agent-limit-fill.hot {
+  background: #e5484d;
+}
+
 .agent-provider-icon {
   display: inline-flex;
   vertical-align: middle;

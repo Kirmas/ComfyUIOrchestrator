@@ -237,7 +237,7 @@ in this very dev copy -- it can change and deploy the site, and whatever its
 permission rules don't allow comes to the page as Allow / Deny buttons
 (opt-in via `RUNNER_DEV_ENABLED=1`; one dev chat runs at a time, and a dev
 chat shares this working tree with any terminal session, so don't run both on
-the same change). A dev chat can run on **Claude Code, Codex or Antigravity** (one `Provider` class each in `agent_runner/providers.py`, chosen by the brand-icon buttons next to "+"; project chats and night reports stay on Claude, the only CLI limitable to the orchestrator's MCP and able to ask Allow / Deny -- the other two run headless with a fixed permission policy per chat). The sessions live in a **separate user-level service, `comfy-agent-runner`**
+the same change). A dev chat can run on **Claude Code, Codex or Antigravity** (one `Provider` class each in `agent_runner/providers.py`, chosen by the brand-icon buttons next to "+"; project chats can use any of them too -- Codex in a read-only sandbox with only the orchestrator's MCP, Antigravity edits-only in one fixed folder -- but only Claude can be limited to nothing but MCP and ask Allow / Deny; the other two run headless with a fixed permission policy per chat, and night reports stay on Claude). The sessions live in a **separate user-level service, `comfy-agent-runner`**
 (runs as keresh, `127.0.0.1:8765`), not in this process -- a restart of
 `comfy-orchestrator-api` must not kill an agent mid-turn, and the transcript
 stream (SSE keyed by a per-chat sequence) resumes by itself through the proxy.
