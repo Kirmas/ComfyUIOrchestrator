@@ -26,13 +26,19 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 DATA_DIR = Path(os.environ.get("RUNNER_DATA_DIR", Path.home() / ".local/share/comfy-agent-runner"))
+RUNNER_PORT = int(os.environ.get("RUNNER_PORT", 8765))
+TOKENS = {t.strip() for t in os.environ.get("RUNNER_TOKENS", "").split(",") if t.strip()}
+HOOKS_CONFIG = Path.home() / ".gemini/config/hooks.json"
+BRIDGE_SCRIPT = Path(__file__).resolve().parent / "comfy_hook_bridge.py"
 
 # A tool result or tool input can be megabytes (a recipe read, a workflow
 # JSON). The transcript is for a person to skim, so it keeps a prefix.
@@ -125,7 +131,7 @@ class Launch:
     env: dict[str, str] = field(default_factory=dict)
 
 
-# The runner schedules a permission question here; only Claude ever calls it.
+# The runner schedules a permission check or structured user question here.
 AskPermission = Callable[[str, dict], None]
 
 
@@ -147,6 +153,13 @@ class Provider:
     # it has a faster-output mode. Both are per-chat picks, remembered in meta.
     efforts: list[str] = []
     supports_fast = False
+    supports_compact = False
+
+    def context_window(self, model: str) -> int:
+        return 200_000
+
+    def get_context_tokens(self, chat) -> int | None:
+        return None
 
     @property
     def binary(self) -> str | None:
@@ -199,6 +212,7 @@ class Provider:
             "permission_modes": self.permission_modes,
             "supports_project": self.supports_project,
             "accepts_images": self.accepts_images,
+            "supports_compact": self.supports_compact,
             "efforts": self.efforts,
             "supports_fast": self.supports_fast,
             "fast_models": [m["id"] for m in self.models if self.fast_allowed(m["id"])],
@@ -233,6 +247,10 @@ class Provider:
 
     async def on_event(self, chat, proc: asyncio.subprocess.Process, event: dict, ask: AskPermission) -> None:
         raise NotImplementedError
+
+    async def answer_request(self, proc, req_id, request, answer):
+        send_line(proc, {"type": "control_response", "response": {"subtype": "success", "request_id": req_id, "response": answer}})
+        await proc.stdin.drain()
 
     async def switch_mode(self, proc: asyncio.subprocess.Process, mode: str) -> None:
         """Apply a permission mode to a turn already running, if the CLI can."""
@@ -484,11 +502,9 @@ class ClaudeProvider(Provider):
 
 
 class CodexProvider(Provider):
-    """`codex exec --json`: one JSONL event per thing that happened. There is
-    no way to ask mid-turn in exec mode, so the sandbox is the policy:
-    `workspace` writes inside the dev copy (no network, nothing outside it),
-    `full` has no sandbox at all (deploys, sudo, network), `readOnly` looks
-    but does not touch."""
+    """One stdio JSON-RPC app-server per turn, with persistent thread resume.
+    Questions are interactive; tool permissions remain fixed sandbox policies.
+    """
 
     id = "codex"
     label = "Codex"
@@ -506,71 +522,209 @@ class CodexProvider(Provider):
     # reaches anything. The shell is still there, but it can only read.
     supports_project = True
     MCP_TOKEN_ENV = "ORCH_MCP_TOKEN"
+    # Common levels advertised for all three models by Codex 0.163.0.
+    # Sol/Astra also advertise ultra; Luna does not.
+    efforts = ["low", "medium", "high", "xhigh", "max"]
+    supports_fast = True
 
     SANDBOX = {"workspace": "workspace-write", "full": "danger-full-access", "readOnly": "read-only"}
 
+    def fast_allowed(self, model):
+        return model in self.model_ids
+
     def launch(self, chat, spec, text, images):
-        resume = ["resume", chat.meta["session_id"]] if chat.meta.get("session_started") else []
-        mode = "readOnly" if spec.isolated else self.mode_for(chat.meta)
-        args = [
-            self.binary, "exec", *resume, "--json", "--skip-git-repo-check",
-            "-m", self.model_for(chat.meta),
-            # Sandbox and approvals through -c, which `exec resume` also takes
-            # (its own flag set is smaller than a fresh exec's).
-            "-c", f'sandbox_mode="{self.SANDBOX[mode]}"',
-            "-c", 'approval_policy="never"',
-        ]
-        env: dict[str, str] = {}
+        args = [self.binary, "app-server", "--stdio",
+                "-c", 'features.default_mode_request_user_input=true']
+        env = {}
         if spec.isolated:
-            args += [
-                "--ignore-user-config",
-                "-c", f"mcp_servers.orchestrator.url={json.dumps(spec.mcp_url)}",
-                "-c", f'mcp_servers.orchestrator.bearer_token_env_var="{self.MCP_TOKEN_ENV}"',
-                # Headless, "never" would otherwise fail every MCP call with
-                # "requires approval".
-                "-c", 'mcp_servers.orchestrator.default_tools_approval_mode="approve"',
-            ]
+            # app-server has no --ignore-user-config. A separate home loads
+            # no personal config/plugins, but shares login and existing threads.
+            home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+            isolated_home = chat.dir / "codex-home"
+            isolated_home.mkdir(exist_ok=True)
+            for name in ("auth.json", "sessions", "models_cache.json"):
+                target = isolated_home / name
+                if not target.exists() and not target.is_symlink() and (home / name).exists():
+                    target.symlink_to(home / name)
+            env["CODEX_HOME"] = str(isolated_home)
             env[self.MCP_TOKEN_ENV] = spec.mcp_token
-        # "-" = the prompt comes on stdin, which keeps a long message (and one
-        # starting with a dash) off the command line. It goes before -i, which
-        # would swallow it as one more file.
-        args.append("-")
-        for path in images:
-            args += ["-i", str(path)]
+            args += ["-c", "features.plugins=false", "-c", "features.apps=false",
+                     "-c", f"mcp_servers.orchestrator.url={json.dumps(spec.mcp_url)}",
+                     "-c", f'mcp_servers.orchestrator.bearer_token_env_var="{self.MCP_TOKEN_ENV}"',
+                     "-c", 'mcp_servers.orchestrator.default_tools_approval_mode="approve"']
         return Launch(args, env)
 
     async def begin(self, chat, proc, spec, text, images):
-        proc.stdin.write(self.prompt_for(chat, spec, text).encode())
+        mode = "readOnly" if spec.isolated else self.mode_for(chat.meta)
+        prompt = spec.system_prompt
+        if spec.isolated:
+            prompt = prompt.replace(
+                "You have no shell and no file\naccess.",
+                "This runtime also exposes a read-only shell; use only the orchestrator MCP for project work.",
+            )
+        else:
+            prompt += "\nRead CLAUDE.md in the repo root before doing repository work."
+        instructions = prompt + (
+            "\nThis Codex client supports structured user questions via request_user_input. "
+            "Use it for questions that need an answer, and wait for the answer before finishing. "
+            "Tool permissions are fixed for this turn; there are no Allow/Deny prompts. "
+            "If a tool is denied, stop and report the denial."
+        )
+        params = {
+            "model": self.model_for(chat.meta), "sandbox": self.SANDBOX[mode],
+            "approvalPolicy": "never", "serviceTier": "priority" if self.fast_for(chat.meta) else "default",
+            "developerInstructions": instructions,
+        }
+        if effort := self.effort_for(chat.meta):
+            params["config"] = {"model_reasoning_effort": effort}
+        if chat.meta.get("session_started"):
+            params.update(threadId=chat.meta["session_id"], excludeTurns=True)
+        chat.turn_state["rpc_thread"] = params
+        chat.turn_state["expects_result"] = True
+        chat.turn_state["rpc_input"] = [{"type": "text", "text": text}] + [
+            {"type": "localImage", "path": str(path)} for path in images
+        ]
+        send_line(proc, {"id": "init", "method": "initialize", "params": {
+            "clientInfo": {"name": "comfy_orchestrator", "version": "1"},
+            "capabilities": {"experimentalApi": True},
+        }})
         await proc.stdin.drain()
-        proc.stdin.close()
 
     async def on_event(self, chat, proc, e, ask):
-        t = e.get("type")
-        seen: set = chat.turn_state.setdefault("tools", set())
-        if t == "thread.started":
-            self.adopt_session(chat, e.get("thread_id"))
-        elif t in ("item.started", "item.completed"):
-            item = e.get("item") or {}
-            kind, item_id, done = item.get("type"), item.get("id"), t == "item.completed"
-            if kind == "agent_message" and done and (item.get("text") or "").strip():
+        method, params = e.get("method"), e.get("params") or {}
+        state = chat.turn_state
+        if method and "id" in e:
+            if method == "item/tool/requestUserInput":
+                # Keep Codex ids private; the existing UI answers by question text.
+                questions = params.get("questions") or []
+                request = {"tool_name": "AskUserQuestion", "requires_user_interaction": True,
+                           "input": {"questions": [dict(q, multiSelect=False, options=q.get("options") or []) for q in questions]},
+                           "codex_id": e["id"], "codex_questions": questions}
+                ask(f'{params["turnId"]}:{e["id"]}', request)
+            else:
+                # Never silently approve an unimplemented server request.
+                send_line(proc, {"id": e["id"], "error": {"code": -32601, "message": f"Unsupported client request: {method}"}})
+                await proc.stdin.drain()
+                await chat.emit({"type": "error", "text": f"Codex requested unsupported interaction: {method}"})
+            return
+        if params.get("threadId") and params["threadId"] != chat.meta.get("session_id"):
+            # A child thread's completion must not close the parent server.
+            return
+        if not method and "id" in e:
+            if e.get("error"):
+                state["failed"] = True
+                await chat.emit({"type": "error", "text": (e["error"].get("message") or snippet(e["error"]))})
+                proc.stdin.close()
+                return
+            result = e.get("result") or {}
+            if e["id"] == "init":
+                send_line(proc, {"method": "initialized"})
+                send_line(proc, {"id": "thread", "method": "thread/resume" if chat.meta.get("session_started") else "thread/start",
+                                 "params": state.pop("rpc_thread")})
+            elif e["id"] == "thread":
+                self.adopt_session(chat, result["thread"]["id"])
+                chat.meta["model"] = result.get("model")
+                chat.save_meta()
+                send_line(proc, {"id": "turn", "method": "turn/start", "params": {
+                    "threadId": chat.meta["session_id"], "input": state.pop("rpc_input"),
+                }})
+            await proc.stdin.drain()
+            return
+        if method == "account/rateLimits/updated":
+            self.record_limits(params.get("rateLimits") or {})
+        elif method == "thread/tokenUsage/updated":
+            state["usage"] = params.get("tokenUsage", {}).get("last", {})
+        elif method in ("item/started", "item/completed"):
+            item = params.get("item") or {}
+            kind, item_id, done = item.get("type"), item.get("id"), method == "item/completed"
+            if kind == "agentMessage" and done and item.get("text", "").strip():
                 await chat.emit({"type": "text", "text": item["text"]})
-            elif kind == "error" and done:
-                await chat.emit({"type": "error", "text": item.get("message") or snippet(item)})
-            elif kind in ("command_execution", "file_change", "mcp_tool_call", "web_search"):
+            elif kind in ("commandExecution", "fileChange", "mcpToolCall", "webSearch"):
+                normalized = dict(item, type={"commandExecution": "command_execution", "fileChange": "file_change",
+                                             "mcpToolCall": "mcp_tool_call", "webSearch": "web_search"}[kind],
+                                  exit_code=item.get("exitCode"), aggregated_output=item.get("aggregatedOutput"))
+                seen = state.setdefault("tools", set())
                 if item_id not in seen:
                     seen.add(item_id)
-                    await chat.emit({"type": "tool_use", "id": item_id, **self._tool_call(item)})
+                    await chat.emit({"type": "tool_use", "id": item_id, **self._tool_call(normalized)})
                 if done:
-                    await chat.emit({"type": "tool_result", "tool_use_id": item_id, **self._tool_result(item)})
-        elif t == "turn.completed":
-            usage = e.get("usage") or {}
-            await chat.emit({"type": "result", "is_error": False, "subtype": "success", "num_turns": 1, "usage": usage})
-        elif t == "turn.failed":
-            chat.turn_state["failed"] = True
-            await chat.emit({"type": "error", "text": (e.get("error") or {}).get("message") or snippet(e)})
-            await chat.emit({"type": "result", "is_error": True, "subtype": "error"})
-        elif t == "error":
-            await chat.emit({"type": "error", "text": e.get("message") or snippet(e)})
+                    await chat.emit({"type": "tool_result", "tool_use_id": item_id, **self._tool_result(normalized)})
+        elif method == "error":
+            await chat.emit({"type": "error", "text": (params.get("error") or {}).get("message") or snippet(params)})
+        elif method == "turn/completed":
+            state["result_received"] = True
+            turn = params.get("turn") or {}
+            failed = turn.get("status") != "completed"
+            state["failed"] = failed
+            if turn.get("error"):
+                await chat.emit({"type": "error", "text": turn["error"].get("message") or snippet(turn["error"])})
+            await chat.emit({"type": "result", "is_error": failed, "subtype": turn.get("status"),
+                             "num_turns": 1, "usage": state.get("usage", {})})
+            proc.stdin.close()
+
+    async def answer_request(self, proc, req_id, request, answer):
+        picked = answer.get("updatedInput", {}).get("answers", {})
+        answers = {q["id"]: {"answers": [picked[q["question"]]] if q["question"] in picked else []}
+                   for q in request["codex_questions"]}
+        send_line(proc, {"id": request["codex_id"], "result": {"answers": answers}})
+        await proc.stdin.drain()
+
+    def record_limits(self, info: dict) -> bool:
+        """Accept token_count payloads, rollout envelopes, or a limit snapshot.
+        Exec's token usage is NOT plan utilization; only rate_limits is."""
+        info = info.get("payload", info)
+        info = info.get("rate_limits", info)
+        if not isinstance(info, dict):
+            return False
+        windows = []
+        for name in ("primary", "secondary"):
+            w = info.get(name)
+            if not isinstance(w, dict):
+                continue
+            used = w.get("used_percent", w.get("usedPercent"))
+            if not isinstance(used, (int, float)) or not 0 <= used <= 100:
+                continue
+            window_id = {300: "five_hour", 10080: "seven_day"}.get(w.get("window_minutes", w.get("windowDurationMins")), name)
+            windows.append({"id": window_id, "utilization": used / 100, "resets_at": w.get("resets_at", w.get("resetsAt"))})
+        if not windows:
+            return False
+        status = "rejected" if info.get("rate_limit_reached_type", info.get("rateLimitReachedType")) or any(w["utilization"] >= 1 for w in windows) else "allowed"
+        limits.update(self.id, status, windows)
+        return True
+
+    async def probe_limits(self):
+        """app-server can read account limits without a model turn or tokens."""
+        proc = await asyncio.create_subprocess_exec(
+            self.binary, "app-server", "--stdio", "-c", 'sandbox_mode="read-only"',
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            send_line(proc, {"id": "init", "method": "initialize", "params": {
+                "clientInfo": {"name": "comfy_orchestrator_limits", "version": "1"},
+            }})
+            await proc.stdin.drain()
+            async with asyncio.timeout(30):
+                async for line in proc.stdout:
+                    event = json.loads(line)
+                    if event.get("error"):
+                        raise RuntimeError(event["error"].get("message", "Codex limits request failed"))
+                    if event.get("id") == "init":
+                        send_line(proc, {"method": "initialized"})
+                        send_line(proc, {"id": "limits", "method": "account/rateLimits/read"})
+                        await proc.stdin.drain()
+                    elif event.get("id") == "limits":
+                        if self.record_limits((event.get("result") or {}).get("rateLimits") or {}):
+                            return
+                        break
+            raise RuntimeError("Codex returned no plan limits; previous reading retained.")
+        finally:
+            proc.stdin.close()
+            try:
+                await asyncio.wait_for(proc.wait(), 3)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
 
     @staticmethod
     def _tool_call(item: dict) -> dict:
@@ -603,41 +757,125 @@ class CodexProvider(Provider):
 
 
 class AgyProvider(Provider):
-    """`agy -p --output-format stream-json`. Headless, it cannot prompt: a tool
-    that needs permission is auto-denied (reported in the final result as
-    `denied_actions`), so the mode picks the policy up front -- `edits` lets
-    it write files only, `full` skips every check, `plan` reads and plans.
-    Quotas are per model, which is why the model list is long."""
+    """`agy -p --output-format stream-json`. Interactive questions (`ask_question`)
+    and tool permission checks are handled via a PreToolUse lifecycle hook bridge
+    that routes them to comfy-agent-runner's web UI.
+    """
 
     id = "agy"
     label = "Antigravity"
     binary_env = "AGY_BIN"
     binary_name = "agy"
     models = [
-        {"id": "gemini-3.8-flash-medium", "label": "Gemini 3.8 Flash"},
-        {"id": "gemini-3.8-flash-low", "label": "Gemini 3.8 Flash (low)"},
-        {"id": "gemini-3.8-flash-high", "label": "Gemini 3.8 Flash (high)"},
-        {"id": "gemini-4-argon-medium", "label": "Gemini 4 Argon"},
-        {"id": "gemini-4-argon-high", "label": "Gemini 4 Argon (high)"},
-        {"id": "claude-sonnet-5-5-medium", "label": "Claude Sonnet 5.5"},
-        {"id": "claude-opus-5-5-medium", "label": "Claude Opus 5.5"},
-        {"id": "gpt-oss-120b-medium", "label": "GPT-OSS 120B"},
+        {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash", "efforts": ["low", "medium", "high"]},
+        {"id": "gemini-4-argon", "label": "Gemini 4 Argon", "efforts": ["low", "medium", "high"]},
+        {"id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5", "efforts": ["low", "medium", "high"]},
+        {"id": "claude-opus-5-5", "label": "Claude Opus 5.5", "efforts": ["low", "medium", "high"]},
+        {"id": "gpt-oss-120b", "label": "GPT-OSS 120B", "efforts": ["medium"]},
     ]
-    permission_modes = ["edits", "full", "plan"]
+    permission_modes = ["edits", "auto", "full", "plan"]
+    interactive = True
+    accepts_images = True
     # A project chat: edits-only (so a command is refused, not run), the
     # orchestrator's MCP from a workspace config. Two one-time settings belong
     # to the person, not to this code (an agent's permission rules and trusted
     # folders are theirs to grant): the workspace must be trusted, and MCP
     # calls allowed -- _check_project_setup says exactly what to add.
     supports_project = True
+    efforts = ["low", "medium", "high"]
+    supports_fast = False
+    supports_compact = True
     SETTINGS = Path.home() / ".gemini/antigravity-cli/settings.json"
     MCP_RULE = "mcp(orchestrator/*)"
     # One fixed folder for every project chat (they share the same MCP
     # server), so there is a single path to trust instead of one per chat.
     PROJECT_DIR = DATA_DIR / "agy-project"
 
+    @staticmethod
+    def context_window(model: str) -> int:
+        base = re.sub(r"-(low|medium|high|xhigh|max)$", "", model or "")
+        if "gemini" in base:
+            return 1_048_576
+        if "claude" in base:
+            return 200_000
+        if "gpt" in base:
+            return 128_000
+        return 1_048_576
+
+    def get_context_tokens(self, chat) -> int | None:
+        session_id = chat.meta.get("session_id")
+        if not session_id:
+            return None
+        try:
+            p = Path.home() / ".gemini/antigravity-cli/brain" / session_id / ".system_generated/logs/transcript.jsonl"
+            if not p.exists():
+                return None
+            size = p.stat().st_size
+            with p.open("rb") as f:
+                f.seek(max(0, size - 131072))
+                lines = f.read().decode("utf-8", errors="replace").splitlines()
+            for line in reversed(lines):
+                if '"input_tokens"' in line:
+                    data = json.loads(line)
+                    inp = data.get("input_tokens") or 0
+                    cache = data.get("cache_read_tokens") or 0
+                    if inp or cache:
+                        return inp + cache
+        except Exception:
+            pass
+        return None
+
+    def model_for(self, meta: dict) -> str:
+        requested = meta.get("requested_model")
+        if requested in self.model_ids:
+            return requested
+        if requested:
+            base = re.sub(r"-(low|medium|high|xhigh|max)$", "", requested)
+            if base in self.model_ids:
+                return base
+        return self.default_model
+
     def cwd(self, chat, spec, default):
         return self.PROJECT_DIR if spec.isolated else default
+
+    def _ensure_hooks_setup(self) -> None:
+        try:
+            HOOKS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                data = json.loads(HOOKS_CONFIG.read_text())
+            except (OSError, ValueError):
+                data = {}
+            bridge_cmd = f"python3 {BRIDGE_SCRIPT}"
+            data["comfy-runner-bridge"] = {
+                "PreToolUse": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": bridge_cmd,
+                                "timeout": 3600,
+                            }
+                        ],
+                    }
+                ]
+            }
+            tmp = HOOKS_CONFIG.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2))
+            tmp.replace(HOOKS_CONFIG)
+        except OSError:
+            pass
+
+    def prompt_for(self, chat, spec: TurnSpec, text: str) -> str:
+        if chat.meta.get("session_started"):
+            return text
+        return (
+            f"{spec.system_prompt}\n"
+            "When you need clarification or a decision from the user, use the ask_question tool. "
+            "If an action is refused or denied, explain clearly and proceed without that action."
+            + ("" if spec.isolated else " Read CLAUDE.md in the repo root first.")
+            + f"\n\n---\n{text}"
+        )
 
     def _check_project_setup(self, spec) -> None:
         self.PROJECT_DIR.mkdir(parents=True, exist_ok=True)
@@ -666,17 +904,112 @@ class AgyProvider(Provider):
     def launch(self, chat, spec, text, images):
         if spec.isolated:
             self._check_project_setup(spec)
+        self._ensure_hooks_setup()
         mode = "edits" if spec.isolated else self.mode_for(chat.meta)
-        args = [self.binary, "--output-format", "stream-json", "--model", self.model_for(chat.meta)]
-        if mode == "full":
-            args.append("--dangerously-skip-permissions")
+        model = self.model_for(chat.meta)
+        effort = self.effort_for(chat.meta)
+        if effort:
+            # Strip model suffix (-low/-medium/-high/-xhigh/-max) so it doesn't conflict with --effort
+            base_model = re.sub(r"-(low|medium|high|xhigh|max)$", "", model)
+            args = [self.binary, "--output-format", "stream-json", "--model", base_model, "--effort", effort, "--dangerously-skip-permissions"]
         else:
-            args += ["--mode", "plan" if mode == "plan" else "accept-edits"]
+            args = [self.binary, "--output-format", "stream-json", "--model", model, "--dangerously-skip-permissions"]
         if chat.meta.get("session_started"):
             args += ["--conversation", chat.meta["session_id"]]
+        token = next(iter(TOKENS), "")
+        env = {
+            "COMFY_AGENT_RUNNER_IPC": f"http://127.0.0.1:{RUNNER_PORT}/hooks/pre-tool",
+            "COMFY_CHAT_ID": chat.id,
+            "COMFY_PERMISSION_MODE": mode or "edits",
+            "COMFY_IPC_TOKEN": token,
+        }
+        prompt_text = text
+        if images:
+            img_list = "\n".join(f"- {p}" for p in images)
+            prompt_text = (
+                f"{text}\n\n"
+                f"[Attached images:\n{img_list}\n"
+                "Please use the read_file tool to inspect the image file(s).]"
+            )
         # `-p=...` (not `-p ...`): the CLI takes the next argument as the
         # prompt even when it is a flag.
-        return Launch(args + [f"-p={self.prompt_for(chat, spec, text)}"])
+        return Launch(args + [f"-p={self.prompt_for(chat, spec, prompt_text)}"], env=env)
+
+    @staticmethod
+    def _parse_reset_seconds(text: str) -> int | None:
+        m = re.search(r"Resets in\s+(?:(\d+)d)?\s*(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?", text, re.IGNORECASE)
+        if not m:
+            return None
+        days = int(m.group(1) or 0)
+        hours = int(m.group(2) or 0)
+        minutes = int(m.group(3) or 0)
+        seconds = int(m.group(4) or 0)
+        total = days * 86400 + hours * 3600 + minutes * 60 + seconds
+        return total if total > 0 else None
+
+    def record_quota_error(self, model: str, error_text: str) -> bool:
+        seconds = self._parse_reset_seconds(error_text)
+        if seconds is None and "429" not in error_text and "RESOURCE_EXHAUSTED" not in error_text and "quota reached" not in error_text.lower():
+            return False
+        resets_at = int(time.time() + (seconds or 0)) if seconds else None
+        new_window = {"id": model, "utilization": 1.0, "resets_at": resets_at}
+        existing = limits.data.get(self.id, {}).get("windows", [])
+        updated = [w for w in existing if w.get("id") != model]
+        updated.append(new_window)
+        limits.update(self.id, "rejected", updated)
+        return True
+
+    def record_limits(self, info: dict) -> bool:
+        """Parse structured quota data from /usage command."""
+        windows = []
+        for g in info.get("groups", []):
+            group_name = g.get("name")
+            for b in g.get("buckets", []):
+                rem = b.get("remaining_fraction")
+                disabled = bool(b.get("disabled"))
+                utilization = round(1.0 - rem, 4) if rem is not None else None
+                resets_at = None
+                if reset_time := b.get("reset_time"):
+                    try:
+                        resets_at = int(datetime.fromisoformat(reset_time.replace("Z", "+00:00")).timestamp())
+                    except (ValueError, TypeError):
+                        pass
+                windows.append({
+                    "id": b.get("id"),
+                    "label": b.get("name") or b.get("id"),
+                    "group": group_name,
+                    "utilization": utilization,
+                    "resets_at": resets_at,
+                    "disabled": disabled,
+                })
+        if not windows:
+            return False
+        status = "rejected" if any(w["utilization"] is not None and w["utilization"] >= 1.0 and not w.get("disabled") for w in windows) else "allowed"
+        limits.update(self.id, status, windows)
+        return True
+
+    async def probe_limits(self):
+        """Read account limits from agy slash-command /usage."""
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        proc = await asyncio.create_subprocess_exec(
+            self.binary, "-p=/usage", "--mode", "plan", "--output-format", "stream-json",
+            cwd=DATA_DIR, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), 30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise
+        for line in out.splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("event") == "command_result":
+                cmd = e.get("command") or {}
+                if cmd.get("name") == "usage" and self.record_limits(cmd.get("data") or {}):
+                    return
+        raise RuntimeError("Antigravity returned no usage limits; previous reading retained.")
 
     async def on_event(self, chat, proc, e, ask):
         t = e.get("event")
@@ -686,6 +1019,11 @@ class AgyProvider(Provider):
             chat.meta["model"] = (e.get("init") or {}).get("model") or chat.meta.get("model")
         elif t == "step_update":
             s = e.get("step_update") or {}
+            if u := s.get("usage"):
+                inp = u.get("input_tokens") or 0
+                cache = u.get("cache_read_tokens") or 0
+                if inp or cache:
+                    chat.meta["context_tokens"] = inp + cache
             kind, step, status = s.get("step_type"), s.get("step_index"), s.get("state")
             if kind == "agent_response":
                 state.setdefault("text", {})[step] = state.get("text", {}).get(step, "") + (s.get("text_delta") or "")
@@ -708,9 +1046,16 @@ class AgyProvider(Provider):
                     "text": f"Antigravity can't ask for permission when run headless, so it refused: {', '.join(map(str, denied))}. "
                     "Switch this chat's mode to Full to let it run commands.",
                 })
-            if r.get("status") != "SUCCESS" or r.get("error"):
+            err_msg = r.get("error")
+            if err_msg:
+                self.record_quota_error(self.model_for(chat.meta), err_msg)
+            if r.get("status") != "SUCCESS" or err_msg:
                 state["failed"] = True
-                await chat.emit({"type": "error", "text": r.get("error") or f"Antigravity turn ended with status {r.get('status')}"})
+                await chat.emit({"type": "error", "text": err_msg or f"Antigravity turn ended with status {r.get('status')}"})
+            if ctx := self.get_context_tokens(chat):
+                chat.meta["context_tokens"] = ctx
+            if hasattr(chat, "save_meta"):
+                chat.save_meta()
             await chat.emit({
                 "type": "result",
                 "is_error": r.get("status") != "SUCCESS",
@@ -718,6 +1063,8 @@ class AgyProvider(Provider):
                 "duration_ms": int(r["duration_seconds"] * 1000) if r.get("duration_seconds") is not None else None,
                 "num_turns": r.get("num_turns"),
                 "usage": r.get("usage"),
+                "context_tokens": chat.meta.get("context_tokens"),
+                "context_window": self.context_window(self.model_for(chat.meta)),
             })
 
 

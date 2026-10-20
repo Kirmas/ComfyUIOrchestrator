@@ -59,7 +59,7 @@ from pathlib import Path
 
 import night as night_ops
 from night import NightState
-from providers import DATA_DIR, DEFAULT_PROVIDER, IMAGE_TYPES, PROVIDERS, SetupError, TurnSpec, limits, provider_of, send_line, snippet
+from providers import DATA_DIR, DEFAULT_PROVIDER, IMAGE_TYPES, PROVIDERS, SetupError, TurnSpec, limits, provider_of, snippet
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -176,8 +176,9 @@ and readable, and do not paste long diffs unless asked.
 
 Everything in CLAUDE.md applies (deploying, backups, commits only when asked).
 Specifics of running from the web page:
-- Tool calls your permission rules don't allow are shown to the person as
-  Allow / Deny buttons; a denial is their answer, not an error to work around.
+- Providers with interactive tool approvals show Allow / Deny buttons.
+  Providers with fixed permissions refuse disallowed actions without asking.
+  A denial is final, not an error to work around.
 - deploy/deploy.sh restarts comfy-orchestrator-api. That does NOT stop you:
   you run in a separate service (comfy-agent-runner), and the page reconnects
   by itself. After a deploy, check /api/health and say whether it came back.
@@ -351,6 +352,14 @@ def public_meta(chat: Chat) -> dict:
     m["effort"] = provider.effort_for(chat.meta)
     m["fast_mode"] = provider.fast_for(chat.meta)
     m["accepts_images"] = PROFILES[m["kind"]].accepts_images and provider.accepts_images
+    m["supports_compact"] = provider.supports_compact
+    ctx = chat.meta.get("context_tokens")
+    if ctx is None and chat.meta.get("session_id"):
+        ctx = provider.get_context_tokens(chat)
+        if ctx:
+            chat.meta["context_tokens"] = ctx
+    m["context_tokens"] = ctx
+    m["context_window"] = provider.context_window(m["requested_model"])
     return m
 
 
@@ -483,8 +492,7 @@ async def ask_permission(chat: Chat, proc: asyncio.subprocess.Process, req_id: s
             "behavior": "deny",
             "message": "Nobody is available to answer this: the turn was started by an agent's bug report. Don't retry it; say in your report that it needs a person.",
         }
-        send_line(proc, {"type": "control_response", "response": {"subtype": "success", "request_id": req_id, "response": answer}})
-        await proc.stdin.drain()
+        await provider_of(chat).answer_request(proc, req_id, request, answer)
         return
     future = asyncio.get_running_loop().create_future()
     chat.pending[req_id] = future
@@ -517,8 +525,7 @@ async def ask_permission(chat: Chat, proc: asyncio.subprocess.Process, req_id: s
     if not chat.pending:
         await chat.set_status("running")
     if proc.returncode is None:
-        send_line(proc, {"type": "control_response", "response": {"subtype": "success", "request_id": req_id, "response": answer}})
-        await proc.stdin.drain()
+        await provider_of(chat).answer_request(proc, req_id, request, answer)
 
 
 async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
@@ -528,6 +535,7 @@ async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
     asks: list[asyncio.Task] = []
     profile = PROFILES[chat.meta["kind"]]
     provider = provider_of(chat)
+    proc = None
 
     def ask(req_id: str, request: dict) -> None:
         asks.append(asyncio.create_task(ask_permission(chat, proc, req_id, request)))
@@ -564,6 +572,10 @@ async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
             await provider.on_event(chat, proc, event, ask)
         code = await proc.wait()
         await stderr_task
+        if (chat.turn_state.get("expects_result") and not chat.turn_state.get("result_received")
+                and not chat.turn_state.get("failed") and not chat.stop_requested):
+            chat.turn_state["failed"] = True
+            await chat.emit({"type": "error", "text": "Agent transport closed before the turn completed."})
     except SetupError as exc:
         await chat.emit({"type": "error", "text": str(exc)})
         await chat.set_status("error")
@@ -573,6 +585,21 @@ async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
         await chat.set_status("error")
         return
     finally:
+        # A persistent app-server must not survive an exception/cancellation
+        # in its protocol handler. Stop its entire process group, like Stop.
+        if proc is not None and proc.returncode is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), KILL_GRACE_SECONDS)
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
         chat.proc = None
         for task in asks:
             task.cancel()
@@ -895,6 +922,99 @@ async def answer_question(request: Request):
     return JSONResponse(public_meta(chat))
 
 
+async def hook_pre_tool(request: Request):
+    """Antigravity lifecycle hook IPC endpoint."""
+    body = await request.json()
+    chat_id = body.get("chat_id")
+    chat = chats.get(chat_id)
+    if not chat:
+        return JSONResponse({"decision": "allow"}, status_code=200)
+
+    tool = body.get("tool")
+    args = body.get("args") or {}
+
+    if tool == "ask_question":
+        raw_questions = args.get("questions") or []
+        if isinstance(raw_questions, str):
+            try:
+                raw_questions = json.loads(raw_questions)
+            except Exception:
+                raw_questions = []
+        questions = []
+        for q in raw_questions:
+            options = []
+            for opt in q.get("options") or []:
+                if isinstance(opt, str):
+                    options.append({"label": opt})
+                elif isinstance(opt, dict):
+                    options.append({"label": opt.get("label", str(opt)), "description": opt.get("description")})
+            questions.append({
+                "question": q.get("question") or "",
+                "header": q.get("header") or (q.get("question") or "")[:30],
+                "options": options,
+                "multiSelect": bool(q.get("is_multi_select")),
+            })
+        req_id = f"agy-q-{uuid.uuid4().hex[:8]}"
+        req_payload = {
+            "tool_name": "AskUserQuestion",
+            "requires_user_interaction": True,
+            "input": {"questions": questions},
+        }
+        auto = PROFILES[chat.meta["kind"]].auto_decide(chat, req_payload)
+        if auto:
+            return JSONResponse({"status": "denied", "decision": "deny", "reason": "No user available (unattended turn)."})
+
+        future = asyncio.get_running_loop().create_future()
+        chat.pending[req_id] = future
+        await chat.emit({"type": "ask_user_question", "request_id": req_id, "input": req_payload["input"]})
+        await chat.set_status("awaiting_approval")
+        try:
+            answers = await future
+            await chat.emit({"type": "ask_user_answer", "request_id": req_id, "answers": answers})
+            return JSONResponse({"status": "answered", "answers": answers})
+        except asyncio.CancelledError:
+            return JSONResponse({"status": "cancelled", "decision": "deny", "reason": "User cancelled the chat."})
+        finally:
+            chat.pending.pop(req_id, None)
+            if not chat.pending:
+                await chat.set_status("running")
+
+    # Command permission check
+    req_id = f"agy-perm-{uuid.uuid4().hex[:8]}"
+    cmd = args.get("CommandLine") or snippet(args)
+    req_payload = {
+        "tool_name": "Bash" if tool == "run_command" else tool,
+        "description": f"Run command: {cmd}",
+        "input": {"command": cmd},
+    }
+    auto = PROFILES[chat.meta["kind"]].auto_decide(chat, req_payload)
+    if auto:
+        return JSONResponse({"decision": "deny", "reason": "No user available (unattended turn)."})
+
+    future = asyncio.get_running_loop().create_future()
+    chat.pending[req_id] = future
+    await chat.emit({
+        "type": "permission_request",
+        "request_id": req_id,
+        "tool": req_payload["tool_name"],
+        "description": req_payload["description"],
+        "input": snippet(req_payload["input"]),
+    })
+    await chat.set_status("awaiting_approval")
+    try:
+        decision = await future
+        await chat.emit({"type": "permission_decision", "request_id": req_id, "decision": decision})
+        if decision == "deny":
+            return JSONResponse({"decision": "deny", "reason": "The user denied this command from the web page."})
+        return JSONResponse({"decision": "allow"})
+    except asyncio.CancelledError:
+        return JSONResponse({"decision": "deny", "reason": "User cancelled the chat."})
+    finally:
+        chat.pending.pop(req_id, None)
+        if not chat.pending:
+            await chat.set_status("running")
+
+
 # --- night mode: bug reports from agents ---------------------------------------
 
 
@@ -1103,6 +1223,26 @@ async def report_scheduler() -> None:
             night.note(f"Runner error while working a report: {exc!r}")
 
 
+LIMITS_INITIAL_DELAY_SECONDS = 5
+LIMITS_POLL_INTERVAL_SECONDS = 60
+
+
+async def limits_scheduler() -> None:
+    """Periodically refreshes plan limits for providers that support free polling.
+    Currently polls Antigravity once every minute (agy /usage consumes 0 tokens).
+    Other providers can be hooked in by their respective agents.
+    """
+    await asyncio.sleep(LIMITS_INITIAL_DELAY_SECONDS)
+    while True:
+        try:
+            agy = PROVIDERS.get("agy")
+            if agy and agy.available:
+                await agy.probe_limits()
+        except Exception as exc:  # noqa: BLE001
+            print(f"limits_scheduler: {exc!r}", flush=True)
+        await asyncio.sleep(LIMITS_POLL_INTERVAL_SECONDS)
+
+
 async def create_report(request: Request):
     if not DEV_ENABLED:
         return JSONResponse({"detail": "Bug reports need dev chats, which are disabled on this runner"}, status_code=403)
@@ -1284,7 +1424,7 @@ class AuthMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and scope["path"] != "/health":
+        if scope["type"] == "http" and scope["path"] not in ("/health", "/hooks/pre-tool"):
             if not authorized(Request(scope)):
                 await JSONResponse({"detail": "Unauthorized"}, status_code=401)(scope, receive, send)
                 return
@@ -1296,8 +1436,10 @@ async def lifespan(app):
     load_chats()
     await mark_interrupted()
     scheduler = asyncio.create_task(report_scheduler())
+    limits_poller = asyncio.create_task(limits_scheduler())
     yield
     scheduler.cancel()
+    limits_poller.cancel()
 
 
 routes = [
@@ -1323,6 +1465,7 @@ routes = [
     Route("/chats/{chat_id}/stop", stop, methods=["POST"]),
     Route("/chats/{chat_id}/events", events, methods=["GET"]),
     Route("/chats/{chat_id}/attachments/{name}", read_attachment, methods=["GET"]),
+    Route("/hooks/pre-tool", hook_pre_tool, methods=["POST"]),
 ]
 
 app = AuthMiddleware(Starlette(routes=routes, lifespan=lifespan))

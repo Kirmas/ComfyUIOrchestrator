@@ -8,6 +8,7 @@ import { NightPanel } from "./NightPanel";
 import type {
   AgentChat as Chat,
   AgentLimits,
+  AgentLimitWindow,
   AgentChatKind,
   AgentEvent,
   AgentImageUpload,
@@ -33,6 +34,16 @@ const EFFORT_LABELS: Record<string, string> = { xhigh: "xhigh (Extra)", ultracod
 const LIMIT_LABELS: Record<string, TKey> = {
   five_hour: "agent.limits.fiveHour",
   seven_day: "agent.limits.sevenDay",
+  "gemini-weekly": "agent.limits.weekly",
+  "gemini-5h": "agent.limits.fiveHour",
+  "3p-weekly": "agent.limits.weekly",
+  "3p-5h": "agent.limits.fiveHour",
+  "gemini-argon-wtu-weekly": "agent.limits.argonWeekly",
+};
+const LIMIT_GROUP_LABELS: Record<string, TKey> = {
+  "Gemini Models": "agent.limits.groupGemini",
+  "Claude and GPT models": "agent.limits.group3p",
+  "Gemini 4 Argon": "agent.limits.groupArgon",
 };
 const SHOW_DONE_KEY = "comfy-orchestrator:agentShowDone";
 // The runner owns the list (and its order); these are just the names shown.
@@ -154,11 +165,16 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
   const createChat = async (kind: AgentChatKind, provider: AgentProviderInfo) => {
     try {
       const lastModel = localStorage.getItem(lastModelKey(provider.id));
-      const model = provider.models.some((m) => m.id === lastModel) ? lastModel! : undefined;
+      const model = provider.models.some((m) => m.id === lastModel)
+        ? lastModel!
+        : (provider.models.find((m) => lastModel?.startsWith(m.id))?.id ?? undefined);
+      const effectiveModelId = model ?? provider.default;
+      const modelInfo = provider.models.find((m) => m.id === effectiveModelId);
+      const modelEfforts = modelInfo?.efforts ?? provider.efforts;
       const lastMode = localStorage.getItem(lastModeKey(provider.id));
       const permissionMode = kind === "dev" && lastMode && provider.permission_modes.includes(lastMode) ? lastMode : undefined;
       const lastEffort = localStorage.getItem(lastEffortKey(provider.id));
-      const effort = lastEffort && provider.efforts.includes(lastEffort) ? lastEffort : undefined;
+      const effort = lastEffort && modelEfforts.includes(lastEffort) ? lastEffort : undefined;
       const fastMode = provider.fast_models.length > 0 && localStorage.getItem(lastFastKey(provider.id)) === "1";
       const chat = await agentChatsApi.create(kind, kind === "project" ? projectId : null, {
         provider: provider.id,
@@ -353,6 +369,18 @@ function LimitsPanel({ providers }: { providers: AgentProviderInfo[] }) {
     <div className="agent-limits">
       {shown.map((p) => {
         const reading = limits[p.id];
+        const groups: { name?: string; windows: AgentLimitWindow[] }[] = [];
+        if (reading?.windows) {
+          for (const w of reading.windows) {
+            const gName = w.group;
+            const last = groups[groups.length - 1];
+            if (last && last.name === gName) {
+              last.windows.push(w);
+            } else {
+              groups.push({ name: gName, windows: [w] });
+            }
+          }
+        }
         return (
           <div key={p.id} className="agent-limits-provider">
             <div className="agent-limits-head">
@@ -362,22 +390,41 @@ function LimitsPanel({ providers }: { providers: AgentProviderInfo[] }) {
               </button>
             </div>
             {!reading && <div className="node-cell-hint">{t("agent.limits.none")}</div>}
-            {reading?.windows.map((w) => {
-              const pct = w.utilization === null ? null : Math.round(w.utilization * 100);
-              return (
-                <div key={w.id} className="agent-limit-row">
-                  <div className="agent-limit-label">
-                    <span>{LIMIT_LABELS[w.id] ? t(LIMIT_LABELS[w.id]) : w.id}</span>
-                    <span className="node-cell-hint">
-                      {w.resets_at ? t("agent.limits.resets", { when: untilText(t, w.resets_at) }) : ""} · {pct === null ? "?" : `${pct}%`}
-                    </span>
+            {groups.map((grp, idx) => (
+              <div key={grp.name ?? idx} className={cx(grp.name && "agent-limit-group")}>
+                {grp.name && (
+                  <div className="agent-limit-group-header">
+                    {LIMIT_GROUP_LABELS[grp.name] ? t(LIMIT_GROUP_LABELS[grp.name]) : grp.name}
                   </div>
-                  <div className="agent-limit-bar">
-                    <div className={cx("agent-limit-fill", pct !== null && pct >= 90 && "hot")} style={{ width: `${pct ?? 0}%` }} />
-                  </div>
-                </div>
-              );
-            })}
+                )}
+                {grp.windows.map((w) => {
+                  const pct = w.disabled ? null : (w.utilization === null ? null : Math.round(w.utilization * 100));
+                  return (
+                    <div key={w.id} className={cx("agent-limit-row", w.disabled && "disabled")}>
+                      <div className="agent-limit-label">
+                        <span>{LIMIT_LABELS[w.id] ? t(LIMIT_LABELS[w.id]) : (w.label || w.id)}</span>
+                        <span className="node-cell-hint">
+                          {w.disabled ? (
+                            t("agent.limits.disabled")
+                          ) : (
+                            <>
+                              {w.resets_at ? `${t("agent.limits.resets", { when: untilText(t, w.resets_at) })} · ` : ""}
+                              {pct === null ? "?" : `${pct}%`}
+                            </>
+                          )}
+                        </span>
+                      </div>
+                      <div className="agent-limit-bar">
+                        <div
+                          className={cx("agent-limit-fill", !w.disabled && pct !== null && pct >= 90 && "hot")}
+                          style={{ width: `${w.disabled ? 0 : (pct ?? 0)}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
             {reading && <div className="node-cell-hint">{t("agent.limits.asOf", { ago: agoText(t, reading.updated_at) })}</div>}
           </div>
         );
@@ -515,6 +562,12 @@ function AskUserQuestionCard({
   );
 }
 
+function formatTokens(count: number | null | undefined): string {
+  if (!count) return "0";
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(count % 1_000_000 === 0 ? 0 : 1)}M`;
+  return `${Math.round(count / 1000)}k`;
+}
+
 function ChatView({
   chat,
   provider,
@@ -623,6 +676,36 @@ function ChatView({
     }
   };
 
+  const compact = async () => {
+    if (sending || running) return;
+    if (!confirm(t("agent.confirmCompact"))) return;
+    setSending(true);
+    try {
+      await agentChatsApi.send(chat.id, "/compact", []);
+      onChanged();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const lastResultEvent = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].type === "result") return events[i];
+    }
+    return null;
+  }, [events]);
+  const contextTokens = (lastResultEvent as any)?.context_tokens ?? chat.context_tokens;
+  const contextWindow = (lastResultEvent as any)?.context_window ?? chat.context_window;
+  const compactPct = contextTokens && contextWindow
+    ? Math.min(100, Math.round((contextTokens / contextWindow) * 100))
+    : 0;
+  const compactFillColor = compactPct >= 80 ? "rgba(229, 72, 77, 0.22)" : "rgba(74, 140, 247, 0.18)";
+  const compactStyle = compactPct > 0
+    ? { background: `linear-gradient(to right, ${compactFillColor} ${compactPct}%, var(--bg) ${compactPct}%)` }
+    : undefined;
+
   return (
     <>
       <div className="agent-header">
@@ -656,60 +739,78 @@ function ChatView({
             ))}
           </select>
         )}
-        {provider && provider.efforts.length > 0 && (
-          <select
-            className="agent-model"
-            value={chat.effort ?? ""}
-            title={t("agent.effortHint")}
-            onChange={async (e) => {
-              const effort = e.target.value;
-              localStorage.setItem(lastEffortKey(chat.provider ?? "claude"), effort);
-              await agentChatsApi.setEffort(chat.id, effort);
-              onChanged();
-            }}
-          >
-            <option value="">{t("agent.effort.default")}</option>
-            {provider.efforts.map((level) => (
-              <option key={level} value={level}>
-                {EFFORT_LABELS[level] ?? level}
-              </option>
-            ))}
-          </select>
-        )}
-        {provider && provider.fast_models.length > 0 && (
-          <button
-            className={cx("agent-done-toggle", chat.fast_mode && "active")}
-            disabled={!provider.fast_models.includes(chat.requested_model)}
-            title={provider.fast_models.includes(chat.requested_model) ? t("agent.fastHint") : t("agent.fastOnlyOn", { models: provider.fast_models.join(", ") })}
-            onClick={async () => {
-              const on = !chat.fast_mode;
-              localStorage.setItem(lastFastKey(chat.provider ?? "claude"), on ? "1" : "0");
-              await agentChatsApi.setFastMode(chat.id, on);
-              onChanged();
-            }}
-          >
-            ⚡ {t("agent.fast")}
-          </button>
-        )}
-        {provider && provider.models.length > 0 && (
-          <select
-            className="agent-model"
-            value={chat.requested_model}
-            title={chat.model ? t("agent.lastRanOn", { model: chat.model }) : t("agent.modelHint")}
-            onChange={async (e) => {
-              const model = e.target.value;
-              localStorage.setItem(lastModelKey(chat.provider ?? "claude"), model);
-              await agentChatsApi.setModel(chat.id, model);
-              onChanged();
-            }}
-          >
-            {provider.models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-          </select>
-        )}
+        {provider && (() => {
+          const effectiveRequestedModel = provider.models.some((m) => m.id === chat.requested_model)
+            ? chat.requested_model
+            : (provider.models.find((m) => chat.requested_model?.startsWith(m.id))?.id ?? chat.requested_model);
+          const selectedModel = provider.models.find((m) => m.id === effectiveRequestedModel);
+          const modelEfforts = selectedModel?.efforts ?? provider.efforts;
+          return (
+            <>
+              {modelEfforts.length > 0 && (
+                <select
+                  className="agent-model"
+                  value={chat.effort ?? ""}
+                  title={t("agent.effortHint")}
+                  onChange={async (e) => {
+                    const effort = e.target.value;
+                    localStorage.setItem(lastEffortKey(chat.provider ?? "claude"), effort);
+                    await agentChatsApi.setEffort(chat.id, effort);
+                    onChanged();
+                  }}
+                >
+                  <option value="">{t("agent.effort.default")}</option>
+                  {modelEfforts.map((level) => (
+                    <option key={level} value={level}>
+                      {EFFORT_LABELS[level] ?? level}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {provider.fast_models.length > 0 && (
+                <button
+                  className={cx("agent-done-toggle", chat.fast_mode && "active")}
+                  disabled={!provider.fast_models.includes(chat.requested_model)}
+                  title={provider.fast_models.includes(chat.requested_model) ? t(provider.id === "codex" ? "agent.fastHintCodex" : "agent.fastHint") : t("agent.fastOnlyOn", { models: provider.fast_models.join(", ") })}
+                  onClick={async () => {
+                    const on = !chat.fast_mode;
+                    localStorage.setItem(lastFastKey(chat.provider ?? "claude"), on ? "1" : "0");
+                    await agentChatsApi.setFastMode(chat.id, on);
+                    onChanged();
+                  }}
+                >
+                  ⚡ {t("agent.fast")}
+                </button>
+              )}
+              {provider.models.length > 0 && (
+                <select
+                  className="agent-model"
+                  value={effectiveRequestedModel}
+                  title={chat.model ? t("agent.lastRanOn", { model: chat.model }) : t("agent.modelHint")}
+                  onChange={async (e) => {
+                    const model = e.target.value;
+                    localStorage.setItem(lastModelKey(chat.provider ?? "claude"), model);
+                    await agentChatsApi.setModel(chat.id, model);
+                    const targetModel = provider.models.find((m) => m.id === model);
+                    const targetEfforts = targetModel?.efforts ?? provider.efforts;
+                    if (chat.effort && targetEfforts.length > 0 && !targetEfforts.includes(chat.effort)) {
+                      const newEffort = targetEfforts.includes("medium") ? "medium" : targetEfforts[0];
+                      localStorage.setItem(lastEffortKey(chat.provider ?? "claude"), newEffort);
+                      await agentChatsApi.setEffort(chat.id, newEffort);
+                    }
+                    onChanged();
+                  }}
+                >
+                  {provider.models.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </>
+          );
+        })()}
         <button
           className={cx("agent-done-toggle", chat.done && "active")}
           title={chat.done ? t("agent.undone") : t("agent.markDone")}
@@ -930,15 +1031,34 @@ function ChatView({
           }}
           rows={3}
         />
-        {running ? (
-          <button className="agent-stop" onClick={() => agentChatsApi.stop(chat.id).then(onChanged)}>
-            {t("agent.stop")}
-          </button>
-        ) : (
-          <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length) || sending}>
-            {t("agent.send")}
-          </button>
-        )}
+        <div className="agent-input-actions">
+          {chat.supports_compact && (
+            <button
+              type="button"
+              className={cx("agent-compact-btn", compactPct >= 80 && "hot")}
+              style={compactStyle}
+              title={t("agent.compactHint", {
+                used: formatTokens(contextTokens),
+                total: formatTokens(contextWindow),
+                pct: `${compactPct}%`,
+              })}
+              onClick={compact}
+              disabled={running || sending}
+            >
+              <span className="agent-compact-label">{t("agent.compact")}</span>
+              <span className="agent-compact-pct">{compactPct}%</span>
+            </button>
+          )}
+          {running ? (
+            <button className="agent-stop" onClick={() => agentChatsApi.stop(chat.id).then(onChanged)}>
+              {t("agent.stop")}
+            </button>
+          ) : (
+            <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length) || sending}>
+              {t("agent.send")}
+            </button>
+          )}
+        </div>
       </div>
     </>
   );

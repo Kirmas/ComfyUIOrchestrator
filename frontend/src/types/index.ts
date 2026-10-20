@@ -580,6 +580,9 @@ export interface AgentChat {
   permission_mode?: string;
   // Whether a message may carry pictures from the person's machine (dev only).
   accepts_images?: boolean;
+  supports_compact?: boolean;
+  context_tokens?: number | null;
+  context_window?: number | null;
   // Filed away by the person: hidden from the list unless "show done" is on.
   done?: boolean;
   created_at: number;
@@ -633,6 +636,7 @@ export interface AskUserQuestionInput {
 export interface AgentModel {
   id: string;
   label: string;
+  efforts?: string[];
 }
 
 // Which agent CLI answers a chat. The runner owns the list (providers.py):
@@ -649,6 +653,7 @@ export interface AgentProviderInfo {
   permission_modes: string[];
   // Project chats need a CLI that can be limited to the orchestrator's tools.
   supports_project: boolean;
+  supports_compact?: boolean;
   // Reasoning-effort levels the CLI takes (empty = no such knob) and the
   // models that have its faster-output mode (empty = no fast mode).
   efforts: string[];
@@ -661,6 +666,9 @@ export interface AgentLimitWindow {
   id: string;
   utilization: number | null;
   resets_at: number | null;
+  label?: string;
+  group?: string;
+  disabled?: boolean;
 }
 export interface AgentLimits {
   status: string | null;

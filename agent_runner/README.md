@@ -26,17 +26,35 @@ flags. A new CLI is one new class + a line in `PROVIDERS`.
 - `claude` -- the protocol described below; the only one that can ask the page
   (Allow / Deny), the only one with no shell in a project chat, and the only
   one a night report runs on.
-- `codex` -- `codex exec [resume <thread>] --json`, prompt on stdin. Headless:
-  the permission mode *is* the sandbox (`workspace` / `full` / `readOnly`, as
-  `-c sandbox_mode=...` + `approval_policy="never"`). Project chat: read-only
-  sandbox, `--ignore-user-config`, the orchestrator's MCP via `-c
-  mcp_servers.orchestrator.*` (token in env `ORCH_MCP_TOKEN`, tool approval
-  `approve`). The shell exists but can only read.
+- `codex` -- `codex app-server --stdio`, bidirectional JSON-RPC. One server
+  process per turn: initialize -> thread/start or thread/resume -> turn/start.
+  Existing `codex exec` session ids resume through the same durable rollouts.
+  Tool permission modes remain fixed (`workspace` / `full` / `readOnly`),
+  `approvalPolicy="never"`; changing mode applies to the next turn.
+  Structured questions ARE interactive: `item/tool/requestUserInput` becomes
+  the existing question card, and the answer endpoint returns a JSON-RPC
+  response keyed by Codex question ids. Request ids include the turn id so
+  replies from older turns cannot resolve a new question. stdin stays open
+  until turn/completed; Stop terminates the process group and cancels cards.
+  Unexpected server requests receive an explicit protocol error, never approval.
+  Project chats force read-only and use a separate `codex-home` per chat,
+  sharing auth, models cache and sessions via symlinks, but no personal config
+  or plugins/apps. Only the orchestrator MCP is configured (token in env
+  `ORCH_MCP_TOKEN`, tool approval `approve`). Read-only shell still exists;
+  this is not Claude's MCP-only tool isolation.
 - `agy` -- `agy -p=<prompt> --output-format stream-json [--conversation <id>]`.
-  Headless, a tool that needs permission is auto-denied (the final `result`
-  lists it as `denied_actions`; the transcript says so), so modes are
-  `edits` / `full` (`--dangerously-skip-permissions`) / `plan`. Quotas are per
-  model; a quota error ends the turn as `error` with the CLI's message.
+  Interactive questions (`ask_question`) and tool execution approvals are
+  handled live via a `PreToolUse` lifecycle hook bridge (`comfy_hook_bridge.py`
+  registered in `~/.gemini/config/hooks.json`). When the agent asks a structured
+  question or requires permission for shell commands in `edits` mode, the hook
+  routes the request to the runner's IPC endpoint (`/hooks/pre-tool`), rendering
+  the interactive question card or Allow / Deny buttons in the web UI.
+  Permission modes: `edits` (auto-allows file changes; asks on commands),
+  `auto`, `full` (approves tools without prompts; asks on questions), and
+  `plan` (read-only planning). Images are accepted and passed as attachment
+  file paths with instructions to inspect them via `read_file`. Quotas are
+  tracked per model, polled automatically in the background every 60 seconds
+  via `/usage` slash command (0 tokens), and probeable on-demand.
   Project chat: mode `edits`, run in one fixed folder
   (`<data dir>/agy-project`, MCP from its `.agents/mcp_config.json`). **Two
   one-time entries in `~/.gemini/antigravity-cli/settings.json` are the
@@ -51,14 +69,46 @@ and `record_limits` / `probe_limits` feeding `LimitsStore`
 (`<data dir>/limits.json`, `GET /limits`, `POST /limits/<provider>`). Claude
 reports plan usage in its stream (`rate_limit_event.unifiedWindows`:
 `five_hour` / `seven_day`, utilization 0..1), so every turn refreshes it and
-`probe_limits` is a 1-token Haiku turn. Codex and Antigravity don't implement
-any of the three yet; the page shows each control only when `describe()` says
-the provider has it.
+`probe_limits` is a 1-token Haiku turn.
 
-The CLIs have no system-prompt flag, so for codex/agy the dev prompt (plus
-"read CLAUDE.md") rides in the conversation's first message. Their session id
-is reported by the CLI on the first turn (`thread.started` / `init`) and
-stored as `session_id`; a turn that fails before that starts a fresh one.
+Antigravity:
+
+- Effort is passed as `--effort <level>` (`low`, `medium`, `high`, `xhigh`, `max`).
+  When an effort level is chosen, the model id's built-in suffix (`-low`/`-medium`/`-high`)
+  is stripped for `--model` so `agy` does not reject it as conflicting.
+- Fast mode is not supported (`supports_fast = False`): agy has no fast mode
+  flag (speed is determined by model selection like Flash vs Argon; `/fast` was
+  removed from agy).
+- Limits: `probe_limits` queries the `agy -p=/usage` slash command in plan mode
+  (0 inference tokens), parsing bucket remaining fractions into utilization and
+  ISO reset timestamps into epoch seconds. If a turn fails with a quota error
+  (429 / RESOURCE_EXHAUSTED / `Resets in ...`), `record_quota_error` records that
+  model window with utilization 1.0 and the parsed reset time.
+
+Codex (verified with CLI 0.163.0):
+
+- Effort is passed as `config.model_reasoning_effort` on thread start/resume.
+  The picker offers `low`, `medium`, `high`, `xhigh`, `max`: common catalog
+  levels for Sol, Astra and Luna. Auto leaves the CLI default/config in effect.
+- Fast sends `serviceTier="priority"`, off explicitly sends `"default"`.
+  All three models advertise priority; availability remains backend-controlled.
+- `account/rateLimits/updated` refreshes plan usage during turns. Refresh uses
+  `account/rateLimits/read` on an app-server without starting any model turn:
+  zero inference tokens. Missing windows/errors preserve the last reading.
+  `usedPercent / 100` becomes utilization; `windowDurationMins=300/10080`
+  maps to `five_hour/seven_day`, otherwise `primary/secondary` is retained.
+  Reset timestamps are Unix seconds; token usage is separate from plan usage.
+- The shared runner delegates protocol replies to `Provider.answer_request`;
+  Claude's original control_response format is unchanged. Question cards and
+  HTTP answer routes are reused, not parsed out of assistant text.
+
+References: [configuration](https://learn.chatgpt.com/docs/config-file/config-reference),
+[speed](https://learn.chatgpt.com/docs/agent-configuration/speed),
+[app-server](https://learn.chatgpt.com/docs/app-server).
+
+Codex receives the profile through `developerInstructions` on every start/resume.
+Antigravity receives it in the first message. Session ids are stored in meta;
+Codex saves the id only after thread start/resume succeeds.
 Binaries are found via `CLAUDE_BIN` / `CODEX_BIN` / `AGY_BIN`, else PATH, else
 `~/.local/bin`. Dev chats share one working tree whatever their provider, so
 still only one runs at a time.
@@ -153,3 +203,14 @@ account it needs separate usage credits and every turn would fail.
 
 Changing `runner.py` needs `systemctl --user restart comfy-agent-runner`
 (deploy.sh does not touch it); that interrupts any running turn.
+
+Protocol regression checks (no model calls):
+
+    backend/.venv/bin/python -m unittest discover -s agent_runner/tests
+    backend/.venv/bin/python -m pyflakes agent_runner/*.py agent_runner/tests/*.py
+
+The app-server migration was also tested against CLI 0.163.0 with real
+read-only turns: question -> HTTP answer endpoint -> model continuation,
+resume remembering the answer, Stop while a question is pending, and resume
+of a pre-migration `codex exec` rollout. Limits refresh was tested without
+starting a model turn.
