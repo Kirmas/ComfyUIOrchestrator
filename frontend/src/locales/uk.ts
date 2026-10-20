@@ -277,6 +277,13 @@ export const uk: Record<TKey, string> = {
   "backends.apiKeyPlaceholder": "API-ключ",
   "backends.dailyLimitPlaceholder": "ліміт на добу (порожньо = ∞)",
   "backends.add": "+ Додати бекенд",
+  "models.button": "моделі",
+  "models.hint": "На цьому ПК запускати інший файл моделі тієї ж родини й варіанту замість того, що у воркфлоу (напр. 9b → 4b). Кроки, CFG і LoRA не змінюються; base і distilled не змішуються.",
+  "models.title": "Заміна моделей",
+  "models.empty": "У лоадерах цього воркфлоу немає файлів моделей.",
+  "models.unreachable": "Не вдалося отримати моделі з цього ПК.",
+  "models.use": "→ використати",
+  "models.none": "(немає заміни)",
 
   // --- Settings: capability prompts -----------------------------------
   "caps.promptFields": "Поля промтів",

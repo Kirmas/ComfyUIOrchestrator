@@ -24,6 +24,22 @@ export interface Backend {
   created_at: string;
 }
 
+/** One model file installed on a ComfyUI, with what the backend read off its name. */
+export interface ModelFileInfo {
+  name: string;
+  family: string;
+  variant: "base" | "distilled" | "default";
+  size: string | null;
+  quant: string;
+}
+/** What a (PC, workflow) model override picks from: the model files the workflow's
+ * loaders name (`used`, with their input key) vs those installed on the PC
+ * (`installed`, input key -> files). */
+export interface CapabilityModels {
+  used: (ModelFileInfo & { key: string })[];
+  installed: Record<string, ModelFileInfo[]>;
+}
+
 export interface Capability {
   id: string;
   backend_id: string;

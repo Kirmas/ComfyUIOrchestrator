@@ -26,6 +26,7 @@ import websockets
 from PIL import Image
 
 from app.core.job_backend import AssetRef, CapacityInfo, JobStatus
+from app.core.model_overrides import apply_model_overrides
 from app.core.template_engine import build_workflow
 from app.core.workflow_analyzer import SAVE_IMAGE_CLASS_TYPES, SAVE_MESH_CLASS_TYPES
 
@@ -33,7 +34,10 @@ logger = logging.getLogger(__name__)
 
 
 class ComfyUIBackend:
-    def __init__(self, base_url: str, client_id: str | None = None) -> None:
+    def __init__(
+        self, base_url: str, client_id: str | None = None, model_overrides: dict[str, str] | None = None
+    ) -> None:
+        self.model_overrides = model_overrides or {}
         base_url = base_url.rstrip("/")
         if not base_url.startswith(("http://", "https://")):
             base_url = f"http://{base_url}"  # backends are entered as "host:port"; httpx requires an explicit scheme
@@ -57,6 +61,7 @@ class ComfyUIBackend:
                     resolved[field_name] = value
 
             workflow = build_workflow(workflow_json, param_mapping, resolved)
+            apply_model_overrides(workflow, self.model_overrides)
             resp = await client.post("/prompt", json={"prompt": workflow, "client_id": self.client_id})
             resp.raise_for_status()
             data = resp.json()
@@ -367,6 +372,21 @@ class ComfyUIBackend:
         except Exception as exc:
             logger.debug("ComfyUI backend %s unreachable while reading object_info: %s", self.base_url, exc)
         return found
+
+    # loader class -> the input key naming the file, for every loader whose
+    # file list an override may pick from (see core/model_overrides.py).
+    _MODEL_LOADERS = {"UNETLoader": "unet_name", "CheckpointLoaderSimple": "ckpt_name", "CLIPLoader": "clip_name", "VAELoader": "vae_name"}
+
+    async def fetch_model_lists(self) -> dict[str, list[str]]:
+        """input key (unet_name/ckpt_name/clip_name/vae_name) -> the file names
+        installed on this instance. Empty for a class that isn't there."""
+        info = await self.fetch_object_info(self._MODEL_LOADERS)
+        lists: dict[str, list[str]] = {}
+        for class_type, key in self._MODEL_LOADERS.items():
+            options = info.get(class_type, {}).get("input", {}).get("required", {}).get(key)
+            if options and isinstance(options[0], list):
+                lists[key] = [o for o in options[0] if isinstance(o, str)]
+        return lists
 
     async def heartbeat(self) -> dict:
         """Used by the worker's periodic heartbeat task. Returns raw /system_stats payload."""

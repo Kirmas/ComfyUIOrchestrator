@@ -280,6 +280,13 @@ export const en = {
   "backends.apiKeyPlaceholder": "API key",
   "backends.dailyLimitPlaceholder": "daily limit (blank = ∞)",
   "backends.add": "+ Add backend",
+  "models.button": "models",
+  "models.hint": "On this PC, run a different model file of the same family and variant instead of the one in the workflow (e.g. 9b → 4b). Steps, CFG and LoRA stay untouched; base and distilled are never mixed.",
+  "models.title": "Model overrides",
+  "models.empty": "No model files in this workflow's loaders.",
+  "models.unreachable": "Couldn't read models from this PC.",
+  "models.use": "→ use",
+  "models.none": "(no replacement)",
 
   // --- Settings: capability prompts -----------------------------------
   "caps.promptFields": "Prompt fields",

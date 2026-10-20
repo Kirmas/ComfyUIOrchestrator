@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { assetsApi, backendsApi, capabilitiesApi, nodeTemplatesApi, projectsApi, systemApi } from "../api/endpoints";
 import { NodeTypeDescription } from "./NodeTypeDescription";
+import { ModelOverridesModal } from "./ModelOverridesModal";
 import type {
   Backend,
   Capability,
@@ -1166,6 +1167,7 @@ function NodeTypeCard({
   const t = useT();
   const backendName = (id: string) => backends.find((b) => b.id === id)?.name ?? id;
   const [promptsFor, setPromptsFor] = useState<Capability | null>(null);
+  const [modelsFor, setModelsFor] = useState<Capability | null>(null);
   // Single "+ Add instance" entry point: pick any not-yet-attached backend
   // first, then branch by its kind -- comfyui hands off to the existing
   // NodeTypeWizard (workflow upload + field mapping), api_provider to the
@@ -1209,7 +1211,7 @@ function NodeTypeCard({
   const doCopy = async (sourceId: string) => {
     const source = capabilities.find((c) => c.id === sourceId);
     if (!source || !comfyBackendId) return;
-    const { prompt_leader_id: _drop, ...cfg } = source.config as Record<string, unknown>;
+    const { prompt_leader_id: _drop, model_overrides: _drop2, ...cfg } = source.config as Record<string, unknown>;
     await capabilitiesApi.create({
       backend_id: comfyBackendId,
       node_type_slug: template.node_type_slug,
@@ -1273,6 +1275,11 @@ function NodeTypeCard({
                       {c.config.prompt_leader_id ? t("nodetype.promptsLinked") : t("nodetype.prompts")}
                     </button>
                     <PromptLinkControl capability={c} siblings={capabilities} backendName={backendName} reload={reloadCapabilities} />
+                    <button onClick={() => setModelsFor(c)} title={t("models.hint")}>
+                      {t("models.button")}
+                      {Object.keys((c.config.model_overrides as object) ?? {}).length > 0 &&
+                        ` (${Object.keys(c.config.model_overrides as object).length})`}
+                    </button>
                   </>
                 )}
                 <button onClick={() => tryDelete(() => capabilitiesApi.remove(c.id), reloadCapabilities)}>{t("common.deleteLower")}</button>
@@ -1281,6 +1288,14 @@ function NodeTypeCard({
           ))}
         </tbody>
       </table>
+
+      {modelsFor && (
+        <ModelOverridesModal
+          capability={modelsFor}
+          onClose={() => setModelsFor(null)}
+          onSaved={reloadCapabilities}
+        />
+      )}
 
       {promptsFor &&
         (() => {

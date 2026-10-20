@@ -125,7 +125,7 @@ def _instantiate(backend: Backend, capability: Capability) -> JobBackend | None:
     if capability.execution_type == ExecutionType.comfyui_workflow:
         if not backend.base_url:
             return None
-        return ComfyUIBackend(base_url=backend.base_url)
+        return ComfyUIBackend(base_url=backend.base_url, model_overrides=capability.config.get("model_overrides"))
     if capability.execution_type == ExecutionType.api_call:
         if not backend.provider or not backend.api_key:
             return None

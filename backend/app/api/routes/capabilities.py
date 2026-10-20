@@ -4,9 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.comfyui_backend import ComfyUIBackend
+from app.core.model_overrides import describe_models, validate_overrides, workflow_model_files
 from app.core.workflow_analyzer import find_editable_text_fields
 from app.db.base import get_db
-from app.db.models import Capability, NodeTemplate
+from app.db.models import Backend, Capability, NodeTemplate
 from app.schemas.schemas import (
     CapabilityCreate,
     CapabilityPromptLink,
@@ -109,6 +111,44 @@ async def update_capability(capability_id: uuid.UUID, payload: CapabilityUpdate,
         raise HTTPException(404, "Capability not found")
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(capability, field, value)
+    await db.commit()
+    await db.refresh(capability)
+    return capability
+
+
+@router.get("/{capability_id}/models")
+async def capability_models(capability_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """What a model override on this (PC, workflow) can pick from: `used` are the
+    model files this workflow's loaders name, `installed` those on the PC
+    (input key -> files). Both carry the family/variant/size read off the name."""
+    capability = await db.get(Capability, capability_id)
+    backend = await db.get(Backend, capability.backend_id) if capability else None
+    if not capability or not backend or not backend.base_url:
+        raise HTTPException(404, "Capability not found or its backend has no URL")
+    workflow = capability.config.get("workflow_json")
+    used = workflow_model_files(workflow) if isinstance(workflow, dict) else []
+    installed = await ComfyUIBackend(backend.base_url).fetch_model_lists()
+    return {
+        "used": [{"key": key, **describe_models([name])[0]} for key, name in used],
+        "installed": {key: describe_models(names) for key, names in installed.items()},
+    }
+
+
+@router.put("/{capability_id}/model-overrides", response_model=CapabilityRead)
+async def set_model_overrides(capability_id: uuid.UUID, payload: dict[str, str], db: AsyncSession = Depends(get_db)):
+    """Replace this capability's {workflow file -> file on this PC} map. Only
+    swaps inside one family and variant are accepted (core/model_overrides.py)."""
+    capability = await db.get(Capability, capability_id)
+    if not capability:
+        raise HTTPException(404, "Capability not found")
+    try:
+        validate_overrides(payload)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    config = {k: v for k, v in capability.config.items() if k != "model_overrides"}
+    if payload:
+        config["model_overrides"] = payload
+    capability.config = config
     await db.commit()
     await db.refresh(capability)
     return capability

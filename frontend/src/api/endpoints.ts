@@ -8,6 +8,7 @@ import type {
   Annotation,
   Asset,
   Backend,
+  CapabilityModels,
   Board,
   BoardItem,
   BoardItemKind,
@@ -67,6 +68,11 @@ export const capabilitiesApi = {
   // cell reads at generation time, see CLAUDE.md's MCP section.
   updateTextField: (id: string, data: { node_id: string; input_key: string; value: string }) =>
     api.patch<Capability>(`/api/capabilities/${id}/text-fields`, data),
+  // What an override can pick from (workflow's own model files vs the PC's installed ones)
+  models: (id: string) => api.get<CapabilityModels>(`/api/capabilities/${id}/models`),
+  // Replaces the whole {workflow file -> file on this PC} map; 422 if a pair crosses family/variant.
+  setModelOverrides: (id: string, overrides: Record<string, string>) =>
+    api.put<Capability>(`/api/capabilities/${id}/model-overrides`, overrides),
   setPromptLink: (id: string, leaderId: string | null) =>
     api.patch<Capability>(`/api/capabilities/${id}/prompt-link`, { leader_id: leaderId }),
 };
