@@ -1,6 +1,7 @@
 # Agent runner
 
-Hosts Claude Code CLI chat sessions for the orchestrator's **Agent** tab.
+Hosts agent-CLI chat sessions (Claude Code, Codex, Antigravity) for the
+orchestrator's **Agent** tab.
 The orchestrator (`backend/app/api/routes/agent_chats.py`) only proxies to it.
 
 ## Why a separate process
@@ -12,6 +13,35 @@ The orchestrator (`backend/app/api/routes/agent_chats.py`) only proxies to it.
 - A chat survives the orchestrator restarting: the browser's `EventSource`
   reconnects through the proxy with `Last-Event-ID` and continues from the
   runner's per-chat event sequence.
+
+## Providers (`providers.py`)
+
+One `Provider` class per CLI -- the runner owns what is the same (transcript,
+status, Stop, SSE, one process per turn), the class owns what differs: argv,
+how the message reaches the process, how its output lines become transcript
+events, and the model / permission-mode lists the page shows. A profile says
+what a chat needs in neutral terms (`TurnSpec`), the provider turns it into
+flags. A new CLI is one new class + a line in `PROVIDERS`.
+
+- `claude` -- the protocol described below; the only one that can ask the page
+  (Allow / Deny) and the only one a project chat or a night report runs on
+  (they need to be limited to the orchestrator's MCP tools).
+- `codex` -- `codex exec [resume <thread>] --json`, prompt on stdin. Headless:
+  the permission mode *is* the sandbox (`workspace` / `full` / `readOnly`, as
+  `-c sandbox_mode=...` + `approval_policy="never"`).
+- `agy` -- `agy -p=<prompt> --output-format stream-json [--conversation <id>]`.
+  Headless, a tool that needs permission is auto-denied (the final `result`
+  lists it as `denied_actions`; the transcript says so), so modes are
+  `edits` / `full` (`--dangerously-skip-permissions`) / `plan`. Quotas are per
+  model; a quota error ends the turn as `error` with the CLI's message.
+
+The CLIs have no system-prompt flag, so for codex/agy the dev prompt (plus
+"read CLAUDE.md") rides in the conversation's first message. Their session id
+is reported by the CLI on the first turn (`thread.started` / `init`) and
+stored as `session_id`; a turn that fails before that starts a fresh one.
+Binaries are found via `CLAUDE_BIN` / `CODEX_BIN` / `AGY_BIN`, else PATH, else
+`~/.local/bin`. Dev chats share one working tree whatever their provider, so
+still only one runs at a time.
 
 ## How a chat works
 

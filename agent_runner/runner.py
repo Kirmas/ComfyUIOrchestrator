@@ -59,6 +59,7 @@ from pathlib import Path
 
 import night as night_ops
 from night import NightState
+from providers import DEFAULT_PROVIDER, IMAGE_TYPES, PROVIDERS, TurnSpec, provider_of, send_line, snippet
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -68,15 +69,11 @@ from urllib.request import Request as UrlRequest, urlopen
 
 DATA_DIR = Path(os.environ.get("RUNNER_DATA_DIR", Path.home() / ".local/share/comfy-agent-runner"))
 CHATS_DIR = DATA_DIR / "chats"
-CLAUDE_BIN = os.environ.get("CLAUDE_BIN") or shutil.which("claude") or str(Path.home() / ".local/bin/claude")
 # Accepted bearer tokens, comma separated. The orchestrator authenticates with
 # its own API_TOKEN, so one runner can serve both the prod and the dev
 # instance by listing both tokens.
 TOKENS = {t.strip() for t in os.environ.get("RUNNER_TOKENS", "").split(",") if t.strip()}
 
-# A tool result or tool input can be megabytes (a recipe read, a workflow
-# JSON). The transcript is for a person to skim, so it keeps a prefix.
-MAX_SNIPPET = 4000
 KEEPALIVE_SECONDS = 15
 KILL_GRACE_SECONDS = 5
 
@@ -145,42 +142,9 @@ REPORT_DISALLOWED = [
 ]
 night = NightState(DATA_DIR / "night.json")
 
-# What a chat can run on: model *families*, as the CLI's own aliases, which it
-# resolves to the newest model of that family. A CLI update therefore brings a
-# new Sonnet/Opus/Haiku with no change here -- deliberately, the user wants
-# "low/mid/high", not to track version numbers. What actually answered is
-# still visible: the CLI reports the resolved id on every turn (meta "model").
-# The first entry is the default.
-MODELS = [
-    {"id": "opus", "label": "Opus"},
-    {"id": "sonnet", "label": "Sonnet"},
-    {"id": "haiku", "label": "Haiku"},
-]
-MODEL_IDS = {m["id"] for m in MODELS}
-DEFAULT_MODEL = MODELS[0]["id"]
-
-
-# How a dev chat's tool calls get approved (the CLI's --permission-mode), picked
-# per chat next to the model and switchable mid-turn. Project chats have none:
-# their only tools are pre-allowed MCP tools. A night report is always auto --
-# there is nobody to ask. The first entry is the default.
-PERMISSION_MODES = ["auto", "default", "acceptEdits"]
-
-
-def chat_permission_mode(meta: dict) -> str:
-    if meta.get("origin") == "agent":
-        return "auto"
-    mode = meta.get("permission_mode")
-    return mode if mode in PERMISSION_MODES else PERMISSION_MODES[0]
-
-
-def chat_model(meta: dict) -> str:
-    """The family a chat runs on. Chats created before the switch to aliases
-    stored an exact id ("claude-sonnet-5"); those map to their family."""
-    requested = meta.get("requested_model") or DEFAULT_MODEL
-    if requested in MODEL_IDS:
-        return requested
-    return next((m for m in MODEL_IDS if m in requested), DEFAULT_MODEL)
+# Models and permission modes belong to the provider (providers.py). Night
+# reports and chats from before providers existed run on Claude.
+DEFAULT_MODEL = PROVIDERS[DEFAULT_PROVIDER].default_model
 
 PROJECT_PROMPT = """\
 You are the project assistant embedded in ComfyUI Orchestrator, a tool for
@@ -296,6 +260,9 @@ class Chat:
         # Who started the turn in flight: "person" (the page) or "agent" (a
         # queued bug report). An agent turn has nobody to ask.
         self.turn_origin = "person"
+        # Scratch space for the provider while one turn runs (partial text
+        # being assembled, tool calls already announced...); reset per turn.
+        self.turn_state: dict = {}
 
     @property
     def work_dir(self) -> Path:
@@ -377,36 +344,13 @@ def public_meta(chat: Chat) -> dict:
     m.pop("api_url", None)
     m.pop("report_prompt", None)
     m["last_seq"] = chat.seq
-    m["requested_model"] = chat_model(chat.meta)
+    provider = provider_of(chat)
+    m["provider"] = provider.id
+    m["requested_model"] = provider.model_for(chat.meta)
     if m.get("kind") == "dev":
-        m["permission_mode"] = chat_permission_mode(chat.meta)
-    m["accepts_images"] = PROFILES[m["kind"]].accepts_images
+        m["permission_mode"] = provider.mode_for(chat.meta)
+    m["accepts_images"] = PROFILES[m["kind"]].accepts_images and provider.accepts_images
     return m
-
-
-def snippet(value) -> str:
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    return text if len(text) <= MAX_SNIPPET else text[:MAX_SNIPPET] + f"\n… ({len(text) - MAX_SNIPPET} more chars)"
-
-
-def tool_result_text(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for c in content:
-            if isinstance(c, dict) and c.get("type") == "text":
-                parts.append(c.get("text", ""))
-            elif isinstance(c, dict):
-                parts.append(f"[{c.get('type')}]")
-        return "\n".join(parts)
-    return json.dumps(content, ensure_ascii=False)
-
-
-def session_args(meta: dict) -> list[str]:
-    if meta.get("session_started"):
-        return ["--resume", meta["session_id"]]
-    return ["--session-id", meta["session_id"]]
 
 
 class Profile:
@@ -426,7 +370,8 @@ class Profile:
     def cwd(self, chat: Chat) -> Path:
         raise NotImplementedError
 
-    def args(self, chat: Chat) -> list[str]:
+    def spec(self, chat: Chat) -> TurnSpec:
+        """What this chat needs from its CLI, for the provider to translate."""
         raise NotImplementedError
 
     def check_can_run(self, chat: Chat) -> str | None:
@@ -453,37 +398,14 @@ class ProjectProfile(Profile):
         chat.work_dir.mkdir(exist_ok=True)
         return chat.work_dir
 
-    def args(self, chat):
+    def spec(self, chat):
         meta = chat.meta
-        mcp_config = {
-            "mcpServers": {
-                "orchestrator": {
-                    "type": "http",
-                    "url": meta["mcp_url"],
-                    "headers": {"Authorization": f"Bearer {meta['mcp_token']}"},
-                }
-            }
-        }
-        mcp_path = chat.dir / "mcp.json"
-        mcp_path.write_text(json.dumps(mcp_config))
-        mcp_path.chmod(0o600)
-        return [
-            # Exactly one built-in tool (AskUserQuestion) plus the MCP server
-            # below -- no Bash/Read/Edit/WebFetch/etc, and none of the user's
-            # own settings/CLAUDE.md/plugins leak into a project chat.
-            # AskUserQuestion always rides can_use_tool regardless of
-            # --allowedTools (that's how its answer gets delivered back, see
-            # ask_permission's is_question branch), hence
-            # --permission-prompt-tool stdio here; every other tool call this
-            # chat can make is already pre-allowed, so nothing else reaches
-            # that channel or gets parked on the page.
-            "--tools", "AskUserQuestion",
-            "--setting-sources", "",
-            "--strict-mcp-config", "--mcp-config", str(mcp_path),
-            "--allowedTools", "mcp__orchestrator", "AskUserQuestion",
-            "--permission-prompt-tool", "stdio",
-            "--append-system-prompt", PROJECT_PROMPT.format(project_name=meta["project_name"], project_id=meta["project_id"]),
-        ]
+        return TurnSpec(
+            system_prompt=PROJECT_PROMPT.format(project_name=meta["project_name"], project_id=meta["project_id"]),
+            isolated=True,
+            mcp_url=meta["mcp_url"],
+            mcp_token=meta["mcp_token"],
+        )
 
 
 class DevProfile(Profile):
@@ -500,26 +422,13 @@ class DevProfile(Profile):
     def cwd(self, chat):
         return Path(chat.meta["repo"])
 
-    def args(self, chat):
-        # The user's own settings, CLAUDE.md, memory and MCP servers load as
-        # they would in a terminal (no --setting-sources override). The
-        # permission mode is the chat's own pick (auto by default: the same
-        # safety classifier that guards the person's unattended terminal
-        # sessions); whatever the mode wants confirmed comes to the page --
-        # or, in a turn started by a bug report, is denied (auto_decide).
+    def spec(self, chat):
         prompt = DEV_PROMPT.format(repo=chat.meta["repo"])
-        extra: list[str] = []
-        if chat.meta.get("origin") == "agent":
-            prompt += "\n" + REPORT_PROMPT
-            # Git and deploying belong to the runner in night mode (night.py);
-            # the prompt says so, and these make it so.
-            extra = ["--max-budget-usd", REPORT_BUDGET_USD, "--disallowedTools", *REPORT_DISALLOWED]
-        return [
-            "--permission-mode", chat_permission_mode(chat.meta),
-            "--permission-prompt-tool", "stdio",
-            *extra,
-            "--append-system-prompt", prompt,
-        ]
+        if chat.meta.get("origin") != "agent":
+            return TurnSpec(system_prompt=prompt)
+        # Git and deploying belong to the runner in night mode (night.py); the
+        # prompt says so, and these make it so.
+        return TurnSpec(system_prompt=prompt + "\n" + REPORT_PROMPT, budget_usd=REPORT_BUDGET_USD, disallowed=REPORT_DISALLOWED)
 
     def auto_decide(self, chat, request):
         if chat.turn_origin == "agent":
@@ -539,67 +448,6 @@ class DevProfile(Profile):
 
 
 PROFILES: dict[str, Profile] = {p.kind: p for p in (ProjectProfile(), DevProfile())}
-
-
-def build_args(chat: Chat) -> list[str]:
-    return [
-        CLAUDE_BIN, "-p",
-        "--input-format", "stream-json",
-        "--output-format", "stream-json", "--verbose",
-        # Resuming with a different --model is fine: the session is the
-        # transcript, not the model, so switching mid-chat takes effect on
-        # the next turn.
-        "--model", chat_model(chat.meta),
-        *PROFILES[chat.meta["kind"]].args(chat),
-        *session_args(chat.meta),
-    ]
-
-
-async def handle_stream_event(chat: Chat, e: dict) -> None:
-    t = e.get("type")
-    if t == "system" and e.get("subtype") == "init":
-        if not chat.meta.get("session_started"):
-            chat.meta["session_started"] = True
-            chat.save_meta()
-        chat.meta["model"] = e.get("model")
-        # claude.ai's own connectors come along with the user's login in a dev
-        # chat and routinely don't connect headless; they're not ours to warn about.
-        failed = [
-            s.get("name") for s in e.get("mcp_servers", [])
-            if s.get("status") != "connected" and not str(s.get("name", "")).startswith("claude.ai ")
-        ]
-        if failed:
-            await chat.emit({"type": "error", "text": f"MCP server not connected: {', '.join(failed)}"})
-    elif t == "assistant":
-        for c in e.get("message", {}).get("content", []):
-            if c.get("type") == "text" and c.get("text", "").strip():
-                await chat.emit({"type": "text", "text": c["text"]})
-            elif c.get("type") == "tool_use":
-                await chat.emit({"type": "tool_use", "id": c.get("id"), "name": c.get("name"), "input": snippet(c.get("input"))})
-    elif t == "user":
-        content = e.get("message", {}).get("content", [])
-        if isinstance(content, list):
-            for c in content:
-                if isinstance(c, dict) and c.get("type") == "tool_result":
-                    await chat.emit({
-                        "type": "tool_result",
-                        "tool_use_id": c.get("tool_use_id"),
-                        "is_error": bool(c.get("is_error")),
-                        "content": snippet(tool_result_text(c.get("content"))),
-                    })
-    elif t == "result":
-        await chat.emit({
-            "type": "result",
-            "is_error": bool(e.get("is_error")),
-            "subtype": e.get("subtype"),
-            "duration_ms": e.get("duration_ms"),
-            "cost_usd": e.get("total_cost_usd"),
-            "num_turns": e.get("num_turns"),
-        })
-
-
-def send_line(proc: asyncio.subprocess.Process, obj: dict) -> None:
-    proc.stdin.write((json.dumps(obj) + "\n").encode())
 
 
 async def ask_permission(chat: Chat, proc: asyncio.subprocess.Process, req_id: str, request: dict) -> None:
@@ -674,13 +522,23 @@ async def ask_permission(chat: Chat, proc: asyncio.subprocess.Process, req_id: s
 
 async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
     chat.stop_requested = False
+    chat.turn_state = {}
     stderr_tail: list[str] = []
     asks: list[asyncio.Task] = []
     profile = PROFILES[chat.meta["kind"]]
+    provider = provider_of(chat)
+
+    def ask(req_id: str, request: dict) -> None:
+        asks.append(asyncio.create_task(ask_permission(chat, proc, req_id, request)))
+
     try:
+        spec = profile.spec(chat)
+        paths = [chat.attachments_dir / name for name in images]
+        launch = provider.launch(chat, spec, text, paths)
         proc = await asyncio.create_subprocess_exec(
-            *build_args(chat),
+            *launch.args,
             cwd=profile.cwd(chat),
+            env={**os.environ, **launch.env},
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -689,16 +547,7 @@ async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
             limit=64 * 1024 * 1024,
         )
         chat.proc = proc
-        send_line(proc, {"type": "control_request", "request_id": "init", "request": {"subtype": "initialize", "hooks": None}})
-        content: str | list = text
-        if images:
-            # Straight into the message as image blocks, the same as a paste
-            # into a terminal session -- no tool call needed to see them.
-            content = [image_block(chat, name) for name in images]
-            if text:
-                content.append({"type": "text", "text": text})
-        send_line(proc, {"type": "user", "message": {"role": "user", "content": content}})
-        await proc.stdin.drain()
+        await provider.begin(chat, proc, spec, text, paths)
 
         async def read_stderr():
             async for line in proc.stderr:
@@ -711,20 +560,7 @@ async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            kind = event.get("type")
-            if kind == "control_request":
-                req_id, request = event.get("request_id"), event.get("request") or {}
-                if request.get("subtype") == "can_use_tool":
-                    asks.append(asyncio.create_task(ask_permission(chat, proc, req_id, request)))
-                else:
-                    send_line(proc, {"type": "control_response", "response": {"subtype": "error", "request_id": req_id, "error": "not supported by the agent runner"}})
-                    await proc.stdin.drain()
-            elif kind == "result":
-                await handle_stream_event(chat, event)
-                # The turn is over; closing stdin is what lets the CLI exit.
-                proc.stdin.close()
-            else:
-                await handle_stream_event(chat, event)
+            await provider.on_event(chat, proc, event, ask)
         code = await proc.wait()
         await stderr_task
     except Exception as exc:  # noqa: BLE001 -- anything here must end the turn visibly
@@ -742,6 +578,10 @@ async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
 
     if chat.stop_requested:
         await chat.set_status("stopped")
+    elif chat.turn_state.get("failed"):
+        # The CLI exited cleanly but said the turn failed (quota, auth...);
+        # the provider already put the reason in the transcript.
+        await chat.set_status("error")
     elif code != 0:
         detail = "\n".join(s for s in stderr_tail if s) or f"exit code {code}"
         await chat.emit({"type": "error", "text": detail})
@@ -796,9 +636,16 @@ async def create_chat(request: Request):
     extra = profile.new_meta(body)
     if isinstance(extra, str):
         return JSONResponse({"detail": extra}, status_code=400)
-    model = body.get("model") or DEFAULT_MODEL
-    if model not in MODEL_IDS:
-        return JSONResponse({"detail": f"Unknown model: {model!r}"}, status_code=400)
+    provider = PROVIDERS.get(body.get("provider") or DEFAULT_PROVIDER)
+    if not provider:
+        return JSONResponse({"detail": f"Unknown provider: {body.get('provider')!r}"}, status_code=400)
+    if not provider.available:
+        return JSONResponse({"detail": f"{provider.label} is not installed on this machine"}, status_code=400)
+    if profile.kind == "project" and not provider.supports_project:
+        return JSONResponse({"detail": f"{provider.label} can't run project chats (it can't be limited to the orchestrator's tools)"}, status_code=400)
+    model = body.get("model") or provider.default_model
+    if model not in provider.model_ids:
+        return JSONResponse({"detail": f"Unknown model for {provider.label}: {model!r}"}, status_code=400)
     chat_id = uuid.uuid4().hex[:12]
     d = CHATS_DIR / chat_id
     d.mkdir(parents=True)
@@ -808,13 +655,15 @@ async def create_chat(request: Request):
         "kind": profile.kind,
         "title": body.get("title") or "",
         **extra,
+        "provider": provider.id,
         "requested_model": model,
-        **({"permission_mode": body["permission_mode"]} if profile.kind == "dev" and body.get("permission_mode") in PERMISSION_MODES else {}),
+        **({"permission_mode": body["permission_mode"]} if profile.kind == "dev" and body.get("permission_mode") in provider.permission_modes else {}),
         # This orchestrator instance's own base URL/token, so a finished turn
         # can POST itself to /api/push/notify (fire_push_notification above).
         "api_url": body.get("api_url"),
         "api_token": body.get("api_token"),
-        "session_id": str(uuid.uuid4()),
+        # Claude takes an id up front; the others report theirs on the first turn.
+        "session_id": provider.new_session_id(),
         "session_started": False,
         "status": "idle",
         "created_at": ts,
@@ -845,19 +694,20 @@ async def update_chat(request: Request):
     if done is not None and bool(done) != bool(chat.meta.get("done")):
         chat.meta["done"] = bool(done)
         chat.save_meta()
+    provider = provider_of(chat)
     model = body.get("model")
-    if model is not None and model != chat_model(chat.meta):
-        if model not in MODEL_IDS:
+    if model is not None and model != provider.model_for(chat.meta):
+        if model not in provider.model_ids:
             return JSONResponse({"detail": f"Unknown model: {model!r}"}, status_code=400)
         chat.meta["requested_model"] = model
         # In the transcript too, so it's clear which answers came from which.
         await chat.emit({"type": "model", "model": model})
         chat.save_meta()
     mode = body.get("permission_mode")
-    if mode is not None and chat.meta.get("kind") == "dev" and mode != chat_permission_mode(chat.meta):
+    if mode is not None and chat.meta.get("kind") == "dev" and mode != provider.mode_for(chat.meta):
         if chat.meta.get("origin") == "agent":
             return JSONResponse({"detail": "A night report always runs in auto mode"}, status_code=400)
-        if mode not in PERMISSION_MODES:
+        if mode not in provider.permission_modes:
             return JSONResponse({"detail": f"Unknown permission mode: {mode!r}"}, status_code=400)
         chat.meta["permission_mode"] = mode
         chat.save_meta()
@@ -865,14 +715,22 @@ async def update_chat(request: Request):
         # request); otherwise it applies from the next message.
         proc = chat.proc
         if proc and proc.returncode is None and proc.stdin and not proc.stdin.is_closing():
-            send_line(proc, {"type": "control_request", "request_id": f"mode-{uuid.uuid4().hex[:8]}", "request": {"subtype": "set_permission_mode", "mode": mode}})
-            await proc.stdin.drain()
+            await provider.switch_mode(proc, mode)
         await chat.emit({"type": "mode", "mode": mode})
     return JSONResponse(public_meta(chat))
 
 
 async def list_models(request: Request):
-    return JSONResponse({"models": MODELS, "default": DEFAULT_MODEL, "permission_modes": PERMISSION_MODES})
+    claude = PROVIDERS[DEFAULT_PROVIDER]
+    # models/default/permission_modes: the shape before providers existed
+    # (a page that hasn't reloaded yet still reads them).
+    return JSONResponse({
+        "providers": [p.describe() for p in PROVIDERS.values()],
+        "default_provider": DEFAULT_PROVIDER,
+        "models": claude.models,
+        "default": claude.default_model,
+        "permission_modes": claude.permission_modes,
+    })
 
 
 async def delete_chat(request: Request):
@@ -887,7 +745,6 @@ async def delete_chat(request: Request):
     return Response(status_code=204)
 
 
-IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
 # The API's own per-image cap is 5 MB; the page downscales long before that.
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_IMAGES = 10
@@ -923,13 +780,6 @@ def save_attachments(chat: Chat, images: list[tuple[str, bytes]]) -> list[str]:
         (chat.attachments_dir / name).write_bytes(data)
         names.append(name)
     return names
-
-
-def image_block(chat: Chat, name: str) -> dict:
-    ext = name.rsplit(".", 1)[1]
-    media_type = next(t for t, e in IMAGE_TYPES.items() if e == ext)
-    data = base64.b64encode((chat.attachments_dir / name).read_bytes()).decode()
-    return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
 
 
 async def read_attachment(request: Request):
@@ -1389,7 +1239,7 @@ async def events(request: Request):
 
 
 async def health(request: Request):
-    return JSONResponse({"ok": True, "claude_bin": CLAUDE_BIN, "chats": len(chats)})
+    return JSONResponse({"ok": True, "providers": {p.id: p.binary for p in PROVIDERS.values()}, "chats": len(chats)})
 
 
 class AuthMiddleware:

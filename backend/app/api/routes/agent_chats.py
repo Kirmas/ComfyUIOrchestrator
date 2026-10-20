@@ -37,6 +37,8 @@ class AgentChatCreate(BaseModel):
     # None = the runner's default. The runner owns the lists and validates.
     model: str | None = None
     permission_mode: str | None = None  # dev chats only
+    # Which agent CLI answers (claude | codex | agy); None = the runner's default.
+    provider: str | None = None
 
 
 class AgentChatUpdate(BaseModel):
@@ -103,7 +105,13 @@ async def create_chat(payload: AgentChatCreate, db: AsyncSession = Depends(get_d
     # api_url/api_token (this instance's own, same as the night self-check
     # below) let the runner call back POST /api/push/notify when a turn
     # finishes -- see runner.py's Chat.set_status.
-    body: dict = {"kind": payload.kind, "model": payload.model, "permission_mode": payload.permission_mode, **_self_check()}
+    body: dict = {
+        "kind": payload.kind,
+        "provider": payload.provider,
+        "model": payload.model,
+        "permission_mode": payload.permission_mode,
+        **_self_check(),
+    }
     if payload.kind == "project":
         if not payload.project_id:
             raise HTTPException(400, "A project chat needs project_id")

@@ -3,13 +3,15 @@ import { agentChatsApi } from "../api/endpoints";
 import { useT } from "../i18n";
 import type { TKey } from "../locales/en";
 import { renderMarkdown } from "../markdown";
+import { AgentProviderIcon } from "./AgentProviderIcon";
 import { NightPanel } from "./NightPanel";
 import type {
   AgentChat as Chat,
   AgentChatKind,
   AgentEvent,
   AgentImageUpload,
-  AgentModel,
+  AgentProviderId,
+  AgentProviderInfo,
   AskUserQuestionInput,
   AskUserQuestionItem,
   PermissionDecision,
@@ -18,20 +20,31 @@ import { cx } from "../utils";
 
 const LAST_CHAT_KEY = "comfy-orchestrator:lastAgentChat";
 // A new chat starts on whatever model was picked last, not always the default.
-const LAST_MODEL_KEY = "comfy-orchestrator:lastAgentModel";
+// Per provider: a Claude alias means nothing to Codex.
+const lastModelKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentModel:${provider}`;
 // Same for a dev chat's permission mode.
-const LAST_MODE_KEY = "comfy-orchestrator:lastAgentPermissionMode";
+const lastModeKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentPermissionMode:${provider}`;
 const SHOW_DONE_KEY = "comfy-orchestrator:agentShowDone";
 // The runner owns the list (and its order); these are just the names shown.
 const MODE_LABELS: Record<string, TKey> = {
   auto: "agent.mode.auto",
   default: "agent.mode.default",
   acceptEdits: "agent.mode.acceptEdits",
+  workspace: "agent.mode.workspace",
+  readOnly: "agent.mode.readOnly",
+  full: "agent.mode.full",
+  edits: "agent.mode.edits",
+  plan: "agent.mode.plan",
 };
 const MODE_HINTS: Record<string, TKey> = {
   auto: "agent.modeHint.auto",
   default: "agent.modeHint.default",
   acceptEdits: "agent.modeHint.acceptEdits",
+  workspace: "agent.modeHint.workspace",
+  readOnly: "agent.modeHint.readOnly",
+  full: "agent.modeHint.full",
+  edits: "agent.modeHint.edits",
+  plan: "agent.modeHint.plan",
 };
 const LIST_POLL_MS = 5000;
 const RECONNECT_MS = 3000;
@@ -92,19 +105,15 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
   const [chats, setChats] = useState<Chat[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => localStorage.getItem(LAST_CHAT_KEY));
   const [error, setError] = useState<string | null>(null);
-  const [models, setModels] = useState<AgentModel[]>([]);
-  const [permissionModes, setPermissionModes] = useState<string[]>([]);
+  const [providers, setProviders] = useState<AgentProviderInfo[]>([]);
   const [kinds, setKinds] = useState<AgentChatKind[]>([]);
   const [showDone, setShowDone] = useState(() => localStorage.getItem(SHOW_DONE_KEY) === "1");
 
   useEffect(() => {
     agentChatsApi
-      .models()
-      .then((r) => {
-        setModels(r.models);
-        setPermissionModes(r.permission_modes ?? []);
-      })
-      .catch(() => setModels([]));
+      .providers()
+      .then((r) => setProviders(r.providers ?? []))
+      .catch(() => setProviders([]));
     agentChatsApi
       .kinds()
       .then((r) => setKinds(r.kinds))
@@ -132,13 +141,13 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
     else localStorage.removeItem(LAST_CHAT_KEY);
   };
 
-  const createChat = async (kind: AgentChatKind) => {
+  const createChat = async (kind: AgentChatKind, provider: AgentProviderInfo) => {
     try {
-      const lastModel = localStorage.getItem(LAST_MODEL_KEY);
-      const model = models.some((m) => m.id === lastModel) ? lastModel! : undefined;
-      const lastMode = localStorage.getItem(LAST_MODE_KEY);
-      const mode = kind === "dev" && lastMode && permissionModes.includes(lastMode) ? lastMode : undefined;
-      const chat = await agentChatsApi.create(kind, kind === "project" ? projectId : null, model, mode);
+      const lastModel = localStorage.getItem(lastModelKey(provider.id));
+      const model = provider.models.some((m) => m.id === lastModel) ? lastModel! : undefined;
+      const lastMode = localStorage.getItem(lastModeKey(provider.id));
+      const permissionMode = kind === "dev" && lastMode && provider.permission_modes.includes(lastMode) ? lastMode : undefined;
+      const chat = await agentChatsApi.create(kind, kind === "project" ? projectId : null, { provider: provider.id, model, permissionMode });
       setChats((cs) => [chat, ...cs]);
       select(chat.id);
     } catch (err) {
@@ -163,6 +172,10 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
     localStorage.setItem(SHOW_DONE_KEY, on ? "1" : "0");
   };
 
+  // Project chats need a CLI that can be limited to the orchestrator's tools
+  // (today only Claude); dev chats can run on any installed one.
+  const projectProvider = providers.find((p) => p.available && p.supports_project);
+  const devProviders = providers.filter((p) => p.available);
   const allProjectChats = chats.filter((c) => c.kind === "project" && c.project_id === projectId);
   const allDevChats = chats.filter((c) => c.kind === "dev");
   // A remembered project chat from another project isn't in any visible list.
@@ -179,6 +192,7 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
       <span className={cx("agent-status-dot", `agent-status-${c.status}`)} title={statusLabel(t, c.status)} />
       <span className="agent-chat-title">
         {c.origin === "agent" && <span title={t("agent.fromAgent")}>🤖 </span>}
+        {c.kind === "dev" && <AgentProviderIcon provider={c.provider} size={13} />}{" "}
         {c.title || t("agent.untitled")}
       </span>
       <button
@@ -210,8 +224,8 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
         {error && <div className="error-text">{error}</div>}
         <div className="agent-section-head">
           <span>{t("agent.section.project")}</span>
-          {projectId && (
-            <button onClick={() => createChat("project")} title={t("agent.newProjectChat")}>
+          {projectId && projectProvider && (
+            <button onClick={() => createChat("project", projectProvider)} title={t("agent.newProjectChat")}>
               +
             </button>
           )}
@@ -227,9 +241,13 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
           <>
             <div className="agent-section-head">
               <span>{t("agent.section.dev")}</span>
-              <button onClick={() => createChat("dev")} title={t("agent.newDevChat")}>
-                +
-              </button>
+              <span className="agent-provider-buttons">
+                {devProviders.map((p) => (
+                  <button key={p.id} onClick={() => createChat("dev", p)} title={t("agent.newDevChatWith", { provider: p.label })}>
+                    <AgentProviderIcon provider={p.id} />
+                  </button>
+                ))}
+              </span>
             </div>
             <div className={cx("agent-chat-item", nightSelected && "active")} onClick={() => select(NIGHT_ID)}>
               <span className="agent-chat-title">🌙 {t("night.title")}</span>
@@ -251,8 +269,7 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
           <ChatView
             key={selected.id}
             chat={selected}
-            models={models}
-            permissionModes={permissionModes}
+            provider={providers.find((p) => p.id === (selected.provider ?? "claude"))}
             onBack={() => select(null)}
             onChanged={reload}
             onSetDone={(done) => setDone(selected, done)}
@@ -396,15 +413,13 @@ function AskUserQuestionCard({
 
 function ChatView({
   chat,
-  models,
-  permissionModes,
+  provider,
   onBack,
   onChanged,
   onSetDone,
 }: {
   chat: Chat;
-  models: AgentModel[];
-  permissionModes: string[];
+  provider: AgentProviderInfo | undefined;
   onBack: () => void;
   onChanged: () => void;
   onSetDone: (done: boolean) => void;
@@ -515,38 +530,41 @@ function ChatView({
         <span className="node-cell-hint">{statusLabel(t, status)}</span>
         {!connected && <span className="node-cell-hint">· {t("agent.reconnecting")}</span>}
         <span className="agent-header-controls">
-        {chat.kind === "dev" && chat.origin !== "agent" && permissionModes.length > 0 && (
+        <span title={provider?.label}>
+          <AgentProviderIcon provider={chat.provider} />
+        </span>
+        {chat.kind === "dev" && chat.origin !== "agent" && provider && provider.permission_modes.length > 0 && (
           <select
             className="agent-model"
             value={chat.permission_mode}
             title={MODE_HINTS[chat.permission_mode ?? ""] ? t(MODE_HINTS[chat.permission_mode ?? ""]) : undefined}
             onChange={async (e) => {
               const mode = e.target.value;
-              localStorage.setItem(LAST_MODE_KEY, mode);
+              localStorage.setItem(lastModeKey(chat.provider ?? "claude"), mode);
               await agentChatsApi.setPermissionMode(chat.id, mode);
               onChanged();
             }}
           >
-            {permissionModes.map((m) => (
+            {provider.permission_modes.map((m) => (
               <option key={m} value={m}>
                 {MODE_LABELS[m] ? t(MODE_LABELS[m]) : m}
               </option>
             ))}
           </select>
         )}
-        {models.length > 0 && (
+        {provider && provider.models.length > 0 && (
           <select
             className="agent-model"
             value={chat.requested_model}
             title={chat.model ? t("agent.lastRanOn", { model: chat.model }) : t("agent.modelHint")}
             onChange={async (e) => {
               const model = e.target.value;
-              localStorage.setItem(LAST_MODEL_KEY, model);
+              localStorage.setItem(lastModelKey(chat.provider ?? "claude"), model);
               await agentChatsApi.setModel(chat.id, model);
               onChanged();
             }}
           >
-            {models.map((m) => (
+            {provider.models.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.label}
               </option>
@@ -684,7 +702,7 @@ function ChatView({
             case "model":
               return (
                 <div key={e.seq} className="agent-meta">
-                  {t("agent.modelSwitched", { model: models.find((m) => m.id === e.model)?.label ?? e.model })}
+                  {t("agent.modelSwitched", { model: provider?.models.find((m) => m.id === e.model)?.label ?? e.model })}
                 </div>
               );
             case "mode":

@@ -3,7 +3,8 @@ import type {
   AgentChat,
   AgentChatKind,
   AgentImageUpload,
-  AgentModel,
+  AgentProviderId,
+  AgentProviderInfo,
   NightStatus,
   Annotation,
   Asset,
@@ -379,10 +380,16 @@ export const systemApi = {
 
 export const agentChatsApi = {
   list: () => api.get<AgentChat[]>("/api/agent-chats"),
-  models: () => api.get<{ models: AgentModel[]; default: string; permission_modes: string[] }>("/api/agent-chats/models"),
+  providers: () => api.get<{ providers: AgentProviderInfo[] }>("/api/agent-chats/models"),
   kinds: () => api.get<{ kinds: AgentChatKind[] }>("/api/agent-chats/kinds"),
-  create: (kind: AgentChatKind, projectId: string | null, model?: string, permissionMode?: string) =>
-    api.post<AgentChat>("/api/agent-chats", { kind, project_id: projectId, model, permission_mode: permissionMode }),
+  create: (kind: AgentChatKind, projectId: string | null, opts: { provider?: AgentProviderId; model?: string; permissionMode?: string } = {}) =>
+    api.post<AgentChat>("/api/agent-chats", {
+      kind,
+      project_id: projectId,
+      provider: opts.provider,
+      model: opts.model,
+      permission_mode: opts.permissionMode,
+    }),
   setPermissionMode: (id: string, mode: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { permission_mode: mode }),
   decide: (id: string, requestId: string, decision: PermissionDecision) =>
     api.post<AgentChat>(`/api/agent-chats/${id}/permissions/${requestId}`, { decision }),

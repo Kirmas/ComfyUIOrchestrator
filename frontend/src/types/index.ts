@@ -569,6 +569,8 @@ export interface AgentChat {
   // CLI reported the last turn actually ran on.
   requested_model: string;
   model?: string;
+  // Absent on chats from before providers existed: those are Claude.
+  provider?: AgentProviderId;
   // Dev chats: how tool calls get approved -- auto (classifier), default
   // (ask for everything not allowlisted) or acceptEdits.
   permission_mode?: string;
@@ -627,6 +629,22 @@ export interface AskUserQuestionInput {
 export interface AgentModel {
   id: string;
   label: string;
+}
+
+// Which agent CLI answers a chat. The runner owns the list (providers.py):
+// each has its own models and, for dev chats, its own permission modes.
+export type AgentProviderId = "claude" | "codex" | "agy";
+
+export interface AgentProviderInfo {
+  id: AgentProviderId;
+  label: string;
+  // Installed on the runner's machine.
+  available: boolean;
+  models: AgentModel[];
+  default: string;
+  permission_modes: string[];
+  // Project chats need a CLI that can be limited to the orchestrator's tools.
+  supports_project: boolean;
 }
 
 // Night mode (agent_runner/night.py): one session per night, decided as a

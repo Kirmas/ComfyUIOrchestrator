@@ -3049,6 +3049,23 @@ th, td {
   font-size: 12px;
 }
 
+.agent-provider-icon {
+  display: inline-flex;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+.agent-provider-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.agent-provider-buttons button {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 6px;
+}
+
 /* Model output: tables (markdown.ts) scroll sideways inside the bubble
    rather than stretching it, and code fences keep their own box. The design
    doc (.markdown-body) renders the same markdown the same way. */
