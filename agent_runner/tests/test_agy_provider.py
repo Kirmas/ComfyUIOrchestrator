@@ -1,4 +1,5 @@
 """Tests for Antigravity provider (effort, fast mode, quotas and limits)."""
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -207,6 +208,32 @@ class AgyOnEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(launch.env["COMFY_CHAT_ID"], "chat-123")
         self.assertEqual(launch.env["COMFY_PERMISSION_MODE"], "plan")
         self.assertIn("COMFY_AGENT_RUNNER_IPC", launch.env)
+
+    def test_project_chat_launches_in_project_mode(self):
+        provider = providers.AgyProvider()
+        chat = SimpleNamespace(id="chat-p", meta={"provider": "agy", "requested_model": "gemini-3.8-flash"},
+                               turn_state={}, emit=AsyncMock())
+        spec = providers.TurnSpec("sys", isolated=True)
+        with patch.object(provider, "_check_project_setup"):
+            launch = provider.launch(chat, spec, "hi", [])
+        self.assertEqual(launch.env["COMFY_PERMISSION_MODE"], "project")
+
+    def test_bridge_refuses_commands_in_project_mode(self):
+        import subprocess
+        def decide(tool):
+            env = {"COMFY_AGENT_RUNNER_IPC": "http://127.0.0.1:1/none", "COMFY_CHAT_ID": "c",
+                   "COMFY_PERMISSION_MODE": "project", "PATH": "/usr/bin:/bin"}
+            out = subprocess.run([sys.executable, str(providers.BRIDGE_SCRIPT)], env=env, text=True,
+                                 input=json.dumps({"toolCall": {"name": tool, "args": {}}}),
+                                 capture_output=True, timeout=10).stdout
+            return json.loads(out)["decision"]
+        self.assertEqual(decide("run_command"), "deny")
+        self.assertEqual(decide("notebook_execution"), "deny")
+        self.assertEqual(decide("write_to_file"), "deny")
+        self.assertEqual(decide("replace_file_content"), "deny")
+        self.assertEqual(decide("read_file"), "allow")
+        self.assertEqual(decide("generate_image"), "allow")
+        self.assertEqual(decide("call_mcp_tool"), "allow")
 
     async def test_limits_scheduler_invokes_probe_limits(self):
         import runner

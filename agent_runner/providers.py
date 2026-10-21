@@ -1368,7 +1368,9 @@ class AgyProvider(Provider):
         if spec.isolated:
             self._check_project_setup(spec)
         self._ensure_hooks_setup()
-        mode = "edits" if spec.isolated else self.mode_for(chat.meta)
+        # A project chat is MCP-only: the hook bridge refuses commands outright
+        # ("project"), where a dev chat's "edits" would ask the person.
+        mode = "project" if spec.isolated else self.mode_for(chat.meta)
         model = self.model_for(chat.meta)
         effort = self.effort_for(chat.meta)
         if effort:

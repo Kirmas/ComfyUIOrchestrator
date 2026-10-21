@@ -96,7 +96,12 @@ flags. A new CLI is one new class + a line in `PROVIDERS`.
   file paths with instructions to inspect them via `read_file`. Quotas are
   tracked per model, polled automatically in the background every 60 seconds
   via `/usage` slash command (0 tokens), and probeable on-demand.
-  Project chat: mode `edits`, run in one fixed folder
+  Project chat: mode `project` -- like `edits`, except the hook bridge refuses
+  `run_command`/`notebook_execution` and file writes outright instead of
+  asking (they run as the runner's user, anywhere on disk; questions,
+  `generate_image`, reads and MCP are unaffected). Hooks are Antigravity's documented mechanism for
+  this (PreToolUse `decision: "deny"`), and they do fire under
+  `--dangerously-skip-permissions` on this version. Runs in one fixed folder
   (`<data dir>/agy-project`, MCP from its `.agents/mcp_config.json`). **Two
   one-time entries in `~/.gemini/antigravity-cli/settings.json` are the
   person's to add** (the runner won't edit an agent's permission settings

@@ -18,6 +18,16 @@ import urllib.error
 import urllib.request
 
 
+COMMAND_TOOLS = ("run_command", "notebook_execution")
+FILE_WRITE_TOOLS = (
+    "write_to_file",
+    "replace_file_content",
+    "sed_file",
+    "multi_replace_file_content",
+    "notebook_edit",
+)
+
+
 def respond(decision: str, reason: str | None = None) -> None:
     out: dict[str, str] = {"decision": decision}
     if reason:
@@ -74,15 +84,26 @@ def main() -> None:
         except Exception:
             respond("allow")
 
+    if mode == "project":
+        # Project chats work only through the orchestrator's MCP. Commands and
+        # file writes would run as the runner's own user, anywhere on disk
+        # (--dangerously-skip-permissions approves them), so they are refused
+        # here rather than offered to the person as Allow / Deny.
+        # ask_question (above), generate_image, reads and MCP are unaffected.
+        if tool_name in COMMAND_TOOLS:
+            respond(
+                "deny",
+                "Project chats have no shell. Read tool outputs with read_file and work from them directly.",
+            )
+        if tool_name in FILE_WRITE_TOOLS:
+            respond(
+                "deny",
+                "Project chats can't write files. Keep notes in your reply; project state lives in the orchestrator (MCP).",
+            )
+        respond("allow")
+
     if mode == "plan":
-        if tool_name in (
-            "run_command",
-            "write_to_file",
-            "replace_file_content",
-            "sed_file",
-            "multi_replace_file_content",
-            "notebook_edit",
-        ):
+        if tool_name in ("run_command", *FILE_WRITE_TOOLS):
             respond(
                 "deny",
                 "Chat is in Plan mode. File modifications and command execution are disabled.",
