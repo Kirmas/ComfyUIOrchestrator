@@ -670,7 +670,17 @@ def authorized(request: Request) -> bool:
 
 
 def get_chat(request: Request) -> Chat | None:
-    return chats.get(request.path_params["chat_id"])
+    cid = request.path_params.get("chat_id", "")
+    chat = chats.get(cid)
+    if chat:
+        return chat
+    # Resolve 36-char session UUID (Antigravity conversation_id or other CLI session IDs)
+    if re.fullmatch(r"[0-9a-fA-F-]{36}", cid):
+        cid_lower = cid.lower()
+        for c in chats.values():
+            if (c.meta.get("session_id") or "").lower() == cid_lower:
+                return c
+    return None
 
 
 async def list_chats(request: Request):

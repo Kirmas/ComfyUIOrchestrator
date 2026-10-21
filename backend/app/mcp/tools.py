@@ -721,8 +721,8 @@ async def show_in_chat(chat_id: str, asset_id: str, caption: str = "") -> dict:
     gives images to YOU for inspection. No base64 or public URL is needed.
     Does not generate, upload, move, delete or modify the original asset.
     """
-    if not re.fullmatch(r"[0-9a-f]{12}", chat_id):
-        raise ValueError("Use the current Agent chat_id from your session instructions")
+    if not re.fullmatch(r"[0-9a-f]{12}|[0-9a-fA-F-]{36}", chat_id):
+        raise ValueError("Use the current Agent chat_id or session UUID from your session instructions")
     return await _post(f"/api/agent-chats/{chat_id}/media", {"asset_id": asset_id, "caption": caption})
 
 

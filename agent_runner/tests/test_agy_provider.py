@@ -343,5 +343,84 @@ class AgyOnEventTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(chat.meta["generated_images"]), 1)
             self.assertTrue(any(c.args[0]["type"] == "image" for c in chat.emit.call_args_list))
 
+    def test_prompt_for_injects_media_context(self):
+        spec = providers.TurnSpec("system_prompt", isolated=True)
+        # Resumed turn
+        chat = SimpleNamespace(
+            id="chat12345678",
+            meta={"provider": "agy", "session_started": True, "session_id": "4a5ae7bf-b508-457c-9097-6417070f64fd"},
+        )
+        p1 = self.provider.prompt_for(chat, spec, "hello")
+        self.assertIn("chat12345678", p1)
+        self.assertIn("show_in_chat", p1)
+        self.assertIn("4a5ae7bf-b508-457c-9097-6417070f64fd", p1)
+
+        # Initial turn
+        chat.meta["session_started"] = False
+        p2 = self.provider.prompt_for(chat, spec, "hello")
+        self.assertIn("system_prompt", p2)
+        self.assertIn("chat12345678", p2)
+        self.assertIn("show_in_chat", p2)
+
+    async def test_get_chat_resolves_session_uuid(self):
+        import runner
+        from starlette.requests import Request
+        session = "4a5ae7bf-b508-457c-9097-6417070f64fd"
+        chat = SimpleNamespace(id="bda98e35c758", meta={"provider": "agy", "session_id": session})
+        with patch.dict(runner.chats, {chat.id: chat}):
+            # Resolve by 12-char chat_id
+            req1 = Request({"type": "http", "path_params": {"chat_id": chat.id}})
+            self.assertEqual(runner.get_chat(req1), chat)
+
+            # Resolve by 36-char session UUID
+            req2 = Request({"type": "http", "path_params": {"chat_id": session}})
+            self.assertEqual(runner.get_chat(req2), chat)
+
+            # Case insensitivity for UUID
+            req2_upper = Request({"type": "http", "path_params": {"chat_id": session.upper()}})
+            self.assertEqual(runner.get_chat(req2_upper), chat)
+
+            # Unknown UUID returns None
+            req3 = Request({"type": "http", "path_params": {"chat_id": "00000000-0000-0000-0000-000000000000"}})
+            self.assertIsNone(runner.get_chat(req3))
+
+            # Malformed string returns None
+            req4 = Request({"type": "http", "path_params": {"chat_id": "random_junk"}})
+            self.assertIsNone(runner.get_chat(req4))
+
+    async def test_attach_media_with_session_uuid(self):
+        import runner
+        from starlette.requests import Request
+        session = "4a5ae7bf-b508-457c-9097-6417070f64fd"
+        chat = SimpleNamespace(
+            id="bda98e35c758",
+            meta={"provider": "agy", "session_id": session},
+            emit=AsyncMock(),
+            save_meta=Mock(),
+        )
+        with patch.dict(runner.chats, {chat.id: chat}):
+            req = Request({
+                "type": "http",
+                "method": "POST",
+                "path_params": {"chat_id": session},
+            })
+            async def mock_json():
+                return {
+                    "asset_id": "e2db9acf-6cdf-484b-9bd8-fc609bef3422",
+                    "mime_type": "image/png",
+                    "name": "dress.png",
+                    "caption": "Test",
+                }
+            req.json = mock_json
+            resp = await runner.attach_media(req)
+            self.assertEqual(resp.status_code, 200)
+            chat.emit.assert_called_once_with({
+                "type": "media",
+                "asset_id": "e2db9acf-6cdf-484b-9bd8-fc609bef3422",
+                "mime_type": "image/png",
+                "name": "dress.png",
+                "caption": "Test",
+            })
+
 
 

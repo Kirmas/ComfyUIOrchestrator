@@ -1271,10 +1271,14 @@ class AgyProvider(Provider):
             pass
 
     def prompt_for(self, chat, spec: TurnSpec, text: str) -> str:
+        sess_id = chat.meta.get("session_id")
+        id_part = f'chat_id="{chat.id}"' + (f' or session_id="{sess_id}"' if sess_id else '')
+        media_context = (f"Current Orchestrator chat_id: {chat.id}. To show an existing asset to the person, "
+                         f"use MCP show_in_chat({id_part}, asset_id=<asset id>).")
         if chat.meta.get("session_started"):
-            return text
+            return f"{text}\n\n{media_context}"
         return (
-            f"{spec.system_prompt}\n"
+            f"{spec.system_prompt}\n{media_context}\n"
             "When you need clarification or a decision from the user, use the ask_question tool. "
             "If an action is refused or denied, explain clearly and proceed without that action."
             + ("" if spec.isolated else " Read CLAUDE.md in the repo root first.")

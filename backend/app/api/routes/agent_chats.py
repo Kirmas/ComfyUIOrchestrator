@@ -202,8 +202,8 @@ async def attach_media(chat_id: str, payload: AgentMediaAttach, db: AsyncSession
     Only asset ids/metadata cross the runner boundary; files remain in storage
     and the browser uses normal authenticated asset routes, including ranges.
     """
-    if not re.fullmatch(r"[0-9a-f]{12}", chat_id):
-        raise HTTPException(400, "Invalid chat id")
+    if not re.fullmatch(r"[0-9a-f]{12}|[0-9a-fA-F-]{36}", chat_id):
+        raise HTTPException(400, "Invalid chat id or session UUID")
     asset = await db.get(Asset, payload.asset_id)
     if not asset:
         raise HTTPException(404, "Asset not found")
