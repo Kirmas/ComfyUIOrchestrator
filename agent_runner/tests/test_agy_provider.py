@@ -3,7 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import providers
@@ -149,6 +149,8 @@ class AgyProviderTests(unittest.TestCase):
 
 
 class AgyOnEventTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.provider = providers.AgyProvider()
     async def test_on_event_quota_error(self):
         provider = providers.AgyProvider()
         chat = SimpleNamespace(
@@ -220,5 +222,126 @@ class AgyOnEventTests(unittest.IsolatedAsyncioTestCase):
             except runner.asyncio.CancelledError:
                 pass
             mock_probe.assert_called()
+
+    IMAGE_PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+
+    async def test_recover_brain_images_and_skip_system_and_symlinks(self):
+        import tempfile
+        session = "11111111-2222-3333-4444-555555555555"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            brain = home / ".gemini/antigravity-cli/brain" / session
+            brain.mkdir(parents=True)
+            (brain / "pic.png").write_bytes(self.IMAGE_PNG)
+            (brain / "symlink.png").symlink_to("/etc/passwd")
+
+            scratch = brain / "scratch"
+            scratch.mkdir()
+            (scratch / "drawing.png").write_bytes(self.IMAGE_PNG)
+
+            # Hidden dirs that must be ignored:
+            sys_media = brain / ".system_generated/logs/media"
+            sys_media.mkdir(parents=True)
+            (sys_media / "step_1_media_0.png").write_bytes(self.IMAGE_PNG)
+
+            user_up = brain / ".user_uploaded"
+            user_up.mkdir()
+            (user_up / "upload.png").write_bytes(self.IMAGE_PNG)
+
+            chat = SimpleNamespace(
+                id="chat-agy-img",
+                dir=home / "chat",
+                attachments_dir=home / "chat/attachments",
+                meta={"session_id": session, "generated_images": []},
+                turn_state={},
+                emit=AsyncMock(),
+                save_meta=Mock(),
+            )
+
+            with patch("pathlib.Path.home", return_value=home):
+                await self.provider.recover_outputs(chat)
+                # Second run shouldn't duplicate
+                await self.provider.recover_outputs(chat)
+
+            # Exactly pic.png (sha matches drawing.png since identical content)
+            self.assertEqual(len(chat.meta["generated_images"]), 1)
+            self.assertEqual(sum(c.args[0]["type"] == "image" for c in chat.emit.call_args_list), 1)
+            name = chat.meta["generated_images"][0]
+            self.assertTrue((chat.attachments_dir / name).is_file())
+
+    async def test_recover_subagent_brain_images(self):
+        import tempfile
+        parent_session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        sub_session = "12345678-1234-5678-1234-567812345678"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            parent_brain = home / ".gemini/antigravity-cli/brain" / parent_session
+            sub_brain = home / ".gemini/antigravity-cli/brain" / sub_session
+            parent_brain.mkdir(parents=True)
+            sub_brain.mkdir(parents=True)
+
+            # Log subagent spawn in transcript
+            t_file = parent_brain / ".system_generated/logs/transcript.jsonl"
+            t_file.parent.mkdir(parents=True)
+            t_file.write_text(f'{{"content": "Created subagent: \\"conversationId\\": \\"{sub_session}\\""}}\n')
+
+            # Image created inside subagent brain
+            (sub_brain / "sub_pic.png").write_bytes(self.IMAGE_PNG)
+
+            chat = SimpleNamespace(
+                id="chat-sub",
+                dir=home / "chat",
+                attachments_dir=home / "chat/attachments",
+                meta={"session_id": parent_session, "generated_images": []},
+                turn_state={},
+                emit=AsyncMock(),
+                save_meta=Mock(),
+            )
+
+            with patch("pathlib.Path.home", return_value=home):
+                await self.provider.recover_outputs(chat)
+
+            self.assertEqual(len(chat.meta["generated_images"]), 1)
+            self.assertEqual(sum(c.args[0]["type"] == "image" for c in chat.emit.call_args_list), 1)
+
+    async def test_on_event_tool_done_scans_and_publishes_image(self):
+        import tempfile
+        session = "99999999-8888-7777-6666-555555555555"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            brain = home / ".gemini/antigravity-cli/brain" / session
+            brain.mkdir(parents=True)
+
+            chat = SimpleNamespace(
+                id="chat-live",
+                dir=home / "chat",
+                attachments_dir=home / "chat/attachments",
+                meta={"session_id": session, "generated_images": []},
+                turn_state={},
+                emit=AsyncMock(),
+                save_meta=Mock(),
+            )
+
+            # Image is written during tool execution
+            (brain / "generated.png").write_bytes(self.IMAGE_PNG)
+
+            proc = SimpleNamespace()
+            event = {
+                "event": "step_update",
+                "step_update": {
+                    "step_type": "tool",
+                    "step_index": 5,
+                    "state": "DONE",
+                    "tool_name": "invoke_subagent",
+                    "tool_info": {"name": "invoke_subagent"},
+                },
+            }
+
+            with patch("pathlib.Path.home", return_value=home):
+                await self.provider.on_event(chat, proc, event, Mock())
+
+            self.assertEqual(len(chat.meta["generated_images"]), 1)
+            self.assertTrue(any(c.args[0]["type"] == "image" for c in chat.emit.call_args_list))
+
 
 

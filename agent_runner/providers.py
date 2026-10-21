@@ -209,6 +209,39 @@ class Provider:
     async def recover_outputs(self, chat) -> None:
         """Recover provider-generated attachments after a runner restart."""
 
+    MAX_GENERATED_IMAGE_BYTES = 30 * 1024 * 1024
+
+    @classmethod
+    def _save_generated_image(cls, chat, data: bytes) -> str:
+        if not data or len(data) > cls.MAX_GENERATED_IMAGE_BYTES:
+            raise ValueError("Generated image is empty or exceeds 30 MB")
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            extension = "png"
+        elif data.startswith(b"\xff\xd8\xff"):
+            extension = "jpg"
+        elif data.startswith((b"GIF87a", b"GIF89a")):
+            extension = "gif"
+        elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+            extension = "webp"
+        else:
+            raise ValueError("Unsupported generated image format")
+        name = f"{hashlib.sha256(data).hexdigest()[:32]}.{extension}"
+        attachments_dir = getattr(chat, "attachments_dir", None) or (chat.dir / "attachments")
+        attachments_dir.mkdir(parents=True, exist_ok=True)
+        path = attachments_dir / name
+        if not path.exists():
+            path.write_bytes(data)
+        return name
+
+    async def _publish_generated_image(self, chat, data: bytes) -> None:
+        name = await asyncio.to_thread(self._save_generated_image, chat, data)
+        published = chat.meta.setdefault("generated_images", [])
+        if name not in published:
+            await chat.emit({"type": "image", "images": [name]})
+            published.append(name)
+            if hasattr(chat, "save_meta"):
+                chat.save_meta()
+
     async def probe_limits(self) -> None:
         """Take a usage-limit reading now (into `limits`); CLIs that can't
         report one leave it be."""
@@ -656,37 +689,6 @@ class CodexProvider(Provider):
         # require a person's decision. Project isolation is enforced in begin.
         mode = meta.get("permission_mode")
         return mode if mode in self.permission_modes else "ask"
-
-    MAX_GENERATED_IMAGE_BYTES = 30 * 1024 * 1024
-
-    @classmethod
-    def _save_generated_image(cls, chat, data: bytes) -> str:
-        if not data or len(data) > cls.MAX_GENERATED_IMAGE_BYTES:
-            raise ValueError("Generated image is empty or exceeds 30 MB")
-        if data.startswith(b"\x89PNG\r\n\x1a\n"):
-            extension = "png"
-        elif data.startswith(b"\xff\xd8\xff"):
-            extension = "jpg"
-        elif data.startswith((b"GIF87a", b"GIF89a")):
-            extension = "gif"
-        elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-            extension = "webp"
-        else:
-            raise ValueError("Unsupported generated image format")
-        name = f"{hashlib.sha256(data).hexdigest()[:32]}.{extension}"
-        chat.attachments_dir.mkdir(parents=True, exist_ok=True)
-        path = chat.attachments_dir / name
-        if not path.exists():
-            path.write_bytes(data)
-        return name
-
-    async def _publish_generated_image(self, chat, data: bytes) -> None:
-        name = await asyncio.to_thread(self._save_generated_image, chat, data)
-        published = chat.meta.setdefault("generated_images", [])
-        if name not in published:
-            await chat.emit({"type": "image", "images": [name]})
-            published.append(name)
-            chat.save_meta()
 
     async def recover_outputs(self, chat):
         # Import only this thread's saved generated images; never arbitrary
@@ -1176,6 +1178,57 @@ class AgyProvider(Provider):
             pass
         return None
 
+    @classmethod
+    def _brain_dirs_for_session(cls, session_id: str | None) -> list[Path]:
+        if not session_id:
+            return []
+        base = Path.home() / ".gemini/antigravity-cli/brain"
+        main_dir = base / session_id
+        if not main_dir.is_dir():
+            return []
+        dirs = [main_dir]
+        transcript = main_dir / ".system_generated/logs/transcript.jsonl"
+        if transcript.is_file():
+            try:
+                size = transcript.stat().st_size
+                with transcript.open("rb") as f:
+                    f.seek(max(0, size - 262144))
+                    content = f.read().decode("utf-8", errors="replace")
+                for sub_id in re.findall(r'conversationId[\"\\]+:\s*[\"\\]+([0-9a-fA-F-]{36})', content):
+                    sub_dir = base / sub_id
+                    if sub_dir.is_dir() and sub_dir not in dirs:
+                        dirs.append(sub_dir)
+            except OSError:
+                pass
+        return dirs
+
+    async def _scan_and_publish_images(self, chat) -> None:
+        session_id = chat.meta.get("session_id")
+        if not session_id:
+            return
+        dirs = await asyncio.to_thread(self._brain_dirs_for_session, session_id)
+        for bdir in dirs:
+            for root, dirnames, filenames in os.walk(bdir):
+                dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                for fname in sorted(filenames):
+                    if fname.startswith("."):
+                        continue
+                    p = Path(root) / fname
+                    if p.is_symlink() or not p.is_file():
+                        continue
+                    if p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                        continue
+                    try:
+                        if p.stat().st_size > self.MAX_GENERATED_IMAGE_BYTES or p.stat().st_size == 0:
+                            continue
+                        data = await asyncio.to_thread(p.read_bytes)
+                        await self._publish_generated_image(chat, data)
+                    except (OSError, ValueError):
+                        continue
+
+    async def recover_outputs(self, chat) -> None:
+        await self._scan_and_publish_images(chat)
+
     def model_for(self, meta: dict) -> str:
         requested = meta.get("requested_model")
         if requested in self.model_ids:
@@ -1368,6 +1421,7 @@ class AgyProvider(Provider):
         if t == "init":
             self.adopt_session(chat, e.get("conversation_id"))
             chat.meta["model"] = (e.get("init") or {}).get("model") or chat.meta.get("model")
+            await self._scan_and_publish_images(chat)
         elif t == "step_update":
             s = e.get("step_update") or {}
             if u := s.get("usage"):
@@ -1388,7 +1442,9 @@ class AgyProvider(Provider):
                 elif status in ("DONE", "ERROR"):
                     error = (info.get("error") or {}).get("message") if status == "ERROR" else None
                     await chat.emit({"type": "tool_result", "tool_use_id": tool_id, "is_error": status == "ERROR", "content": snippet(error or "done")})
+                    await self._scan_and_publish_images(chat)
         elif t == "result":
+            await self._scan_and_publish_images(chat)
             r = e.get("result") or {}
             denied = [d.get("display_name") or d.get("action") for d in r.get("denied_actions") or []]
             if denied:
