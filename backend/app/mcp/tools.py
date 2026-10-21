@@ -14,6 +14,7 @@ import base64
 import io
 import math
 import mimetypes
+import re
 import uuid
 from pathlib import Path
 
@@ -706,6 +707,23 @@ async def get_candidates(
         content.append({"type": "text", "text": f"asset {asset['id']} ({shown}sent at {size[0]}x{size[1]})"})
         content.append(Image(data=view, format=fmt))
     return content
+
+
+@mcp_server.tool()
+async def show_in_chat(chat_id: str, asset_id: str, caption: str = "") -> dict:
+    """Show an existing Orchestrator asset to the person in the Agent chat.
+
+    Works for Claude, Codex and Antigravity, in project or Dev chats. Use the
+    current chat_id from your session instructions. Find the asset_id through
+    get_project_recipe, get_candidates, get_board/list_board_items, etc.
+    Images appear as previews, audio/video as players, other formats as file
+    downloads. This publishes to the PERSON's chat; get_candidates instead
+    gives images to YOU for inspection. No base64 or public URL is needed.
+    Does not generate, upload, move, delete or modify the original asset.
+    """
+    if not re.fullmatch(r"[0-9a-f]{12}", chat_id):
+        raise ValueError("Use the current Agent chat_id from your session instructions")
+    return await _post(f"/api/agent-chats/{chat_id}/media", {"asset_id": asset_id, "caption": caption})
 
 
 @mcp_server.tool()

@@ -600,6 +600,8 @@ export type AgentEvent = { seq: number; ts: number } & (
   // images: attachment names, served by agentChatsApi.attachmentUrl.
   | { type: "user"; text: string; origin?: "agent"; images?: string[] }
   | { type: "text"; text: string }
+  | { type: "image"; images: string[] }
+  | { type: "media"; asset_id: string; mime_type: string; name: string; caption: string }
   | { type: "tool_use"; id: string; name: string; input: string }
   | { type: "tool_result"; tool_use_id: string; is_error: boolean; content: string }
   | { type: "result"; is_error: boolean; subtype?: string; duration_ms?: number; cost_usd?: number; num_turns?: number }
@@ -607,7 +609,7 @@ export type AgentEvent = { seq: number; ts: number } & (
   | { type: "status"; status: string }
   | { type: "model"; model: string }
   | { type: "mode"; mode: string }
-  | { type: "permission_request"; request_id: string; tool: string; description: string; input: string }
+  | { type: "permission_request"; request_id: string; tool: string; description: string; input: string; allowed_decisions?: PermissionDecision[] }
   | { type: "permission_decision"; request_id: string; decision: PermissionDecision | "cancelled" | "deny_unattended" }
   | { type: "ask_user_question"; request_id: string; input: AskUserQuestionInput }
   | { type: "ask_user_answer"; request_id: string; answers: Record<string, string> }

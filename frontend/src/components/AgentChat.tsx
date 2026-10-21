@@ -48,6 +48,7 @@ const LIMIT_GROUP_LABELS: Record<string, TKey> = {
 const SHOW_DONE_KEY = "comfy-orchestrator:agentShowDone";
 // The runner owns the list (and its order); these are just the names shown.
 const MODE_LABELS: Record<string, TKey> = {
+  ask: "agent.mode.ask",
   auto: "agent.mode.auto",
   default: "agent.mode.default",
   acceptEdits: "agent.mode.acceptEdits",
@@ -58,6 +59,7 @@ const MODE_LABELS: Record<string, TKey> = {
   plan: "agent.mode.plan",
 };
 const MODE_HINTS: Record<string, TKey> = {
+  ask: "agent.modeHint.ask",
   auto: "agent.modeHint.auto",
   default: "agent.modeHint.default",
   acceptEdits: "agent.modeHint.acceptEdits",
@@ -568,6 +570,52 @@ function formatTokens(count: number | null | undefined): string {
   return `${Math.round(count / 1000)}k`;
 }
 
+interface ChatMediaItem {
+  id: string;
+  url: string;
+  mimeType: string;
+  name?: string;
+  previewUrl?: string;
+  downloadUrl?: string;
+}
+
+function ChatMedia({ items, large = false, caption = "" }: { items: ChatMediaItem[]; large?: boolean; caption?: string }) {
+  const t = useT();
+  return (
+    <>
+      <div className={cx("agent-images", large && "agent-generated-images")}>
+        {items.map((item) => (
+          <div key={item.id} className="agent-media-item">
+            {item.mimeType.startsWith("image/") ? (
+              <a href={item.url} target="_blank" rel="noreferrer">
+                <img src={item.previewUrl ?? item.url} alt={caption || item.name || ""} loading="lazy" />
+              </a>
+            ) : item.mimeType.startsWith("video/") ? (
+              <video src={item.url} controls preload="metadata" />
+            ) : item.mimeType.startsWith("audio/") ? (
+              <audio src={item.url} controls preload="metadata" />
+            ) : null}
+            {item.downloadUrl && (
+              <a className="agent-media-download" href={item.downloadUrl} download={item.name || true}>
+                ↓ {t("agent.downloadFile")}{item.name ? ` · ${item.name}` : ""}
+              </a>
+            )}
+          </div>
+        ))}
+      </div>
+      {caption && <div className="agent-media-caption">{caption}</div>}
+    </>
+  );
+}
+
+function ChatImages({ chatId, images, generated = false }: { chatId: string; images: string[]; generated?: boolean }) {
+  return <ChatMedia large={generated} items={images.map((name) => {
+    const url = agentChatsApi.attachmentUrl(chatId, name);
+    return { id: name, url, mimeType: "image/*", previewUrl: generated ? agentChatsApi.attachmentUrl(chatId, name, true) : undefined,
+             downloadUrl: generated ? agentChatsApi.attachmentUrl(chatId, name, false, true) : undefined };
+  })} />;
+}
+
 function ChatView({
   chat,
   provider,
@@ -724,7 +772,7 @@ function ChatView({
           <select
             className="agent-model"
             value={chat.permission_mode}
-            title={MODE_HINTS[chat.permission_mode ?? ""] ? t(MODE_HINTS[chat.permission_mode ?? ""]) : undefined}
+            title={provider.id === "codex" && chat.permission_mode === "auto" ? t("agent.modeHint.codexAuto") : MODE_HINTS[chat.permission_mode ?? ""] ? t(MODE_HINTS[chat.permission_mode ?? ""]) : undefined}
             onChange={async (e) => {
               const mode = e.target.value;
               localStorage.setItem(lastModeKey(chat.provider ?? "claude"), mode);
@@ -734,7 +782,7 @@ function ChatView({
           >
             {provider.permission_modes.map((m) => (
               <option key={m} value={m}>
-                {MODE_LABELS[m] ? t(MODE_LABELS[m]) : m}
+                {provider.id === "codex" && m === "auto" ? t("agent.mode.codexAuto") : MODE_LABELS[m] ? t(MODE_LABELS[m]) : m}
               </option>
             ))}
           </select>
@@ -832,18 +880,26 @@ function ChatView({
               ) : (
                 <div key={e.seq} className="agent-msg agent-msg-user">
                   {e.images && e.images.length > 0 && (
-                    <div className="agent-images">
-                      {e.images.map((name) => {
-                        const url = agentChatsApi.attachmentUrl(chat.id, name);
-                        return (
-                          <a key={name} href={url} target="_blank" rel="noreferrer">
-                            <img src={url} alt="" />
-                          </a>
-                        );
-                      })}
-                    </div>
+                    <ChatImages chatId={chat.id} images={e.images} />
                   )}
                   {e.text}
+                </div>
+              );
+            case "media":
+              return (
+                <div key={e.seq} className="agent-msg agent-msg-assistant">
+                  <ChatMedia large caption={e.caption} items={[{
+                    id: e.asset_id, name: e.name, mimeType: e.mime_type,
+                    url: agentChatsApi.assetMediaUrl(e.asset_id),
+                    previewUrl: e.mime_type.startsWith("image/") ? agentChatsApi.assetMediaUrl(e.asset_id, "fit") : undefined,
+                    downloadUrl: agentChatsApi.assetMediaUrl(e.asset_id, "file", true),
+                  }]} />
+                </div>
+              );
+            case "image":
+              return (
+                <div key={e.seq} className="agent-msg agent-msg-assistant">
+                  <ChatImages chatId={chat.id} images={e.images} generated />
                 </div>
               );
             case "text":
@@ -899,12 +955,12 @@ function ChatView({
                     <div className="agent-meta">{DECIDED[decision] ? t(DECIDED[decision]) : decision}</div>
                   ) : (
                     <div className="agent-permission-actions">
-                      <button className="primary" onClick={() => decide(e.request_id, "allow")}>
+                      <button disabled={e.allowed_decisions && !e.allowed_decisions.includes("allow")} className="primary" onClick={() => decide(e.request_id, "allow")}>
                         {t("agent.permission.allow")}
                       </button>
-                      <button onClick={() => decide(e.request_id, "allow_session")} title={t("agent.permission.allowSessionHint")}>
+                      {(!e.allowed_decisions || e.allowed_decisions.includes("allow_session")) && <button onClick={() => decide(e.request_id, "allow_session")} title={t("agent.permission.allowSessionHint")}>
                         {t("agent.permission.allowSession")}
-                      </button>
+                      </button>}
                       <button className="agent-stop" onClick={() => decide(e.request_id, "deny")}>
                         {t("agent.permission.deny")}
                       </button>

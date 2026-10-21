@@ -150,6 +150,11 @@ You are the project assistant embedded in ComfyUI Orchestrator, a tool for
 building image-generation pipelines as a grid (rows = tracks, columns
 alternate asset/workflow steps) plus an idea board per project.
 
+Your current Agent chat_id is {chat_id}. To show the person an existing
+Orchestrator image/video/audio/file, call show_in_chat(chat_id="{chat_id}",
+asset_id=<asset id>, caption=<optional description>). This works through MCP
+without local file access; get_candidates shows images to you, not the person.
+
 You are bound to one project: "{project_name}" (project_id {project_id}).
 Unless the user explicitly names another project, every tool call concerns
 this one -- pass this project_id wherever a tool asks for one.
@@ -170,7 +175,16 @@ Rules:
 """
 
 DEV_PROMPT = """You are the dev agent for ComfyUI Orchestrator, working in its development
-copy ({repo}). The person talks to you from the orchestrator's own web page
+copy ({repo}). Your current Agent chat_id is {chat_id}.
+To show the person an Orchestrator image/video/audio/file, use the MCP tool
+show_in_chat(chat_id="{chat_id}", asset_id=<asset id>, caption=<optional description>).
+If this Dev session has no orchestrator MCP connection, the same capability
+is available via POST $ORCH_API_URL/api/agent-chats/$ORCH_CHAT_ID/media with
+JSON {{"asset_id":"...","caption":"..."}} and Bearer $ORCH_API_TOKEN.
+These environment variables are provided by the runner; never print the token.
+For a locally generated file, POST multipart file to /api/assets/upload first,
+then publish its returned asset id. Do not paste binary/base64 into the chat.
+The person talks to you from the orchestrator's own web page
 ("Agent" tab), often from a phone, not from a terminal: keep replies compact
 and readable, and do not paste long diffs unless asked.
 
@@ -359,7 +373,7 @@ def public_meta(chat: Chat) -> dict:
         if ctx:
             chat.meta["context_tokens"] = ctx
     m["context_tokens"] = ctx
-    m["context_window"] = provider.context_window(m["requested_model"])
+    m["context_window"] = provider.get_context_window(chat)
     return m
 
 
@@ -411,7 +425,7 @@ class ProjectProfile(Profile):
     def spec(self, chat):
         meta = chat.meta
         return TurnSpec(
-            system_prompt=PROJECT_PROMPT.format(project_name=meta["project_name"], project_id=meta["project_id"]),
+            system_prompt=PROJECT_PROMPT.format(project_name=meta["project_name"], project_id=meta["project_id"], chat_id=chat.id),
             isolated=True,
             mcp_url=meta["mcp_url"],
             mcp_token=meta["mcp_token"],
@@ -433,7 +447,7 @@ class DevProfile(Profile):
         return Path(chat.meta["repo"])
 
     def spec(self, chat):
-        prompt = DEV_PROMPT.format(repo=chat.meta["repo"])
+        prompt = DEV_PROMPT.format(repo=chat.meta["repo"], chat_id=chat.id)
         if chat.meta.get("origin") != "agent":
             return TurnSpec(system_prompt=prompt)
         # Git and deploying belong to the runner in night mode (night.py); the
@@ -482,6 +496,7 @@ async def ask_permission(chat: Chat, proc: asyncio.subprocess.Process, req_id: s
             "tool": request.get("tool_name"),
             "description": request.get("description") or "",
             "input": snippet(request.get("input")),
+            **({"allowed_decisions": request["allowed_decisions"]} if "allowed_decisions" in request else {}),
         }
     )
     auto = PROFILES[chat.meta["kind"]].auto_decide(chat, request)
@@ -496,6 +511,8 @@ async def ask_permission(chat: Chat, proc: asyncio.subprocess.Process, req_id: s
         return
     future = asyncio.get_running_loop().create_future()
     chat.pending[req_id] = future
+    if "allowed_decisions" in request:
+        chat.turn_state.setdefault("permission_choices", {})[req_id] = request["allowed_decisions"]
     await chat.emit(question)
     await chat.set_status("awaiting_approval")
     try:
@@ -504,6 +521,7 @@ async def ask_permission(chat: Chat, proc: asyncio.subprocess.Process, req_id: s
         return
     finally:
         chat.pending.pop(req_id, None)
+        chat.turn_state.get("permission_choices", {}).pop(req_id, None)
     if is_question:
         await chat.emit({"type": "ask_user_answer", "request_id": req_id, "answers": decision})
         updated_input = dict(request.get("input") or {})
@@ -547,7 +565,10 @@ async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
         proc = await asyncio.create_subprocess_exec(
             *launch.args,
             cwd=provider.cwd(chat, spec, profile.cwd(chat)),
-            env={**os.environ, **launch.env},
+            env={**os.environ, **launch.env,
+                 "ORCH_CHAT_ID": chat.id,
+                 "ORCH_API_URL": chat.meta.get("api_url") or "",
+                 "ORCH_API_TOKEN": chat.meta.get("api_token") or ""},
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -679,7 +700,7 @@ async def create_chat(request: Request):
     if model not in provider.model_ids:
         return JSONResponse({"detail": f"Unknown model for {provider.label}: {model!r}"}, status_code=400)
     effort = body.get("effort") or None
-    if effort and effort not in provider.efforts:
+    if effort and effort not in provider.efforts_for(model):
         return JSONResponse({"detail": f"{provider.label} has no effort level {effort!r}"}, status_code=400)
     chat_id = uuid.uuid4().hex[:12]
     d = CHATS_DIR / chat_id
@@ -733,17 +754,17 @@ async def update_chat(request: Request):
         chat.save_meta()
     provider = provider_of(chat)
     model = body.get("model")
+    if model is not None and model not in provider.model_ids:
+        return JSONResponse({"detail": f"Unknown model: {model!r}"}, status_code=400)
+    effort = body.get("effort") or None
+    if effort and effort not in provider.efforts_for(model or provider.model_for(chat.meta)):
+        return JSONResponse({"detail": f"{provider.label} has no effort level {effort!r} for this model"}, status_code=400)
     if model is not None and model != provider.model_for(chat.meta):
-        if model not in provider.model_ids:
-            return JSONResponse({"detail": f"Unknown model: {model!r}"}, status_code=400)
         chat.meta["requested_model"] = model
         # In the transcript too, so it's clear which answers came from which.
         await chat.emit({"type": "model", "model": model})
         chat.save_meta()
     if "effort" in body:
-        effort = body["effort"] or None
-        if effort and effort not in provider.efforts:
-            return JSONResponse({"detail": f"{provider.label} has no effort level {effort!r}"}, status_code=400)
         chat.meta["effort"] = effort
         chat.save_meta()
     if "fast_mode" in body:
@@ -846,6 +867,29 @@ def save_attachments(chat: Chat, images: list[tuple[str, bytes]]) -> list[str]:
     return names
 
 
+async def attach_media(request: Request):
+    """Provider-neutral publishing endpoint, used by the orchestrator's MCP.
+    Only a UUID reference is accepted: no arbitrary URLs or filesystem paths.
+    """
+    chat = get_chat(request)
+    if not chat:
+        return JSONResponse({"detail": "Chat not found"}, status_code=404)
+    body = await request.json()
+    try:
+        asset_id = str(uuid.UUID(body.get("asset_id", "")))
+    except (ValueError, TypeError, AttributeError):
+        return JSONResponse({"detail": "Invalid asset id"}, status_code=400)
+    mime_type, name, caption = body.get("mime_type"), body.get("name"), body.get("caption", "")
+    if (not isinstance(mime_type, str) or len(mime_type) > 128 or "/" not in mime_type
+            or not isinstance(name, str) or not 1 <= len(name) <= 255
+            or not isinstance(caption, str) or len(caption) > 1000):
+        return JSONResponse({"detail": "Invalid media metadata"}, status_code=400)
+    await chat.emit({"type": "media", "asset_id": asset_id, "mime_type": mime_type,
+                     "name": name, "caption": caption})
+    chat.save_meta()
+    return JSONResponse({"shown": True, "chat_id": chat.id, "asset_id": asset_id})
+
+
 async def read_attachment(request: Request):
     chat = get_chat(request)
     name = request.path_params["name"]
@@ -904,6 +948,9 @@ async def decide(request: Request):
     future = chat.pending.get(request.path_params["request_id"])
     if not future or future.done():
         return JSONResponse({"detail": "That question is no longer pending"}, status_code=409)
+    choices = chat.turn_state.get("permission_choices", {}).get(request.path_params["request_id"])
+    if choices is not None and decision not in choices:
+        return JSONResponse({"detail": "This decision is unavailable for this request"}, status_code=400)
     future.set_result(decision)
     return JSONResponse(public_meta(chat))
 
@@ -1228,18 +1275,25 @@ LIMITS_POLL_INTERVAL_SECONDS = 60
 
 
 async def limits_scheduler() -> None:
-    """Periodically refreshes plan limits for providers that support free polling.
-    Currently polls Antigravity once every minute (agy /usage consumes 0 tokens).
-    Other providers can be hooked in by their respective agents.
-    """
+    """Poll only zero-inference usage endpoints; one failure doesn't skip peers."""
+    last_error: dict[str, str] = {}
+
+    async def refresh(provider_id):
+        provider = PROVIDERS.get(provider_id)
+        if provider and provider.available:
+            try:
+                await provider.probe_limits()
+                last_error.pop(provider_id, None)
+            except Exception as exc:  # noqa: BLE001
+                # Once per distinct problem, not once a minute (an expired
+                # login stays expired until a chat next runs).
+                if last_error.get(provider_id) != repr(exc):
+                    last_error[provider_id] = repr(exc)
+                    print(f"limits_scheduler ({provider_id}): {exc!r}", flush=True)
+
     await asyncio.sleep(LIMITS_INITIAL_DELAY_SECONDS)
     while True:
-        try:
-            agy = PROVIDERS.get("agy")
-            if agy and agy.available:
-                await agy.probe_limits()
-        except Exception as exc:  # noqa: BLE001
-            print(f"limits_scheduler: {exc!r}", flush=True)
+        await asyncio.gather(refresh("agy"), refresh("codex"), refresh("claude"))
         await asyncio.sleep(LIMITS_POLL_INTERVAL_SECONDS)
 
 
@@ -1435,6 +1489,11 @@ class AuthMiddleware:
 async def lifespan(app):
     load_chats()
     await mark_interrupted()
+    for chat in chats.values():
+        try:
+            await provider_of(chat).recover_outputs(chat)
+        except Exception as exc:  # noqa: BLE001 -- one bad file must not prevent startup
+            print(f"recover_outputs ({chat.id}): {exc!r}", flush=True)
     scheduler = asyncio.create_task(report_scheduler())
     limits_poller = asyncio.create_task(limits_scheduler())
     yield
@@ -1465,6 +1524,7 @@ routes = [
     Route("/chats/{chat_id}/stop", stop, methods=["POST"]),
     Route("/chats/{chat_id}/events", events, methods=["GET"]),
     Route("/chats/{chat_id}/attachments/{name}", read_attachment, methods=["GET"]),
+    Route("/chats/{chat_id}/media", attach_media, methods=["POST"]),
     Route("/hooks/pre-tool", hook_pre_tool, methods=["POST"]),
 ]
 

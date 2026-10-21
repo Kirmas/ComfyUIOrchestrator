@@ -3031,6 +3031,39 @@ th, td {
   object-fit: contain;
 }
 
+.agent-generated-images img {
+  max-width: min(100%, 560px);
+  max-height: 560px;
+}
+
+.agent-media-item {
+  min-width: 0;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-media-item video {
+  display: block;
+  max-width: min(100%, 560px);
+  max-height: 560px;
+  border-radius: 6px;
+}
+
+.agent-media-item audio {
+  max-width: 100%;
+}
+
+.agent-media-download {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.agent-media-caption {
+  white-space: pre-wrap;
+}
+
 .agent-attachments {
   padding: 8px 14px 0;
   margin: 0;
@@ -3123,6 +3156,9 @@ th, td {
 
 .agent-limits-head .agent-chat-delete {
   margin-left: auto;
+  /* the base class only shows on hover of a chat row; this isn't one */
+  visibility: visible;
+  cursor: pointer;
 }
 
 .agent-limit-group {

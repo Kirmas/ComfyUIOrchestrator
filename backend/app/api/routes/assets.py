@@ -1,4 +1,6 @@
+import mimetypes
 import uuid
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +40,16 @@ def to_asset_read(asset: Asset) -> AssetRead:
     return item
 
 
+def asset_download_name(asset: Asset) -> str:
+    """One filename for both the chat attachment card and the download."""
+    original = (asset.meta or {}).get("filename")
+    if isinstance(original, str):
+        name = original.replace("\\", "/").rsplit("/", 1)[-1][:255]
+        if name.strip():
+            return name
+    return f"asset-{str(asset.id)[:8]}{mimetypes.guess_extension(asset.mime_type) or ''}"
+
+
 @router.post("/upload", response_model=AssetRead, status_code=201)
 async def upload_asset(file: UploadFile, db: AsyncSession = Depends(get_db)):
     data = await file.read()
@@ -60,7 +72,7 @@ async def get_asset(asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{asset_id}/file")
-async def get_asset_file(request: Request, asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_asset_file(request: Request, asset_id: uuid.UUID, db: AsyncSession = Depends(get_db), download: bool = False):
     """Serves the raw bytes -- this is what <img src>/<model-viewer src> point at.
     Auth is the normal shared-token check, just via ?token= since browsers don't
     attach a custom Authorization header for these requests (see app/core/auth.py,
@@ -77,13 +89,16 @@ async def get_asset_file(request: Request, asset_id: uuid.UUID, db: AsyncSession
     path = storage.path_of(asset.storage_key)
     if not path.is_file():
         raise HTTPException(404, "Asset file missing")
-    return asset_response.stream_payload(
+    response = asset_response.stream_payload(
         request,
         path,
         storage.payload_offset(asset.storage_key),
         asset.mime_type,
         asset_response.payload_etag(asset.storage_key),
     )
+    if download:
+        response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(asset_download_name(asset), safe='')}"
+    return response
 
 
 @router.get("/{asset_id}/preview")

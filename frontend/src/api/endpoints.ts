@@ -411,8 +411,10 @@ export const agentChatsApi = {
   remove: (id: string) => api.delete(`/api/agent-chats/${id}`),
   send: (id: string, text: string, images: AgentImageUpload[] = []) =>
     api.post<AgentChat>(`/api/agent-chats/${id}/messages`, { text, images }),
-  attachmentUrl: (id: string, name: string) =>
-    `${getApiBaseUrl()}/api/agent-chats/${id}/attachments/${name}?token=${encodeURIComponent(getApiToken())}`,
+  assetMediaUrl: (assetId: string, rendition: "file" | "fit" = "file", download = false) =>
+    `${getApiBaseUrl()}/api/assets/${encodeURIComponent(assetId)}/${rendition}?token=${encodeURIComponent(getApiToken())}${download ? "&download=true" : ""}`,
+  attachmentUrl: (id: string, name: string, preview = false, download = false) =>
+    `${getApiBaseUrl()}/api/agent-chats/${id}/attachments/${name}?token=${encodeURIComponent(getApiToken())}${preview ? "&preview=true" : ""}${download ? "&download=true" : ""}`,
   stop: (id: string) => api.post<AgentChat>(`/api/agent-chats/${id}/stop`),
   // EventSource can't set headers, so the token rides in the query string
   // (auth_middleware accepts either). `after` replays from a known point

@@ -15,17 +15,23 @@ Last-Event-ID, which is forwarded, so the transcript resumes exactly where it
 stopped while the agent kept working in the runner the whole time.
 """
 
+import asyncio
+import re
 import uuid
+from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.api.routes.assets import asset_download_name
 from app.db.base import get_db
-from app.db.models import Project
+from app.core.storage import get_storage
+from app.core.asset_preview import build_fit
+from app.db.models import Asset, Project
 
 router = APIRouter(prefix="/api/agent-chats", tags=["agent-chats"])
 
@@ -62,6 +68,11 @@ class QuestionAnswer(BaseModel):
 class AgentImage(BaseModel):
     media_type: str
     data: str  # base64; the runner validates type, size and which chats take them
+
+
+class AgentMediaAttach(BaseModel):
+    asset_id: uuid.UUID
+    caption: str = Field(default="", max_length=1000)
 
 
 class AgentMessage(BaseModel):
@@ -169,13 +180,40 @@ async def post_message(chat_id: str, payload: AgentMessage):
 
 
 @router.get("/{chat_id}/attachments/{name}")
-async def get_attachment(chat_id: str, name: str):
+async def get_attachment(chat_id: str, name: str, preview: bool = False, download: bool = False):
     """A picture sent in a message, for the transcript (<img>, so the token
     comes as ?token=, which auth_middleware accepts)."""
     res = await _call("GET", f"/chats/{chat_id}/attachments/{name}")
     if res.status_code == 200:
+        if preview and not download and res.headers.get("content-type", "").startswith("image/"):
+            fitted = await asyncio.to_thread(build_fit, res.body, 768)
+            if fitted is not None:
+                res = Response(fitted, media_type="image/webp")
         res.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+        if download:
+            res.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(name, safe='')}"
     return res
+
+
+@router.post("/{chat_id}/media")
+async def attach_media(chat_id: str, payload: AgentMediaAttach, db: AsyncSession = Depends(get_db)):
+    """Show an existing asset in the Agent transcript, for any provider.
+
+    Only asset ids/metadata cross the runner boundary; files remain in storage
+    and the browser uses normal authenticated asset routes, including ranges.
+    """
+    if not re.fullmatch(r"[0-9a-f]{12}", chat_id):
+        raise HTTPException(400, "Invalid chat id")
+    asset = await db.get(Asset, payload.asset_id)
+    if not asset:
+        raise HTTPException(404, "Asset not found")
+    if not get_storage().path_of(asset.storage_key).is_file():
+        raise HTTPException(404, "Asset file missing")
+    name = asset_download_name(asset)
+    return await _call("POST", f"/chats/{chat_id}/media", json={
+        "asset_id": str(asset.id), "mime_type": asset.mime_type,
+        "name": name, "caption": payload.caption,
+    })
 
 
 @router.post("/{chat_id}/stop")

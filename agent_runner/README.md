@@ -23,21 +23,61 @@ events, and the model / permission-mode lists the page shows. A profile says
 what a chat needs in neutral terms (`TurnSpec`), the provider turns it into
 flags. A new CLI is one new class + a line in `PROVIDERS`.
 
-- `claude` -- the protocol described below; the only one that can ask the page
-  (Allow / Deny), the only one with no shell in a project chat, and the only
-  one a night report runs on.
+- `claude` -- the protocol described below; tool approvals use Allow / Deny.
+  The only one with no shell in a project chat, and the only one a night
+  report runs on.
+  Context meter and `/compact` (`supports_compact=True`): the context in use is
+  the last assistant call's whole input (`input_tokens + cache_creation +
+  cache_read`; a subagent's calls, `parent_tool_use_id` set, don't count) and
+  the window is the live `modelUsage[<model>].contextWindow` of the turn's
+  `result` (1,000,000 for opus/sonnet/haiku on CLI 2.1.304 -- not 200k; the
+  200k base default only shows before a chat's first turn). `/compact` is a CLI
+  command that works headless as an ordinary message; its own `result` has zero
+  usage, so the meter is reset from `system/compact_boundary.compact_metadata
+  .post_tokens`. Verified end to end against the real CLI.
+  Efforts are listed per model (`models[].efforts`; all three families take
+  `low..max` + `ultracode`, probed -- the CLI itself downgrades an unsupported
+  `xhigh`/`max` to `high`). Limits: `probe_limits` reads
+  `GET https://api.anthropic.com/api/oauth/usage` (what `/usage` and the desktop
+  app read) with the CLI's own OAuth token from `~/.claude/.credentials.json`:
+  no model turn, so the shared scheduler polls it every minute like Codex's.
+  `utilization` there is a percent; the promotional cloud-session credit is the
+  block with a `limit_dollars` (its key is an internal codename, matched by
+  shape) and shows as a `cloud_credits` window. The token is only read, never
+  refreshed (rotating it could log the CLI out); if it has expired the reading
+  keeps its last value until any chat turn renews it. Each turn's
+  `rate_limit_event` still refreshes the plan windows too.
 - `codex` -- `codex app-server --stdio`, bidirectional JSON-RPC. One server
   process per turn: initialize -> thread/start or thread/resume -> turn/start.
   Existing `codex exec` session ids resume through the same durable rollouts.
-  Tool permission modes remain fixed (`workspace` / `full` / `readOnly`),
-  `approvalPolicy="never"`; changing mode applies to the next turn.
+  Dev permission modes use both sandbox and approval settings:
+  `ask` = workspace-write + on-request + user reviewer;
+  `auto` = workspace-write + on-request + auto_review reviewer;
+  `full` = danger-full-access + never. Retired Dev modes `workspace` and
+  `readOnly`, missing modes and unknown values resolve to `ask`; additional
+  rights therefore require a person's decision. Only ask/auto/full appear
+  in the Dev picker. Mode changes apply to the next turn.
+  Command/file/permission approval requests become Allow / Deny cards.
+  Decisions are checked against the server's available choices. Approvals
+  are one-off (permission grants last for the turn); no persistent rules are
+  written and no session-wide approval is promised across process restarts.
+  Automatic review is performed by Codex, not by the runner; any requests
+  the server routes to the user are shown on the page.
   Structured questions ARE interactive: `item/tool/requestUserInput` becomes
   the existing question card, and the answer endpoint returns a JSON-RPC
-  response keyed by Codex question ids. Request ids include the turn id so
-  replies from older turns cannot resolve a new question. stdin stays open
-  until turn/completed; Stop terminates the process group and cancels cards.
+  response keyed by Codex question ids. The separate `request_user_input_async`
+  tool arrives as `item/completed` with `agentMessage.questions` (title and
+  string options); these also become question cards instead of plain text.
+  Async answers are sent as user input through `turn/start`, which can steer
+  an active turn or start continuation after generation has ended. The server
+  stays open while a question is unanswered or its answer RPC is in flight;
+  a successful turn/completed alone must not cancel the card in those cases.
+  Request ids include the turn and item ids so replies from older turns cannot
+  resolve a new question. Stop terminates the process group and cancels cards.
   Unexpected server requests receive an explicit protocol error, never approval.
-  Project chats force read-only and use a separate `codex-home` per chat,
+  Project chats force read-only + never + user reviewer regardless of saved
+  dev mode; unexpected permission requests are denied without showing an
+  escalation card. They use a separate `codex-home` per chat,
   sharing auth, models cache and sessions via symlinks, but no personal config
   or plugins/apps. Only the orchestrator MCP is configured (token in env
   `ORCH_MCP_TOKEN`, tool approval `approve`). Read-only shell still exists;
@@ -88,16 +128,49 @@ Antigravity:
 Codex (verified with CLI 0.163.0):
 
 - Effort is passed as `config.model_reasoning_effort` on thread start/resume.
-  The picker offers `low`, `medium`, `high`, `xhigh`, `max`: common catalog
-  levels for Sol, Astra and Luna. Auto leaves the CLI default/config in effect.
+  Each model advertises its own `efforts`: Sol/Astra offer `low`, `medium`,
+  `high`, `xhigh`, `max`, `ultra`; Luna ends at `max`. These are the exact
+  levels in the installed model catalog. The HTTP create/update paths and
+  launch validation use the selected model's list too. Auto leaves the CLI
+  default/config in effect.
 - Fast sends `serviceTier="priority"`, off explicitly sends `"default"`.
   All three models advertise priority; availability remains backend-controlled.
 - `account/rateLimits/updated` refreshes plan usage during turns. Refresh uses
   `account/rateLimits/read` on an app-server without starting any model turn:
-  zero inference tokens. Missing windows/errors preserve the last reading.
+  zero inference tokens. The shared scheduler polls this and Antigravity's
+  free usage endpoint concurrently, then waits 60 seconds. Each provider's
+  error is isolated so it cannot skip the other. Claude is not polled.
+  Missing windows/errors preserve the last reading.
   `usedPercent / 100` becomes utilization; `windowDurationMins=300/10080`
   maps to `five_hour/seven_day`, otherwise `primary/secondary` is retained.
   Reset timestamps are Unix seconds; token usage is separate from plan usage.
+- `supports_compact=True`: the existing `/compact` button sends a native
+  `thread/compact/start` request after thread start/resume, never a model
+  prompt saying `/compact`. The transport stays open after the immediate RPC
+  acknowledgement and drains progress through `turn/completed`. It keeps
+  the same thread id and reports normal failure/Stop events.
+- `thread/tokenUsage/updated.tokenUsage.last.totalTokens` is the current
+  context reading, including the post-compaction estimate (whose input/output
+  fields can be zero). Lifetime `total.totalTokens` is not context occupancy.
+  Both `context_tokens` and live `modelContextWindow` are persisted in meta
+  and emitted on the result event. Windows are tied to the model that ran the
+  turn, avoiding an old model's window after a model switch. Catalog defaults
+  are 475,000 effective tokens for Sol and 258,400 for Astra/Luna; a server's
+  live value takes precedence over those defaults. Older chats can backfill
+  their latest token_count reading from a bounded tail of their own rollout.
+- Generated images (`imageGeneration`, or the underlying
+  `Extension/image_gen.generation`) are saved as chat attachments and emitted
+  as `image` transcript events. The page renders an authenticated preview;
+  opening it shows the original image. Base64 is never written to the SSE
+  transcript. PNG/JPEG/GIF/WebP output is recognized from its bytes, with a
+  separate 30 MB generated-output limit. Duplicate content is emitted once.
+  `savedPath` from an event is not read as an arbitrary filesystem path.
+- At runner startup, `recover_outputs` imports existing images only from the
+  chat's own `generated_images/<session UUID>` folder, including the isolated
+  project's Codex home. Symlinks and unrelated thread folders are skipped.
+  Thus generations made before image support appear after restarting the
+  runner without another generation request. Existing attachment routes and
+  their token authentication serve the files.
 - The shared runner delegates protocol replies to `Provider.answer_request`;
   Claude's original control_response format is unchanged. Question cards and
   HTTP answer routes are reused, not parsed out of assistant text.
@@ -214,3 +287,67 @@ read-only turns: question -> HTTP answer endpoint -> model continuation,
 resume remembering the answer, Stop while a question is pending, and resume
 of a pre-migration `codex exec` rollout. Limits refresh was tested without
 starting a model turn.
+
+Approval transport validation: CLI 0.163.0 accepted both `user` and
+`auto_review` reviewers in read-only thread/start probes without model calls.
+A real read-only `untrusted` test produced a command approval, which was
+routed through the runner's HTTP decision endpoint and intentionally denied;
+the command was not executed. Allow responses, permission scopes, fixed-mode
+rejection, legacy defaults and restricted choices are covered by unit tests.
+
+Native compaction was checked with a scratch read-only Codex thread through
+`runner.run_turn`: 10,009 -> 2,022 context tokens, same thread id, and the
+following turn remembered the chosen color. No API key or paid polling turn
+is involved in limits refresh. Compaction itself is a native model operation,
+not a claim of zero inference usage.
+
+Async-question regression: the exact `agentMessage.questions` format emitted
+by `request_user_input_async` is tested independently from the JSON-RPC
+`item/tool/requestUserInput` format. Real read-only runner tests confirmed
+both immediate HTTP answers during generation and delayed answers after the
+model finished; the server kept the card alive and the model received Blue.
+
+Image validation includes replaying both image event shapes, invalid outputs,
+deduplication and isolated startup recovery. The actual previously generated
+robot PNG was recovered through a scratch chat and served byte-for-byte by
+the attachment endpoint (2,415,221 bytes), with no model call.
+
+## Show media in the chat (all providers)
+
+`show_in_chat(chat_id, asset_id, caption="")` is an Orchestrator MCP tool for
+Claude, Codex and Antigravity, in both project and Dev chats. The current chat
+id is injected into each profile; resumed prompt-based sessions also receive
+it. Use `get_candidates`, recipes or board reads to find the asset id, then
+call `show_in_chat` when the person asks to see it. `get_candidates` itself
+shows images to the model; this new tool publishes to the human transcript.
+
+The tool calls `POST /api/agent-chats/<chat>/media`. The API validates the
+asset and its file, then sends metadata to `POST /chats/<chat>/media` on the
+runner. The runner emits a provider-neutral `media` event containing only the
+asset UUID, MIME type, name and caption: no base64, local path or token.
+There is no provider-specific tool-result parsing and no duplicate Asset row.
+The browser uses authenticated asset URLs; images are previews, video/audio
+have players with the original asset endpoint's byte-range support, and all
+formats have a download link. Unknown formats (including meshes) are files.
+
+Previews never replace originals: asset previews use `/fit`, while opening
+or downloading uses `/file`. `/file?download=true` sets Content-Disposition
+and streams the exact original payload after its storage prefix. Generated
+chat images similarly use `attachments/<name>?preview=true` for a 768px
+rendition, and the normal attachment route for opening or `?download=true`
+for saving. Even if both preview/download flags are passed, download wins.
+
+Dev sessions also receive `ORCH_CHAT_ID`, `ORCH_API_URL`, `ORCH_API_TOKEN` in
+the CLI environment. If their personal CLI has no orchestrator MCP connection,
+they can use the same media API with those credentials (never print the
+API token). Locally generated files can first be uploaded to the existing
+`/api/assets/upload` multipart route and then published by their asset id.
+Project chats use MCP and do not need shell/filesystem permission expansion.
+
+Integration checks (temporary files and in-process HTTP, no production DB):
+
+    backend/.venv/bin/python scripts/test_chat_media.py
+
+Covers MCP publishing for all three provider ids, missing files/invalid ids,
+full-size downloads byte-for-byte, generated previews versus originals, and
+range requests for audio/video/other assets.

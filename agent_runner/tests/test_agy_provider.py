@@ -210,6 +210,7 @@ class AgyOnEventTests(unittest.IsolatedAsyncioTestCase):
         import runner
         with patch.object(runner, "LIMITS_INITIAL_DELAY_SECONDS", 0.005), \
              patch.object(runner, "LIMITS_POLL_INTERVAL_SECONDS", 0.01), \
+             patch.object(providers.PROVIDERS["codex"], "probe_limits", new_callable=AsyncMock), \
              patch.object(providers.PROVIDERS["agy"], "probe_limits", new_callable=AsyncMock) as mock_probe:
             task = runner.asyncio.create_task(runner.limits_scheduler())
             await runner.asyncio.sleep(0.03)
