@@ -154,6 +154,12 @@ Your current Agent chat_id is {chat_id}. To show the person an existing
 Orchestrator image/video/audio/file, call show_in_chat(chat_id="{chat_id}",
 asset_id=<asset id>, caption=<optional description>). This works through MCP
 without local file access; get_candidates shows images to you, not the person.
+To put a picture from this chat into the project's graph, call
+list_chat_attachments(chat_id="{chat_id}"), then import_chat_attachment with
+its exact name and the destination asset node_id. This works for both user
+uploads and generated images, preserving original bytes. Do not pass local
+generated file paths to upload_reference_image: the server cannot read the
+runner's private directories.
 
 You are bound to one project: "{project_name}" (project_id {project_id}).
 Unless the user explicitly names another project, every tool call concerns
@@ -182,6 +188,9 @@ If this Dev session has no orchestrator MCP connection, the same capability
 is available via POST $ORCH_API_URL/api/agent-chats/$ORCH_CHAT_ID/media with
 JSON {{"asset_id":"...","caption":"..."}} and Bearer $ORCH_API_TOKEN.
 These environment variables are provided by the runner; never print the token.
+To copy an existing chat attachment into a graph node, use list_chat_attachments
+and import_chat_attachment with this chat_id, the exact name, and node_id.
+This works for both user uploads and generated images without local paths.
 For a locally generated file, POST multipart file to /api/assets/upload first,
 then publish its returned asset id. Do not paste binary/base64 into the chat.
 The person talks to you from the orchestrator's own web page
@@ -903,10 +912,27 @@ async def attach_media(request: Request):
 async def read_attachment(request: Request):
     chat = get_chat(request)
     name = request.path_params["name"]
-    if not chat or not ATTACHMENT_NAME.match(name) or not (chat.attachments_dir / name).is_file():
+    if not chat or not ATTACHMENT_NAME.fullmatch(name) or (chat.attachments_dir / name).is_symlink() or not (chat.attachments_dir / name).is_file():
         return JSONResponse({"detail": "Not found"}, status_code=404)
     media_type = next(t for t, e in IMAGE_TYPES.items() if e == name.rsplit(".", 1)[1])
     return Response((chat.attachments_dir / name).read_bytes(), media_type=media_type, headers={"Cache-Control": "private, max-age=31536000, immutable"})
+
+
+async def list_attachments(request: Request):
+    chat = get_chat(request)
+    if not chat:
+        return JSONResponse({"detail": "Chat not found"}, status_code=404)
+    # Import only this provider session's generated outputs, including images
+    # produced during the current turn, before reporting attachment names.
+    await provider_of(chat).recover_outputs(chat)
+    items = []
+    if chat.attachments_dir.is_dir():
+        for path in sorted(chat.attachments_dir.iterdir()):
+            if ATTACHMENT_NAME.fullmatch(path.name) and not path.is_symlink() and path.is_file():
+                mime = next(t for t, ext in IMAGE_TYPES.items() if ext == path.suffix[1:])
+                items.append({"name": path.name, "mime_type": mime, "size": path.stat().st_size,
+                              "source": "generated" if path.name in chat.meta.get("generated_images", []) else "user"})
+    return JSONResponse({"chat_id": chat.id, "attachments": items})
 
 
 async def post_message(request: Request):
@@ -1534,6 +1560,7 @@ routes = [
     Route("/chats/{chat_id}/stop", stop, methods=["POST"]),
     Route("/chats/{chat_id}/events", events, methods=["GET"]),
     Route("/chats/{chat_id}/attachments/{name}", read_attachment, methods=["GET"]),
+    Route("/chats/{chat_id}/attachments", list_attachments, methods=["GET"]),
     Route("/chats/{chat_id}/media", attach_media, methods=["POST"]),
     Route("/hooks/pre-tool", hook_pre_tool, methods=["POST"]),
 ]

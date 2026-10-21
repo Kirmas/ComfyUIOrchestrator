@@ -90,6 +90,49 @@ class ChatMediaTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('token', json.dumps(event))
             self.assertNotIn('storage_key', event)
 
+    async def test_import_user_and_generated_originals_for_all_providers(self):
+        self.chat.attachments_dir.mkdir()
+        user_name = uuid.uuid4().hex + '.png'
+        generated_name = uuid.uuid4().hex + '.png'
+        for name in (user_name, generated_name):
+            (self.chat.attachments_dir / name).write_bytes(self.original)
+        self.chat.meta['generated_images'] = [generated_name]
+        node_id = uuid.uuid4()
+        async def upload(node, file, kind, db):
+            self.assertEqual(node, node_id)
+            self.assertIsNone(kind)
+            self.assertEqual(await file.read(), self.original)
+            self.assertEqual(file.content_type, 'image/png')
+            return {'id': str(self.asset.id), 'node_id': str(node)}
+        with patch.object(agent_chats, 'upload_asset_to_node', side_effect=upload) as uploader:
+            for provider in ('claude', 'codex', 'agy'):
+                self.chat.meta['provider'] = provider
+                with patch.object(runner.PROVIDERS[provider], 'recover_outputs', new=AsyncMock()) as recover:
+                    listing = await tools.list_chat_attachments(self.chat_id)
+                    recover.assert_awaited_once_with(self.chat)
+                sources = {item['name']: item['source'] for item in listing['attachments']}
+                self.assertEqual(sources, {user_name: 'user', generated_name: 'generated'})
+                for name in sources:
+                    result = await tools.import_chat_attachment(self.chat_id, name, str(node_id))
+                    self.assertEqual(result['node_id'], str(node_id))
+            self.assertEqual(uploader.await_count, 6)
+
+    async def test_import_rejects_missing_paths_and_symlinks(self):
+        self.chat.attachments_dir.mkdir()
+        node_id = str(uuid.uuid4())
+        name = uuid.uuid4().hex + '.png'
+        url = f'/api/agent-chats/{self.chat_id}/import-attachment'
+        with patch.object(agent_chats, 'upload_asset_to_node', new=AsyncMock()) as upload:
+            for invalid in ('../asset.png', '/tmp/a.png', 'a.png', name + '/extra'):
+                response = await self.client.post(url, json={'node_id': node_id, 'name': invalid})
+                self.assertEqual(response.status_code, 422)
+            response = await self.client.post(url, json={'node_id': node_id, 'name': name})
+            self.assertEqual(response.status_code, 404)
+            (self.chat.attachments_dir / name).symlink_to(self.path)
+            response = await self.client.post(url, json={'node_id': node_id, 'name': name})
+            self.assertEqual(response.status_code, 404)
+            upload.assert_not_awaited()
+
     async def test_download_is_original_payload_without_storage_prefix(self):
         response = await self.client.get(f'/api/assets/{self.asset.id}/file?download=true')
         self.assertEqual(response.status_code, 200)

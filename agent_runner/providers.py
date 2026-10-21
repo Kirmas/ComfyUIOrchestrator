@@ -789,6 +789,7 @@ class CodexProvider(Provider):
             env["CODEX_HOME"] = str(isolated_home)
             env[self.MCP_TOKEN_ENV] = spec.mcp_token
             args += ["-c", "features.plugins=false", "-c", "features.apps=false",
+                     "-c", "features.image_generation=true",
                      "-c", f"mcp_servers.orchestrator.url={json.dumps(spec.mcp_url)}",
                      "-c", f'mcp_servers.orchestrator.bearer_token_env_var="{self.MCP_TOKEN_ENV}"',
                      "-c", 'mcp_servers.orchestrator.default_tools_approval_mode="approve"']
@@ -798,6 +799,15 @@ class CodexProvider(Provider):
         mode = "readOnly" if spec.isolated else self.mode_for(chat.meta)
         prompt = spec.system_prompt
         if spec.isolated:
+            prompt = prompt.replace(
+                "Your only tools are the orchestrator's MCP tools.",
+                "Use the orchestrator's MCP tools for project operations. "
+                "You may also use the built-in image_gen tool to generate or edit images when asked. "
+                "This is an explicit exception to the MCP-only restriction; generated images "
+                "are automatically attached to this chat. Use the built-in tool directly; "
+                "do not use shell scripts, external APIs, or API keys for generation. "
+                "If image_gen is unavailable, report that limitation.",
+            )
             prompt = prompt.replace(
                 "You have no shell and no file\naccess.",
                 "This runtime also exposes a read-only shell; use only the orchestrator MCP for project work.",
@@ -826,6 +836,14 @@ class CodexProvider(Provider):
         chat.turn_state["context_model"] = self.model_for(chat.meta)
         chat.turn_state["tool_approvals"] = mode in ("ask", "auto")
         chat.turn_state["rpc_thread"] = params
+        if spec.isolated:
+            digest = hashlib.sha256(instructions.encode()).hexdigest()
+            chat.turn_state["instructions_digest"] = digest
+            if chat.meta.get("session_started") and chat.meta.get("codex_instructions_digest") != digest:
+                # resume accepts developerInstructions but this CLI keeps the
+                # original developer message. Append the current policy using
+                # the native history API, preserving the existing conversation.
+                chat.turn_state["instructions_update"] = instructions
         chat.turn_state["expects_result"] = True
         chat.turn_state["rpc_input"] = [{"type": "text", "text": text}] + [
             {"type": "localImage", "path": str(path)} for path in images
@@ -890,6 +908,19 @@ class CodexProvider(Provider):
                 self.adopt_session(chat, result["thread"]["id"])
                 chat.meta["model"] = result.get("model")
                 chat.save_meta()
+                if instructions := state.pop("instructions_update", None):
+                    send_line(proc, {"id": "project_instructions", "method": "thread/inject_items", "params": {
+                        "threadId": chat.meta["session_id"],
+                        "items": [{"type": "message", "role": "developer", "content": [
+                            {"type": "input_text", "text": "Updated project instructions (replace earlier project instructions):\n" + instructions}
+                        ]}],
+                    }})
+                    await proc.stdin.drain()
+                    return
+            if e["id"] in ("thread", "project_instructions"):
+                if digest := state.pop("instructions_digest", None):
+                    chat.meta["codex_instructions_digest"] = digest
+                    chat.save_meta()
                 if state.get("compact"):
                     state.pop("rpc_input", None)
                     send_line(proc, {"id": "compact", "method": "thread/compact/start",

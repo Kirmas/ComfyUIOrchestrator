@@ -66,18 +66,39 @@ class CodexProtocolTests(unittest.IsolatedAsyncioTestCase):
             (home / "sessions").mkdir()
             self.chat.dir = root
             self.chat.meta.update(permission_mode='full', fast_mode=False, effort=None)
-            spec = providers.TurnSpec('project', isolated=True, mcp_url='http://localhost/mcp', mcp_token='test')
+            spec = providers.TurnSpec("Your only tools are the orchestrator's MCP tools. You have no shell and no file\naccess.", isolated=True, mcp_url='http://localhost/mcp', mcp_token='test')
             with patch.dict(providers.os.environ, {'CODEX_HOME': str(home)}):
                 launch = self.provider.launch(self.chat, spec, 'hello', [])
             isolated = Path(launch.env['CODEX_HOME'])
             self.assertFalse((isolated / 'config.toml').exists())
             self.assertTrue((isolated / 'auth.json').is_symlink())
             self.assertIn('features.plugins=false', launch.args)
+            self.assertIn('features.apps=false', launch.args)
+            self.assertIn('features.image_generation=true', launch.args)
             await self.provider.begin(self.chat, self.proc, spec, 'hello', [])
             params = self.chat.turn_state['rpc_thread']
             self.assertEqual(params['sandbox'], 'read-only')
+            self.assertEqual(params['approvalPolicy'], 'never')
+            self.assertIn('built-in image_gen tool', params['developerInstructions'])
+            self.assertNotIn('Your only tools are', params['developerInstructions'])
             self.assertEqual(params['serviceTier'], 'default')
             self.assertNotIn('config', params)
+
+    async def test_resumed_project_updates_instructions_before_turn(self):
+        self.chat.meta.update(session_started=True, session_id='existing')
+        spec = providers.TurnSpec("Your only tools are the orchestrator's MCP tools.", isolated=True)
+        await self.provider.begin(self.chat, self.proc, spec, 'hello', [])
+        await self.provider.on_event(self.chat, self.proc, {'id': 'thread', 'result': {'thread': {'id': 'existing'}}}, Mock())
+        update = self.messages()[-1]
+        self.assertEqual(update['method'], 'thread/inject_items')
+        self.assertEqual(update['params']['items'][0]['role'], 'developer')
+        self.assertIn('built-in image_gen', update['params']['items'][0]['content'][0]['text'])
+        self.assertNotIn('codex_instructions_digest', self.chat.meta)
+        await self.provider.on_event(self.chat, self.proc, {'id': 'project_instructions', 'result': {}}, Mock())
+        self.assertEqual(self.messages()[-1]['method'], 'turn/start')
+        self.assertTrue(self.chat.meta['codex_instructions_digest'])
+        await self.provider.begin(self.chat, self.proc, spec, 'again', [])
+        self.assertNotIn('instructions_update', self.chat.turn_state)
 
     async def test_claude_response_unchanged(self):
         answer = {'behavior': 'deny', 'message': 'Denied'}

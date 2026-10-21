@@ -16,6 +16,7 @@ stopped while the agent kept working in the runner the whole time.
 """
 
 import asyncio
+import io
 import re
 import uuid
 from urllib.parse import quote
@@ -23,11 +24,13 @@ from urllib.parse import quote
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
+from starlette.datastructures import Headers, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.api.routes.assets import asset_download_name
+from app.api.routes.nodes import upload_asset_to_node
 from app.db.base import get_db
 from app.core.storage import get_storage
 from app.core.asset_preview import build_fit
@@ -73,6 +76,11 @@ class AgentImage(BaseModel):
 class AgentMediaAttach(BaseModel):
     asset_id: uuid.UUID
     caption: str = Field(default="", max_length=1000)
+
+
+class ChatAttachmentImport(BaseModel):
+    node_id: uuid.UUID
+    name: str = Field(pattern=r"^[0-9a-f]{32}\.(png|jpg|gif|webp)$")
 
 
 class AgentMessage(BaseModel):
@@ -193,6 +201,32 @@ async def get_attachment(chat_id: str, name: str, preview: bool = False, downloa
         if download:
             res.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(name, safe='')}"
     return res
+
+
+@router.get("/{chat_id}/attachments")
+async def list_chat_attachments(chat_id: str):
+    if not re.fullmatch(r"[0-9a-f]{12}|[0-9a-fA-F-]{36}", chat_id):
+        raise HTTPException(400, "Invalid chat id or session UUID")
+    return await _call("GET", f"/chats/{chat_id}/attachments")
+
+
+@router.post("/{chat_id}/import-attachment", status_code=201)
+async def import_chat_attachment(chat_id: str, payload: ChatAttachmentImport, db: AsyncSession = Depends(get_db)):
+    """Runner reads its private file; reuse the ordinary node upload rules.
+
+    Never accept local paths or URLs, and never request a preview rendition.
+    """
+    if not re.fullmatch(r"[0-9a-f]{12}|[0-9a-fA-F-]{36}", chat_id):
+        raise HTTPException(400, "Invalid chat id or session UUID")
+    res = await _call("GET", f"/chats/{chat_id}/attachments/{payload.name}")
+    if res.status_code != 200:
+        return res
+    file = UploadFile(filename=payload.name, file=io.BytesIO(res.body),
+                      headers=Headers({"content-type": res.headers.get("content-type", "application/octet-stream")}))
+    try:
+        return await upload_asset_to_node(payload.node_id, file, kind=None, db=db)
+    finally:
+        await file.close()
 
 
 @router.post("/{chat_id}/media")

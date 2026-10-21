@@ -314,6 +314,21 @@ the attachment endpoint (2,415,221 bytes), with no model call.
 
 ## Show media in the chat (all providers)
 
+### Import chat pictures into the graph
+
+`list_chat_attachments(chat_id)` returns original attachment names, sizes,
+MIME types and `source` (`user` or `generated`). It also discovers generated
+images in the current provider session. `import_chat_attachment(chat_id,
+name, node_id)` copies one into an existing asset node through the ordinary
+node upload implementation, retaining its validation and original bytes.
+For a sub-dashboard, use an asset node inside it, then set its result.
+
+The API fetches bytes from the authenticated runner attachment route; it
+never opens a private agent path. Names are opaque 32-hex filenames, paths
+and symlinks are rejected. No shell, base64 in model context, extra filesystem
+permissions or provider-specific upload flow is needed. User messages currently
+accept image attachments; this does not add a general file-upload UI.
+
 `show_in_chat(chat_id, asset_id, caption="")` is an Orchestrator MCP tool for
 Claude, Codex and Antigravity, in both project and Dev chats. The current chat
 id is injected into each profile; resumed prompt-based sessions also receive
@@ -343,6 +358,16 @@ they can use the same media API with those credentials (never print the
 API token). Locally generated files can first be uploaded to the existing
 `/api/assets/upload` multipart route and then published by their asset id.
 Project chats use MCP and do not need shell/filesystem permission expansion.
+
+Codex project chats additionally allow the built-in `image_gen` tool for
+requested image generation/editing (`features.image_generation=true`). This
+does not enable apps/plugins or change the read-only sandbox and fixed
+approval policy. Generated output uses the same automatic chat attachments
+as Dev chats; no external image API or API key is required by this path.
+Existing project sessions receive changed developer instructions through
+`thread/inject_items` before their next turn, once per instruction digest.
+This CLI retains its original developer message when `thread/resume` is
+given new `developerInstructions`; a runner restart alone cannot update it.
 
 Integration checks (temporary files and in-process HTTP, no production DB):
 
