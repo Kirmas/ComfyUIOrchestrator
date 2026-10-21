@@ -44,8 +44,9 @@ flags. A new CLI is one new class + a line in `PROVIDERS`.
   `utilization` there is a percent; the promotional cloud-session credit is the
   block with a `limit_dollars` (its key is an internal codename, matched by
   shape) and shows as a `cloud_credits` window. The token is only read, never
-  refreshed (rotating it could log the CLI out); if it has expired the reading
-  keeps its last value until any chat turn renews it. Each turn's
+  refreshed by this code (rotating it could log the CLI out); when it has
+  expired (~8 h idle) the provider runs `claude auth status`, which makes the
+  CLI renew its own login with no model call (verified on 2.1.304), and retries. Each turn's
   `rate_limit_event` still refreshes the plan windows too.
 - `codex` -- `codex app-server --stdio`, bidirectional JSON-RPC. One server
   process per turn: initialize -> thread/start or thread/resume -> turn/start.

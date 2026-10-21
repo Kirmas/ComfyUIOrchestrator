@@ -104,6 +104,23 @@ class ClaudeProviderTests(unittest.TestCase):
         ids = {w["id"] for w in providers.limits.data["claude"]["windows"]}
         self.assertEqual(ids, {"five_hour", "cloud_credits"})
 
+    def test_expired_login_is_renewed_by_the_cli_then_retried(self):
+        from unittest.mock import AsyncMock, patch
+        usage = {"five_hour": {"utilization": 10.0, "resets_at": "2026-10-21T05:00:00+00:00"}}
+        calls = iter([providers.TokenExpired("expired"), usage])
+
+        def read():
+            item = next(calls)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        with patch.object(self.provider, "_read_usage", side_effect=read), \
+             patch.object(self.provider, "renew_login", AsyncMock()) as renew:
+            run(self.provider.probe_limits())
+        renew.assert_awaited_once()
+        self.assertAlmostEqual(providers.limits.data["claude"]["windows"][0]["utilization"], 0.10)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -106,6 +106,10 @@ class LimitsStore:
 limits = LimitsStore(DATA_DIR / "limits.json")
 
 
+class TokenExpired(RuntimeError):
+    """A CLI's stored login token is past its expiry."""
+
+
 class SetupError(Exception):
     """The CLI needs a one-time setting only the person should make; the
     message says which. Shown in the transcript as is."""
@@ -575,9 +579,9 @@ class ClaudeProvider(Provider):
     def _read_usage(self) -> dict:
         """Blocking. The same endpoint the CLI's own `/usage` and the desktop
         app read: plan usage without a model turn, so it costs nothing. It
-        authenticates with the CLI's own OAuth login. The token is only read,
-        never refreshed here: rotating the refresh token behind the CLI's
-        back could log it out, and any turn the CLI runs refreshes it anyway."""
+        authenticates with the CLI's own OAuth login. The token is only read here; an expired one is renewed by the CLI
+        itself (renew_login), never by rotating the refresh token behind
+        its back, which could log it out."""
         import urllib.error
         import urllib.request
 
@@ -588,7 +592,7 @@ class ClaudeProvider(Provider):
         if not oauth.get("accessToken"):
             raise RuntimeError("No Claude login found (~/.claude/.credentials.json)")
         if (oauth.get("expiresAt") or 0) / 1000 < time.time():
-            raise RuntimeError("The Claude login token has expired; it renews itself the next time a chat runs")
+            raise TokenExpired("The Claude login token has expired")
         request = urllib.request.Request(self.USAGE_URL, headers={
             "Authorization": f"Bearer {oauth['accessToken']}",
             "anthropic-beta": "oauth-2025-04-20",
@@ -631,8 +635,28 @@ class ClaudeProvider(Provider):
             break
         return windows
 
+    async def renew_login(self) -> None:
+        """Let the CLI renew its own expired login: `claude auth status`
+        refreshes the OAuth token as a side effect (verified on 2.1.304), with
+        no model call. The CLI does the rotation itself, so nothing here ever
+        touches the refresh token."""
+        proc = await asyncio.create_subprocess_exec(
+            self.binary, "auth", "status",
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            await asyncio.wait_for(proc.wait(), 60)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise
+
     async def probe_limits(self):
-        usage = await asyncio.to_thread(self._read_usage)
+        try:
+            usage = await asyncio.to_thread(self._read_usage)
+        except TokenExpired:
+            # An idle night lets the ~8 h token lapse; renew it and retry once.
+            await self.renew_login()
+            usage = await asyncio.to_thread(self._read_usage)
         if windows := self.usage_windows(usage):
             limits.update(self.id, None, windows)
 
