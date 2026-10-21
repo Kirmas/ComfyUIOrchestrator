@@ -16,6 +16,7 @@ import type {
   AgentProviderInfo,
   AskUserQuestionInput,
   AskUserQuestionItem,
+  HandoffDecision,
   PermissionDecision,
 } from "../types";
 import { cx } from "../utils";
@@ -81,8 +82,16 @@ const DECIDED: Record<string, TKey> = {
   cancelled: "agent.permission.decided.cancelled",
   deny_unattended: "agent.permission.decided.deny_unattended",
 };
+const HANDOFF_DECIDED: Record<string, TKey> = {
+  allow_once: "agent.handoff.decided.allow_once",
+  allow_always: "agent.handoff.decided.allow_always",
+  deny_once: "agent.handoff.decided.deny_once",
+  deny_always: "agent.handoff.decided.deny_always",
+  timeout: "agent.handoff.decided.timeout",
+};
 // Sidebar entry for the night mode panel, selected like a chat.
 const NIGHT_ID = "__night__";
+const HANDOFF_RULES_ID = "__handoff_rules__";
 // The model sees at most ~1568px on the long side anyway; bigger only costs
 // upload time from a phone. Past the byte cap a PNG falls back to JPEG.
 const IMAGE_MAX_SIDE = 1568;
@@ -223,6 +232,7 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
   const devChats = allDevChats.filter(listed);
   const doneCount = chats.filter((c) => c.done && (c.kind === "dev" || c.project_id === projectId)).length;
   const nightSelected = selectedId === NIGHT_ID && kinds.includes("dev");
+  const handoffRulesSelected = selectedId === HANDOFF_RULES_ID;
 
   const renderItem = (c: Chat) => (
     <div key={c.id} className={cx("agent-chat-item", c.id === selectedId && "active", c.done && "done")} onClick={() => select(c.id)}>
@@ -256,7 +266,7 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
   );
 
   return (
-    <div className={cx("agent-view", (selected || nightSelected) && "has-selection")}>
+    <div className={cx("agent-view", (selected || nightSelected || handoffRulesSelected) && "has-selection")}>
       <div className="agent-sidebar">
         {error && <div className="error-text">{error}</div>}
         <div className="agent-section-head">
@@ -297,6 +307,9 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
           </>
         )}
         <LimitsPanel providers={providers} />
+        <div className={cx("agent-chat-item", handoffRulesSelected && "active")} onClick={() => select(HANDOFF_RULES_ID)}>
+          <span className="agent-chat-title">⚙️ {t("agent.handoff.rules")}</span>
+        </div>
         {doneCount > 0 && (
           <label className="agent-show-done">
             <input type="checkbox" checked={showDone} onChange={(e) => toggleShowDone(e.target.checked)} />
@@ -307,6 +320,8 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
       <div className="agent-main">
         {nightSelected ? (
           <NightPanel onOpenChat={select} onBack={() => select(null)} />
+        ) : handoffRulesSelected ? (
+          <HandoffRulesPanel onBack={() => select(null)} />
         ) : selected ? (
           <ChatView
             key={selected.id}
@@ -315,6 +330,7 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
             onBack={() => select(null)}
             onChanged={reload}
             onSetDone={(done) => setDone(selected, done)}
+            onOpenChat={select}
           />
         ) : (
           <div className="agent-empty">{t("agent.pickOrCreate")}</div>
@@ -431,6 +447,89 @@ function LimitsPanel({ providers }: { providers: AgentProviderInfo[] }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function HandoffCountdown({ expiresAt }: { expiresAt: number }) {
+  const t = useT();
+  const [nowSec, setNowSec] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    const iv = setInterval(() => setNowSec(Date.now() / 1000), 1000);
+    return () => clearInterval(iv);
+  }, []);
+  const remaining = Math.max(0, Math.round(expiresAt - nowSec));
+  return <span className="agent-handoff-countdown">⏱ {t("agent.handoff.secondsRemaining", { s: remaining })}</span>;
+}
+
+function HandoffRulesPanel({ onBack }: { onBack: () => void }) {
+  const t = useT();
+  const [rules, setRules] = useState<Record<string, "allow" | "deny"> | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    agentChatsApi.getHandoffRules().then(
+      (res) => {
+        setRules(res.rules || {});
+        setLoading(false);
+      },
+      (err) => {
+        console.error("Failed to load handoff rules:", err);
+        setLoading(false);
+      },
+    );
+  }, []);
+
+  const updateRule = async (pairKey: string, decision: string) => {
+    if (!rules) return;
+    const nextRules = { ...rules };
+    if (decision === "remove") {
+      delete nextRules[pairKey];
+    } else if (decision === "allow" || decision === "deny") {
+      nextRules[pairKey] = decision;
+    }
+    setRules(nextRules);
+    try {
+      await agentChatsApi.updateHandoffRules(nextRules);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const entries = Object.entries(rules || {});
+
+  return (
+    <div className="agent-handoff-rules-panel">
+      <div className="agent-header">
+        <button className="agent-back" onClick={onBack}>
+          ←
+        </button>
+        <strong>⚙️ {t("agent.handoff.rules")}</strong>
+      </div>
+      <div className="agent-handoff-rules-body">
+        {loading ? (
+          <div className="node-cell-hint">…</div>
+        ) : entries.length === 0 ? (
+          <div className="node-cell-hint">{t("agent.handoff.noRules")}</div>
+        ) : (
+          <div className="agent-handoff-rules-list">
+            {entries.map(([pair, decision]) => (
+              <div key={pair} className="agent-handoff-rule-item">
+                <span className="agent-handoff-rule-pair">{pair}</span>
+                <select
+                  className="agent-model"
+                  value={decision}
+                  onChange={(e) => updateRule(pair, e.target.value)}
+                >
+                  <option value="allow">{t("agent.handoff.ruleAllow")}</option>
+                  <option value="deny">{t("agent.handoff.ruleDeny")}</option>
+                  <option value="remove">{t("agent.handoff.ruleRemove")}</option>
+                </select>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -622,12 +721,14 @@ function ChatView({
   onBack,
   onChanged,
   onSetDone,
+  onOpenChat,
 }: {
   chat: Chat;
   provider: AgentProviderInfo | undefined;
   onBack: () => void;
   onChanged: () => void;
   onSetDone: (done: boolean) => void;
+  onOpenChat?: (chatId: string) => void;
 }) {
   const t = useT();
   const { events, connected } = useChatEvents(chat.id);
@@ -636,6 +737,29 @@ function ChatView({
   const [sending, setSending] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const isFrozen = !!chat.handed_off_to;
+
+  const handoffDecisions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const e of events) {
+      if (e.type === "handoff_declined") map.set(e.request_id, e.timeout ? "timeout" : "deny_once");
+      else if (e.type === "handoff_out" && e.request_id) map.set(e.request_id, "allow_once");
+    }
+    return map;
+  }, [events]);
+
+  const handleHandoffDecision = (requestId: string, decision: HandoffDecision) => {
+    agentChatsApi.decideHandoff(chat.id, requestId, decision).then(
+      (res) => {
+        onChanged();
+        if (res.chat_id && onOpenChat) {
+          onOpenChat(res.chat_id);
+        }
+      },
+      (err) => alert(err instanceof Error ? err.message : String(err)),
+    );
+  };
 
   const attach = async (files: Iterable<File>) => {
     for (const file of files) {
@@ -706,7 +830,7 @@ function ChatView({
 
   const send = async () => {
     const text = draft.trim();
-    if ((!text && !attachments.length) || running || sending) return;
+    if ((!text && !attachments.length) || running || sending || isFrozen) return;
     setSending(true);
     try {
       await agentChatsApi.send(
@@ -872,12 +996,32 @@ function ChatView({
         {events.map((e) => {
           switch (e.type) {
             case "user":
-              return e.origin === "agent" ? (
-                <div key={e.seq} className="agent-msg agent-msg-report">
-                  <div className="agent-meta">🤖 {t("agent.reportFromAgent")}</div>
-                  {e.text}
-                </div>
-              ) : (
+              if (e.origin === "agent") {
+                return (
+                  <div key={e.seq} className="agent-msg agent-msg-report">
+                    <div className="agent-meta">🤖 {t("agent.reportFromAgent")}</div>
+                    {e.text}
+                  </div>
+                );
+              }
+              if (e.origin === "handoff") {
+                return (
+                  <details key={e.seq} className="agent-msg agent-msg-handoff" open={false}>
+                    <summary className="agent-handoff-summary">
+                      🔄 {t("agent.handoff.fromCard", { source: chat.handoff_from?.target_label || chat.handoff_from?.target || "previous chat" })}
+                    </summary>
+                    <pre className="agent-handoff-body">{e.text}</pre>
+                  </details>
+                );
+              }
+              if (e.origin === "system") {
+                return (
+                  <div key={e.seq} className="agent-msg agent-msg-system">
+                    {e.text}
+                  </div>
+                );
+              }
+              return (
                 <div key={e.seq} className="agent-msg agent-msg-user">
                   {e.images && e.images.length > 0 && (
                     <ChatImages chatId={chat.id} images={e.images} />
@@ -1013,12 +1157,63 @@ function ChatView({
                   {t("agent.status.stopped")}
                 </div>
               ) : null;
+            case "handoff_request": {
+              const decision = handoffDecisions.get(e.request_id) || (chat.pending_handoff?.request_id === e.request_id ? null : (e.expires_at && e.expires_at < Date.now() / 1000 ? "timeout" : null));
+              return (
+                <div key={e.seq} className={cx("agent-permission", !decision && "pending")}>
+                  <div>
+                    <strong>🔄 {t("agent.handoff.asks", { target: e.target_label || e.target })}</strong>
+                    {e.reason && <span className="node-cell-hint"> — {e.reason}</span>}
+                  </div>
+                  <pre>{e.task_preview || e.task}</pre>
+                  {decision ? (
+                    <div className="agent-meta">{HANDOFF_DECIDED[decision] ? t(HANDOFF_DECIDED[decision]) : decision}</div>
+                  ) : (
+                    <div className="agent-permission-actions">
+                      <button className="primary" onClick={() => handleHandoffDecision(e.request_id, "allow_once")}>
+                        {t("agent.handoff.allowOnce")}
+                      </button>
+                      <button onClick={() => handleHandoffDecision(e.request_id, "allow_always")}>
+                        {t("agent.handoff.allowAlways")}
+                      </button>
+                      <button className="agent-stop" onClick={() => handleHandoffDecision(e.request_id, "deny_once")}>
+                        {t("agent.handoff.denyOnce")}
+                      </button>
+                      <button className="agent-stop" onClick={() => handleHandoffDecision(e.request_id, "deny_always")}>
+                        {t("agent.handoff.denyAlways")}
+                      </button>
+                      {e.expires_at && <HandoffCountdown expiresAt={e.expires_at} />}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+            case "handoff_declined":
+              return (
+                <div key={e.seq} className="agent-msg agent-msg-error">
+                  🚫 {t("agent.handoff.declined", { target: e.target_label || e.target })}{e.timeout ? ` (${t("agent.handoff.decided.timeout")})` : ""}
+                </div>
+              );
+            case "handoff_out":
+              return null;
             default:
               return null;
           }
         })}
         {status === "running" && <div className="agent-meta">{t("agent.working")}</div>}
       </div>
+      {chat.handed_off_to && (
+        <div className="agent-handoff-frozen-banner">
+          <span>
+            🔒 {t("agent.handoff.frozenBanner", { target: chat.handed_off_to.target_label || chat.handed_off_to.target })}
+          </span>
+          {onOpenChat && (
+            <button className="primary" onClick={() => onOpenChat(chat.handed_off_to!.chat_id)}>
+              {t("agent.handoff.open")}
+            </button>
+          )}
+        </div>
+      )}
       {attachments.length > 0 && (
         <div className="agent-images agent-attachments">
           {attachments.map((a, i) => (
@@ -1048,7 +1243,7 @@ function ChatView({
       >
         {chat.accepts_images && (
           <>
-            <button className="agent-attach" title={t("agent.attach")} onClick={() => fileRef.current?.click()}>
+            <button className="agent-attach" title={t("agent.attach")} disabled={isFrozen || running || sending} onClick={() => fileRef.current?.click()}>
               📎
             </button>
             <input
@@ -1057,6 +1252,7 @@ function ChatView({
               accept="image/*"
               multiple
               hidden
+              disabled={isFrozen || running || sending}
               onChange={(e) => {
                 attach(Array.from(e.target.files ?? []));
                 e.target.value = "";
@@ -1066,10 +1262,11 @@ function ChatView({
         )}
         <textarea
           value={draft}
-          placeholder={t("agent.placeholder")}
+          placeholder={isFrozen ? t("agent.handoff.chatFrozen") : t("agent.placeholder")}
+          disabled={isFrozen || running || sending}
           onChange={(e) => setDraft(e.target.value)}
           onPaste={
-            chat.accepts_images
+            chat.accepts_images && !isFrozen
               ? (e) => {
                   const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
                   if (files.length) {
@@ -1099,7 +1296,7 @@ function ChatView({
                 pct: `${compactPct}%`,
               })}
               onClick={compact}
-              disabled={running || sending}
+              disabled={running || sending || isFrozen}
             >
               <span className="agent-compact-label">{t("agent.compact")}</span>
               <span className="agent-compact-pct">{compactPct}%</span>
@@ -1110,7 +1307,7 @@ function ChatView({
               {t("agent.stop")}
             </button>
           ) : (
-            <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length) || sending}>
+            <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length) || sending || isFrozen}>
               {t("agent.send")}
             </button>
           )}

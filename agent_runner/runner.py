@@ -60,6 +60,13 @@ from pathlib import Path
 import night as night_ops
 from night import NightState
 from providers import DATA_DIR, DEFAULT_PROVIDER, IMAGE_TYPES, PROVIDERS, SetupError, TurnSpec, limits, provider_of, snippet
+from handoff import HandoffConfig, build_first_message, carry_over, get_handoff_targets, target_label
+
+handoff_config = HandoffConfig()
+_handoff_timeouts: dict[str, asyncio.Task] = {}
+# Chats with an auto handoff in flight: two parallel hand_off calls must not
+# both get past the checks and create two continuations.
+_handoff_busy: set[str] = set()
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -349,6 +356,10 @@ async def mark_interrupted() -> None:
         if chat.meta.get("status") in BUSY:
             await chat.emit({"type": "error", "text": "Runner restarted while this turn was running; it was cut short."})
             await chat.set_status("interrupted")
+        pending_handoff = chat.meta.get("pending_handoff")
+        if pending_handoff:
+            # On runner restart, a pending request is treated as timed out.
+            await handle_handoff_decline(chat.id, pending_handoff["request_id"], is_timeout=True)
         stage = chat.meta.get("stage")
         if chat.meta.get("origin") == "agent" and stage not in (None, "queued", "done"):
             # A report caught mid-pipeline. Before "checking" nothing was
@@ -670,6 +681,192 @@ async def stop_chat(chat: Chat) -> None:
             pass
 
 
+# --- Handoff helpers ------------------------------------------------------
+
+
+def cancel_handoff_timeout(chat_id: str, request_id: str) -> None:
+    key = f"{chat_id}:{request_id}"
+    task = _handoff_timeouts.pop(key, None)
+    if task and not task.done():
+        task.cancel()
+
+
+def schedule_handoff_timeout(chat_id: str, request_id: str, delay: float) -> None:
+    key = f"{chat_id}:{request_id}"
+    cancel_handoff_timeout(chat_id, request_id)
+
+    async def _worker():
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        await handle_handoff_decline(chat_id, request_id, is_timeout=True)
+
+    _handoff_timeouts[key] = asyncio.create_task(_worker())
+
+
+# Long enough for the tool result to reach the agent before it is stopped.
+HANDOFF_STOP_DELAY = 2.0
+
+
+async def stop_after(chat, delay: float) -> None:
+    await asyncio.sleep(delay)
+    await stop_chat(chat)
+
+
+def claim_pending_handoff(chat, request_id: str) -> dict | None:
+    """Take the pending request off the chat, or None if it is no longer the
+    pending one. No await inside: whoever claims it first (a click, a second
+    click from a phone, the timeout) is the only one that acts on it."""
+    pending = chat.meta.get("pending_handoff")
+    if not pending or pending.get("request_id") != request_id:
+        return None
+    chat.meta.pop("pending_handoff", None)
+    chat.save_meta()
+    cancel_handoff_timeout(chat.id, request_id)
+    return pending
+
+
+async def handle_handoff_decline(chat_id: str, request_id: str, is_timeout: bool = False) -> None:
+    chat = chats.get(chat_id)
+    if not chat:
+        return
+    pending = claim_pending_handoff(chat, request_id)
+    if pending:
+        await decline_handoff(chat, pending, is_timeout)
+
+
+async def decline_handoff(chat, pending: dict, is_timeout: bool) -> None:
+    target = pending["target"]
+    tgt_label = pending.get("target_label") or target_label(target)
+    refused = chat.meta.setdefault("handoff_refused", [])
+    if target not in refused:
+        refused.append(target)
+    chat.save_meta()
+
+    await chat.emit({
+        "type": "handoff_declined",
+        "request_id": pending["request_id"],
+        "target": target,
+        "target_label": tgt_label,
+        "timeout": is_timeout,
+    })
+
+    timeout_suffix = " (no answer in time)" if is_timeout else ""
+    sys_text = (
+        f"[System] The person did not approve handing this task to {tgt_label}{timeout_suffix}. "
+        f"Continue the task yourself. You cannot request {tgt_label} again in this chat."
+    )
+    await chat.emit({"type": "user", "text": sys_text, "origin": "system"})
+    asyncio.create_task(resume_after_decline(chat, sys_text))
+
+
+async def resume_after_decline(chat, text: str) -> None:
+    # Let whatever turn is in flight (the stopped requester, or one the person
+    # started meanwhile) finish for real first: two run_turns on one chat
+    # overwrite each other's proc and status.
+    while (task := getattr(chat, "task", None)) and not task.done():
+        try:
+            await task
+        except BaseException:
+            pass
+    if chat.meta.get("handed_off_to"):
+        return
+    await chat.set_status("running")
+    chat.turn_origin = "system"
+    chat.task = asyncio.create_task(run_turn(chat, text, ()))
+
+
+async def perform_handoff(
+    source_chat: Chat,
+    target: str,
+    task: str,
+    reason: str,
+    done_so_far: str,
+    focus: list[str],
+    config: HandoffConfig,
+    request_id: str | None = None,
+) -> Chat:
+    if source_chat.proc and source_chat.proc.returncode is None:
+        await stop_chat(source_chat)
+
+    prov_id, model_id = target.split(":", 1)
+    target_prov = PROVIDERS.get(prov_id)
+    if not target_prov:
+        raise ValueError(f"Unknown provider: {prov_id!r}")
+    effort = config.effort_for(target, target_prov)
+
+    source_title = source_chat.meta.get("title") or "Task"
+    new_title = f"{source_title} →"
+
+    source_prov = source_chat.meta.get("provider") or DEFAULT_PROVIDER
+    source_model = source_chat.meta.get("requested_model") or source_chat.meta.get("model")
+    source_target = f"{source_prov}:{source_model}"
+    source_identity = config.get_identity(source_target)
+    source_chain = list((source_chat.meta.get("handoff_from") or {}).get("chain") or [source_identity])
+    new_identity = config.get_identity(target)
+    new_chain = list(source_chain)
+    if new_identity not in new_chain:
+        new_chain.append(new_identity)
+
+    body = {
+        "kind": "project",
+        "project_id": source_chat.meta.get("project_id"),
+        "project_name": source_chat.meta.get("project_name"),
+        "mcp_url": source_chat.meta.get("mcp_url"),
+        "mcp_token": source_chat.meta.get("mcp_token"),
+        "api_url": source_chat.meta.get("api_url"),
+        "api_token": source_chat.meta.get("api_token"),
+        "provider": prov_id,
+        "model": model_id,
+        "effort": effort,
+        "title": new_title,
+    }
+    new_chat, err, code = do_create_chat(body)
+    if not new_chat:
+        raise RuntimeError(f"Failed to create handed-off chat: {err}")
+
+    ts = now()
+    new_chat.meta["handoff_from"] = {
+        "chat_id": source_chat.id,
+        "target": source_target,
+        "target_label": target_label(source_target),
+        "reason": reason,
+        "chain": new_chain,
+        **carry_over(source_chat, config),
+    }
+    new_chat.save_meta()
+
+    source_chat.meta.pop("pending_handoff", None)
+    source_chat.meta["handed_off_to"] = {
+        "chat_id": new_chat.id,
+        "target": target,
+        "target_label": target_label(target),
+        "reason": reason,
+        "at": ts,
+    }
+    source_chat.save_meta()
+
+    await source_chat.emit({
+        "type": "handoff_out",
+        **({"request_id": request_id} if request_id else {}),
+        "chat_id": new_chat.id,
+        "target": target,
+        "target_label": target_label(target),
+        "reason": reason,
+        "at": ts,
+    })
+
+    first_msg = await build_first_message(
+        source_chat, target, task, reason, done_so_far, focus, config
+    )
+    await new_chat.emit({"type": "user", "text": first_msg, "origin": "handoff"})
+    await new_chat.set_status("running")
+    new_chat.turn_origin = "handoff"
+    new_chat.task = asyncio.create_task(run_turn(new_chat, first_msg, ()))
+    return new_chat
+
+
 # --- HTTP -----------------------------------------------------------------
 
 
@@ -700,27 +897,26 @@ async def list_chats(request: Request):
     return JSONResponse(items)
 
 
-async def create_chat(request: Request):
-    body = await request.json()
+def do_create_chat(body: dict) -> tuple[Chat | None, str | None, int]:
     profile = PROFILES.get(body.get("kind"))
     if not profile:
-        return JSONResponse({"detail": f"Unknown chat kind: {body.get('kind')!r}"}, status_code=400)
+        return None, f"Unknown chat kind: {body.get('kind')!r}", 400
     extra = profile.new_meta(body)
     if isinstance(extra, str):
-        return JSONResponse({"detail": extra}, status_code=400)
+        return None, extra, 400
     provider = PROVIDERS.get(body.get("provider") or DEFAULT_PROVIDER)
     if not provider:
-        return JSONResponse({"detail": f"Unknown provider: {body.get('provider')!r}"}, status_code=400)
+        return None, f"Unknown provider: {body.get('provider')!r}", 400
     if not provider.available:
-        return JSONResponse({"detail": f"{provider.label} is not installed on this machine"}, status_code=400)
+        return None, f"{provider.label} is not installed on this machine", 400
     if profile.kind == "project" and not provider.supports_project:
-        return JSONResponse({"detail": f"{provider.label} can't run project chats (it can't be limited to the orchestrator's tools)"}, status_code=400)
+        return None, f"{provider.label} can't run project chats (it can't be limited to the orchestrator's tools)", 400
     model = body.get("model") or provider.default_model
     if model not in provider.model_ids:
-        return JSONResponse({"detail": f"Unknown model for {provider.label}: {model!r}"}, status_code=400)
+        return None, f"Unknown model for {provider.label}: {model!r}", 400
     effort = body.get("effort") or None
     if effort and effort not in provider.efforts_for(model):
-        return JSONResponse({"detail": f"{provider.label} has no effort level {effort!r}"}, status_code=400)
+        return None, f"{provider.label} has no effort level {effort!r}", 400
     chat_id = uuid.uuid4().hex[:12]
     d = CHATS_DIR / chat_id
     d.mkdir(parents=True)
@@ -750,6 +946,14 @@ async def create_chat(request: Request):
     (d / "meta.json").chmod(0o600)
     chat = Chat(chat_id)
     chats[chat_id] = chat
+    return chat, None, 201
+
+
+async def create_chat(request: Request):
+    body = await request.json()
+    chat, err, status_code = do_create_chat(body)
+    if err:
+        return JSONResponse({"detail": err}, status_code=status_code)
     return JSONResponse(public_meta(chat), status_code=201)
 
 
@@ -939,6 +1143,10 @@ async def post_message(request: Request):
     chat = get_chat(request)
     if not chat:
         return JSONResponse({"detail": "Chat not found"}, status_code=404)
+    if chat.meta.get("handed_off_to"):
+        handoff_info = chat.meta["handed_off_to"]
+        tgt_label = target_label(handoff_info.get("target", ""))
+        return JSONResponse({"detail": f"This chat was handed off to {tgt_label}"}, status_code=409)
     body = await request.json()
     text = (body.get("text") or "").strip()
     images = decode_images(body.get("images") or [])
@@ -1096,6 +1304,163 @@ async def hook_pre_tool(request: Request):
         chat.pending.pop(req_id, None)
         if not chat.pending:
             await chat.set_status("running")
+
+
+async def list_handoff_targets_route(request: Request):
+    chat = get_chat(request)
+    if not chat:
+        return JSONResponse({"detail": "Chat not found"}, status_code=404)
+    targets = get_handoff_targets(chat, handoff_config)
+    return JSONResponse(targets)
+
+
+async def request_handoff_route(request: Request):
+    chat = get_chat(request)
+    if not chat:
+        return JSONResponse({"detail": "Chat not found"}, status_code=404)
+    body = await request.json()
+    # From here to setting pending_handoff / _handoff_busy: no await, so a
+    # parallel call can't slip between the check and the claim.
+    if chat.meta.get("kind") != "project":
+        return JSONResponse({"detail": "Only project chats can be handed off"}, status_code=400)
+    if chat.meta.get("handed_off_to"):
+        return JSONResponse({"detail": "Chat is already frozen"}, status_code=400)
+    pending = chat.meta.get("pending_handoff")
+    if pending and pending.get("target") == body.get("target") and pending.get("task") == (body.get("task") or "").strip():
+        # The same call again: an MCP client re-sends it when the stop below
+        # cuts the stream before it read the first answer (seen live,
+        # 2026-10-21). Same answer, not an error.
+        return JSONResponse({"status": "awaiting_person"})
+    if pending or chat.id in _handoff_busy:
+        return JSONResponse({"detail": "A handoff request is already pending"}, status_code=400)
+    target = body.get("target") or ""
+    task = (body.get("task") or "").strip()
+    reason = (body.get("reason") or "").strip()
+    done_so_far = (body.get("done_so_far") or "").strip()
+    focus = body.get("focus") or []
+
+    if len(task) > 4000:
+        return JSONResponse({"detail": "task exceeds 4000 characters"}, status_code=400)
+    if len(reason) > 300:
+        return JSONResponse({"detail": "reason exceeds 300 characters"}, status_code=400)
+    if len(done_so_far) > 2000:
+        return JSONResponse({"detail": "done_so_far exceeds 2000 characters"}, status_code=400)
+    if not isinstance(focus, list) or len(focus) > 20:
+        return JSONResponse({"detail": "focus exceeds 20 ids"}, status_code=400)
+
+    targets = get_handoff_targets(chat, handoff_config)
+    target_info = next((t for t in targets if t["target"] == target), None)
+    if not target_info:
+        return JSONResponse({"detail": f"Target {target!r} is not an available handoff target"}, status_code=400)
+
+    if target_info["mode"] == "auto":
+        _handoff_busy.add(chat.id)
+        try:
+            new_chat = await perform_handoff(
+                chat, target, task, reason, done_so_far, focus, handoff_config
+            )
+        except Exception as exc:
+            return JSONResponse({"detail": f"Handoff failed: {exc}"}, status_code=500)
+        finally:
+            _handoff_busy.discard(chat.id)
+        return JSONResponse({"status": "started", "chat_id": new_chat.id})
+
+    req_id = uuid.uuid4().hex[:12]
+    tgt_label = target_info["label"]
+    timeout_secs = handoff_config.timeout_minutes * 60
+    expires_at = now() + timeout_secs
+    pending = {
+        "request_id": req_id,
+        "target": target,
+        "target_label": tgt_label,
+        "task": task,
+        "reason": reason,
+        "done_so_far": done_so_far,
+        "focus": focus,
+        "expires_at": expires_at,
+    }
+    chat.meta["pending_handoff"] = pending
+    chat.save_meta()
+
+    await chat.emit({
+        "type": "handoff_request",
+        "request_id": req_id,
+        "target": target,
+        "target_label": tgt_label,
+        "reason": reason,
+        "task": task,
+        "task_preview": task[:200] + ("…" if len(task) > 200 else ""),
+        "expires_at": expires_at,
+        "timeout_seconds": timeout_secs,
+    })
+
+    schedule_handoff_timeout(chat.id, req_id, timeout_secs)
+    asyncio.create_task(stop_after(chat, HANDOFF_STOP_DELAY))
+    return JSONResponse({"status": "awaiting_person"})
+
+
+async def decide_handoff_route(request: Request):
+    chat = get_chat(request)
+    if not chat:
+        return JSONResponse({"detail": "Chat not found"}, status_code=404)
+    body = await request.json()
+    decision = body.get("decision")
+    if decision not in ("allow_once", "allow_always", "deny_once", "deny_always"):
+        return JSONResponse({"detail": f"Invalid decision: {decision!r}"}, status_code=400)
+    pending = claim_pending_handoff(chat, request.path_params.get("request_id"))
+    if not pending:
+        return JSONResponse({"detail": "That handoff request is no longer pending"}, status_code=409)
+
+    cur_prov = chat.meta.get("provider") or DEFAULT_PROVIDER
+    cur_model = chat.meta.get("requested_model") or chat.meta.get("model")
+    from_target = f"{cur_prov}:{cur_model}"
+    to_target = pending["target"]
+
+    if decision == "allow_always":
+        handoff_config.set_rule(from_target, to_target, "allow")
+    elif decision == "deny_always":
+        handoff_config.set_rule(from_target, to_target, "deny")
+
+    if not decision.startswith("allow"):
+        await decline_handoff(chat, pending, is_timeout=False)
+        return JSONResponse({"status": "declined"})
+    try:
+        new_chat = await perform_handoff(
+            chat,
+            to_target,
+            pending["task"],
+            pending["reason"],
+            pending.get("done_so_far", ""),
+            pending.get("focus", []),
+            handoff_config,
+            request_id=pending["request_id"],
+        )
+    except Exception as exc:
+        # The request is already claimed, so the chat isn't left stuck
+        # "pending" forever; the person sees why and can carry on by hand.
+        await chat.emit({"type": "error", "text": f"Handoff to {pending.get('target_label') or to_target} failed: {exc}"})
+        return JSONResponse({"detail": f"Handoff failed: {exc}"}, status_code=500)
+    return JSONResponse({"status": "started", "chat_id": new_chat.id})
+
+
+async def get_handoff_rules_route(request: Request):
+    return JSONResponse({"rules": handoff_config.rules})
+
+
+async def update_handoff_rules_route(request: Request):
+    body = await request.json()
+    if "rules" in body and isinstance(body["rules"], dict):
+        rules = body["rules"]
+        if not all(isinstance(k, str) and " -> " in k and v in ("allow", "deny") for k, v in rules.items()):
+            return JSONResponse({"detail": "rules must map '<from> -> <to>' to 'allow' or 'deny'"}, status_code=400)
+        handoff_config.update_rules(rules)
+    elif "from" in body and "to" in body:
+        decision = body.get("decision")
+        if decision in ("allow", "deny"):
+            handoff_config.set_rule(body["from"], body["to"], decision)
+        else:
+            handoff_config.remove_rule(body["from"], body["to"])
+    return JSONResponse({"rules": handoff_config.rules})
 
 
 # --- night mode: bug reports from agents ---------------------------------------
@@ -1550,12 +1915,17 @@ routes = [
     Route("/limits/{provider}", refresh_limits, methods=["POST"]),
     Route("/reports", create_report, methods=["POST"]),
     Route("/reports/{report_id}", read_report, methods=["GET"]),
+    Route("/handoff/rules", get_handoff_rules_route, methods=["GET"]),
+    Route("/handoff/rules", update_handoff_rules_route, methods=["PUT"]),
     Route("/night", night_status, methods=["GET"]),
     Route("/night", night_update, methods=["PATCH"]),
     Route("/night/diff", night_diff, methods=["GET"]),
     Route("/night/{action}", night_finish, methods=["POST"]),
     Route("/chats/{chat_id}/permissions/{request_id}", decide, methods=["POST"]),
     Route("/chats/{chat_id}/questions/{request_id}", answer_question, methods=["POST"]),
+    Route("/chats/{chat_id}/handoff-targets", list_handoff_targets_route, methods=["GET"]),
+    Route("/chats/{chat_id}/handoff", request_handoff_route, methods=["POST"]),
+    Route("/chats/{chat_id}/handoffs/{request_id}", decide_handoff_route, methods=["POST"]),
     Route("/chats/{chat_id}/messages", post_message, methods=["POST"]),
     Route("/chats/{chat_id}/stop", stop, methods=["POST"]),
     Route("/chats/{chat_id}/events", events, methods=["GET"]),

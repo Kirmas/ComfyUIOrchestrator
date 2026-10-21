@@ -22,6 +22,9 @@ import type {
   DetectedField,
   DirBrowseResult,
   GridLayout,
+  HandoffDecision,
+  HandoffRules,
+  HandoffTarget,
   IdeaText,
   InputRef,
   Job,
@@ -406,6 +409,13 @@ export const agentChatsApi = {
     api.post<AgentChat>(`/api/agent-chats/${id}/permissions/${requestId}`, { decision }),
   answerQuestion: (id: string, requestId: string, answers: Record<string, string>) =>
     api.post<AgentChat>(`/api/agent-chats/${id}/questions/${requestId}`, { answers }),
+  handoffTargets: (id: string) => api.get<HandoffTarget[]>(`/api/agent-chats/${id}/handoff-targets`),
+  handoff: (id: string, payload: { target: string; task: string; reason: string; done_so_far?: string; focus?: string[] }) =>
+    api.post<{ status: string; chat_id?: string }>(`/api/agent-chats/${id}/handoff`, payload),
+  decideHandoff: (id: string, requestId: string, decision: HandoffDecision) =>
+    api.post<{ status: string; chat_id?: string }>(`/api/agent-chats/${id}/handoffs/${requestId}`, { decision }),
+  getHandoffRules: () => api.get<HandoffRules>("/api/agent-chats/handoff-rules"),
+  updateHandoffRules: (rules: Record<string, "allow" | "deny">) => api.put<HandoffRules>("/api/agent-chats/handoff-rules", { rules }),
   setModel: (id: string, model: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { model }),
   setDone: (id: string, done: boolean) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { done }),
   remove: (id: string) => api.delete(`/api/agent-chats/${id}`),

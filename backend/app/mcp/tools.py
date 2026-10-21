@@ -1193,3 +1193,41 @@ async def get_bug_report(report_id: str) -> dict:
     you're doing wrong and how to get there with the tools that exist.
     """
     return await _get(f"/api/agent-reports/{report_id}")
+
+
+# ---------- agent handoff (docs/agent-handoff/stage1-brief.md) ----------
+@mcp_server.tool()
+async def list_handoff_targets(chat_id: str) -> list[dict]:
+    """List available targets for handing off this task to another provider or model.
+
+    Use only when another model fits the task clearly better (cheaper for simple work,
+    or can do what you can't). Returns only targets you are allowed to hand off to now.
+    Targets in your task's chain, denied by rule, or previously refused are excluded.
+    You cannot hand back to anyone in the chain.
+    Validate chat_id with the current Agent chat_id from your session instructions.
+    """
+    if not re.fullmatch(r"[0-9a-f]{12}|[0-9a-fA-F-]{36}", chat_id):
+        raise ValueError("Use the current Agent chat_id or session UUID from your session instructions")
+    return await _get(f"/api/agent-chats/{chat_id}/handoff-targets")
+
+
+@mcp_server.tool()
+async def hand_off(chat_id: str, target: str, task: str, reason: str, done_so_far: str = "", focus: list[str] | None = None) -> dict:
+    """Hand off your current task to another provider and model, one way.
+
+    Use only when another model fits the task clearly better (cheaper for simple work,
+    or can do what you can't). Write task, reason, and done_so_far in English, concise
+    and self-contained. The task is a complete re-statement of what needs to be done.
+    You cannot hand back to anyone in the chain.
+    On status 'awaiting_person', end your turn with one short line saying you asked.
+    Validate chat_id with the current Agent chat_id from your session instructions.
+    """
+    if not re.fullmatch(r"[0-9a-f]{12}|[0-9a-fA-F-]{36}", chat_id):
+        raise ValueError("Use the current Agent chat_id or session UUID from your session instructions")
+    return await _post(f"/api/agent-chats/{chat_id}/handoff", {
+        "target": target,
+        "task": task,
+        "reason": reason,
+        "done_so_far": done_so_far or "",
+        "focus": focus or [],
+    })

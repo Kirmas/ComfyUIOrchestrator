@@ -68,6 +68,22 @@ class QuestionAnswer(BaseModel):
     answers: dict[str, str]  # question text -> answer; the runner validates
 
 
+class HandoffCreate(BaseModel):
+    target: str
+    task: str = Field(max_length=4000)
+    reason: str = Field(max_length=300)
+    done_so_far: str = Field(default="", max_length=2000)
+    focus: list[str] = Field(default_factory=list, max_length=20)
+
+
+class HandoffDecision(BaseModel):
+    decision: str  # allow_once | allow_always | deny_once | deny_always
+
+
+class HandoffRulesUpdate(BaseModel):
+    rules: dict[str, str] = Field(default_factory=dict)
+
+
 class AgentImage(BaseModel):
     media_type: str
     data: str  # base64; the runner validates type, size and which chats take them
@@ -133,6 +149,16 @@ async def get_limits():
 async def refresh_limits(provider: str):
     """Take a fresh reading now: a tiny turn on that CLI, a few seconds."""
     return await _call("POST", f"/limits/{provider}", timeout=httpx.Timeout(120.0))
+
+
+@router.get("/handoff-rules")
+async def get_handoff_rules():
+    return await _call("GET", "/handoff/rules")
+
+
+@router.put("/handoff-rules")
+async def update_handoff_rules(payload: HandoffRulesUpdate):
+    return await _call("PUT", "/handoff/rules", json=payload.model_dump())
 
 
 @router.post("")
@@ -263,6 +289,27 @@ async def decide_permission(chat_id: str, request_id: str, payload: PermissionDe
 @router.post("/{chat_id}/questions/{request_id}")
 async def answer_question(chat_id: str, request_id: str, payload: QuestionAnswer):
     return await _call("POST", f"/chats/{chat_id}/questions/{request_id}", json={"answers": payload.answers})
+
+
+@router.get("/{chat_id}/handoff-targets")
+async def get_handoff_targets(chat_id: str):
+    if not re.fullmatch(r"[0-9a-f]{12}|[0-9a-fA-F-]{36}", chat_id):
+        raise HTTPException(400, "Invalid chat id or session UUID")
+    return await _call("GET", f"/chats/{chat_id}/handoff-targets")
+
+
+@router.post("/{chat_id}/handoff")
+async def request_handoff(chat_id: str, payload: HandoffCreate):
+    if not re.fullmatch(r"[0-9a-f]{12}|[0-9a-fA-F-]{36}", chat_id):
+        raise HTTPException(400, "Invalid chat id or session UUID")
+    return await _call("POST", f"/chats/{chat_id}/handoff", json=payload.model_dump())
+
+
+@router.post("/{chat_id}/handoffs/{request_id}")
+async def decide_handoff(chat_id: str, request_id: str, payload: HandoffDecision):
+    if not re.fullmatch(r"[0-9a-f]{12}|[0-9a-fA-F-]{36}", chat_id):
+        raise HTTPException(400, "Invalid chat id or session UUID")
+    return await _call("POST", f"/chats/{chat_id}/handoffs/{request_id}", json=payload.model_dump())
 
 
 # --- night mode (agent_runner/night.py) -------------------------------------

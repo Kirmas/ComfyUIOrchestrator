@@ -585,6 +585,31 @@ export interface AgentChat {
   context_window?: number | null;
   // Filed away by the person: hidden from the list unless "show done" is on.
   done?: boolean;
+  // Handoff state (docs/agent-handoff/stage1-brief.md)
+  handed_off_to?: {
+    chat_id: string;
+    target: string;
+    target_label?: string;
+    reason: string;
+    at: number;
+  };
+  handoff_from?: {
+    chat_id: string;
+    target: string;
+    target_label?: string;
+    reason: string;
+    chain: string[];
+  };
+  pending_handoff?: {
+    request_id: string;
+    target: string;
+    target_label?: string;
+    task: string;
+    reason: string;
+    done_so_far?: string;
+    focus?: string[];
+    expires_at: number;
+  };
   created_at: number;
   updated_at: number;
   last_seq: number;
@@ -598,7 +623,7 @@ export interface AgentImageUpload {
 
 export type AgentEvent = { seq: number; ts: number } & (
   // images: attachment names, served by agentChatsApi.attachmentUrl.
-  | { type: "user"; text: string; origin?: "agent"; images?: string[] }
+  | { type: "user"; text: string; origin?: "agent" | "handoff" | "system"; images?: string[] }
   | { type: "text"; text: string }
   | { type: "image"; images: string[] }
   | { type: "media"; asset_id: string; mime_type: string; name: string; caption: string }
@@ -613,10 +638,25 @@ export type AgentEvent = { seq: number; ts: number } & (
   | { type: "permission_decision"; request_id: string; decision: PermissionDecision | "cancelled" | "deny_unattended" }
   | { type: "ask_user_question"; request_id: string; input: AskUserQuestionInput }
   | { type: "ask_user_answer"; request_id: string; answers: Record<string, string> }
+  | { type: "handoff_request"; request_id: string; target: string; target_label: string; reason: string; task: string; task_preview: string; expires_at: number; timeout_seconds: number }
+  | { type: "handoff_declined"; request_id: string; target: string; target_label: string; timeout?: boolean }
+  | { type: "handoff_out"; request_id?: string; chat_id: string; target: string; target_label: string; reason: string; at: number }
   | { type: "night"; text: string }
 );
 
 export type PermissionDecision = "allow" | "allow_session" | "deny";
+
+export type HandoffDecision = "allow_once" | "allow_always" | "deny_once" | "deny_always";
+
+export interface HandoffTarget {
+  target: string;
+  label: string;
+  mode: "auto" | "ask";
+}
+
+export interface HandoffRules {
+  rules: Record<string, "allow" | "deny">;
+}
 
 // The built-in AskUserQuestion tool's own input schema (reverse-engineered
 // against a live `claude -p --input-format stream-json` run, 2026-10-01 --
