@@ -60,7 +60,7 @@ from pathlib import Path
 import night as night_ops
 from night import NightState
 from providers import DATA_DIR, DEFAULT_PROVIDER, IMAGE_TYPES, PROVIDERS, SetupError, TurnSpec, limits, provider_of, snippet
-from handoff import HandoffConfig, build_first_message, carry_over, get_handoff_targets, target_label
+from handoff import HandoffConfig, build_first_message, carry_over, get_handoff_targets, limit_state, target_label
 
 handoff_config = HandoffConfig()
 _handoff_timeouts: dict[str, asyncio.Task] = {}
@@ -736,7 +736,7 @@ async def handle_handoff_decline(chat_id: str, request_id: str, is_timeout: bool
         await decline_handoff(chat, pending, is_timeout)
 
 
-async def decline_handoff(chat, pending: dict, is_timeout: bool) -> None:
+async def decline_handoff(chat, pending: dict, is_timeout: bool, why: str | None = None) -> None:
     target = pending["target"]
     tgt_label = pending.get("target_label") or target_label(target)
     refused = chat.meta.setdefault("handoff_refused", [])
@@ -754,7 +754,7 @@ async def decline_handoff(chat, pending: dict, is_timeout: bool) -> None:
 
     timeout_suffix = " (no answer in time)" if is_timeout else ""
     sys_text = (
-        f"[System] The person did not approve handing this task to {tgt_label}{timeout_suffix}. "
+        f"[System] {why or f'The person did not approve handing this task to {tgt_label}{timeout_suffix}.'} "
         f"Continue the task yourself. You cannot request {tgt_label} again in this chat."
     )
     await chat.emit({"type": "user", "text": sys_text, "origin": "system"})
@@ -1310,7 +1310,7 @@ async def list_handoff_targets_route(request: Request):
     chat = get_chat(request)
     if not chat:
         return JSONResponse({"detail": "Chat not found"}, status_code=404)
-    targets = get_handoff_targets(chat, handoff_config)
+    targets = get_handoff_targets(chat, handoff_config, limits_data=limits.data)
     return JSONResponse(targets)
 
 
@@ -1348,7 +1348,7 @@ async def request_handoff_route(request: Request):
     if not isinstance(focus, list) or len(focus) > 20:
         return JSONResponse({"detail": "focus exceeds 20 ids"}, status_code=400)
 
-    targets = get_handoff_targets(chat, handoff_config)
+    targets = get_handoff_targets(chat, handoff_config, limits_data=limits.data)
     target_info = next((t for t in targets if t["target"] == target), None)
     if not target_info:
         return JSONResponse({"detail": f"Target {target!r} is not an available handoff target"}, status_code=400)
@@ -1379,10 +1379,14 @@ async def request_handoff_route(request: Request):
         "focus": focus,
         "expires_at": expires_at,
     }
+    if target_info.get("scarce"):
+        pending["scarce"] = True
+        if target_info.get("limits_detail"):
+            pending["limits_detail"] = target_info["limits_detail"]
     chat.meta["pending_handoff"] = pending
     chat.save_meta()
 
-    await chat.emit({
+    ev = {
         "type": "handoff_request",
         "request_id": req_id,
         "target": target,
@@ -1392,7 +1396,12 @@ async def request_handoff_route(request: Request):
         "task_preview": task[:200] + ("…" if len(task) > 200 else ""),
         "expires_at": expires_at,
         "timeout_seconds": timeout_secs,
-    })
+    }
+    if target_info.get("scarce"):
+        ev["scarce"] = True
+        if target_info.get("limits_detail"):
+            ev["limits_detail"] = target_info["limits_detail"]
+    await chat.emit(ev)
 
     schedule_handoff_timeout(chat.id, req_id, timeout_secs)
     asyncio.create_task(stop_after(chat, HANDOFF_STOP_DELAY))
@@ -1407,7 +1416,16 @@ async def decide_handoff_route(request: Request):
     decision = body.get("decision")
     if decision not in ("allow_once", "allow_always", "deny_once", "deny_always"):
         return JSONResponse({"detail": f"Invalid decision: {decision!r}"}, status_code=400)
-    pending = claim_pending_handoff(chat, request.path_params.get("request_id"))
+
+    req_id = request.path_params.get("request_id")
+    pending_raw = chat.meta.get("pending_handoff")
+    if not pending_raw or pending_raw.get("request_id") != req_id:
+        return JSONResponse({"detail": "That handoff request is no longer pending"}, status_code=409)
+
+    if pending_raw.get("scarce") and decision in ("allow_always", "deny_always"):
+        return JSONResponse({"detail": "Scarce targets cannot have persistent rules"}, status_code=400)
+
+    pending = claim_pending_handoff(chat, req_id)
     if not pending:
         return JSONResponse({"detail": "That handoff request is no longer pending"}, status_code=409)
 
@@ -1424,6 +1442,17 @@ async def decide_handoff_route(request: Request):
     if not decision.startswith("allow"):
         await decline_handoff(chat, pending, is_timeout=False)
         return JSONResponse({"status": "declined"})
+
+    # Re-check target limit state on allow
+    state, _ = limit_state(to_target, limits.data, handoff_config)
+    if state == "hidden":
+        # The requester is already stopped: resume it, the same way a no does,
+        # rather than leave it idle until the person types.
+        target_name = pending.get("target_label") or to_target
+        await decline_handoff(chat, pending, is_timeout=False,
+                              why=f"Handing this task to {target_name} was approved, but its usage limit ran out meanwhile.")
+        return JSONResponse({"detail": f"Handoff to {target_name} failed: limit ran out while awaiting decision"}, status_code=409)
+
     try:
         new_chat = await perform_handoff(
             chat,

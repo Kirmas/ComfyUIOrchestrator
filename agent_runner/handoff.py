@@ -9,13 +9,33 @@ Stage 1 implementation:
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
+import time
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request as UrlRequest, urlopen
 
 from providers import DATA_DIR, DEFAULT_PROVIDER, PROVIDERS
+
+
+DEFAULT_LIMITS = {
+    "hide_margin": 0.35,
+    "scarce_margin": 0.15,
+    # Below this share used, a window is always ok whatever the pace: right
+    # after a reset even a little use looks "ahead", and asking then is noise.
+    "always_ok_below": 0.30,
+    "ignore_windows": ["cloud_credits"],
+    "durations": {},
+    "pools": {
+        "agy:gemini-3.8-flash": "Gemini Models",
+        "agy:gemini-4-argon": "Gemini 4 Argon",
+        "agy:claude-sonnet-5-5": "Claude and GPT models",
+        "agy:claude-opus-5-5": "Claude and GPT models",
+        "agy:gpt-oss-120b": "Claude and GPT models",
+    },
+}
 
 
 class HandoffConfig:
@@ -30,6 +50,7 @@ class HandoffConfig:
         "claude:sonnet": "claude-sonnet",
         "agy:claude-sonnet-5-5": "claude-sonnet",
     }
+    DEFAULT_LIMITS = DEFAULT_LIMITS
 
     def __init__(self, path: Path | None = None):
         self.path = path or (DATA_DIR / "handoff.json")
@@ -38,6 +59,7 @@ class HandoffConfig:
         self.identities: dict[str, str] = dict(self.DEFAULT_IDENTITIES)
         self.default_effort: dict[str, str] = dict(self.DEFAULT_EFFORT)
         self.rules: dict[str, str] = {}
+        self.limits: dict = copy.deepcopy(DEFAULT_LIMITS)
         self.load()
 
     def load(self) -> None:
@@ -55,6 +77,14 @@ class HandoffConfig:
                 self.default_effort = dict(data["default_effort"])
             if isinstance(data.get("rules"), dict):
                 self.rules = dict(data["rules"])
+            if isinstance(data.get("limits"), dict):
+                lim = copy.deepcopy(DEFAULT_LIMITS)
+                for k, v in data["limits"].items():
+                    if isinstance(v, dict) and isinstance(lim.get(k), dict):
+                        lim[k].update(v)
+                    else:
+                        lim[k] = v
+                self.limits = lim
         except (OSError, ValueError):
             pass
 
@@ -66,6 +96,7 @@ class HandoffConfig:
             "identities": self.identities,
             "default_effort": self.default_effort,
             "rules": self.rules,
+            "limits": self.limits,
         }
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -131,7 +162,155 @@ def identity_label(identity: str) -> str:
     return identity.replace("-", " ").title()
 
 
-def get_handoff_targets(chat, config: HandoffConfig) -> list[dict]:
+def limit_state(
+    target: str,
+    limits_data: dict | None,
+    config: HandoffConfig,
+    now: float | None = None,
+) -> tuple[str, dict | None]:
+    """Pure function calculating the limit state for a target.
+
+    Returns (state, detail) where state is "ok" | "scarce" | "hidden".
+    detail contains the window numbers that decided the state:
+    {"window_id": str, "label": str, "group": str | None, "used": float,
+     "resets_at": float | None, "duration": float | None, "ahead": float | None}.
+    """
+    if now is None:
+        now = time.time()
+
+    if not limits_data or ":" not in target:
+        return "ok", None
+
+    prov_id, model_id = target.split(":", 1)
+    prov_data = limits_data.get(prov_id)
+    if not isinstance(prov_data, dict):
+        return "ok", None
+
+    raw_windows = prov_data.get("windows")
+    if not isinstance(raw_windows, list):
+        return "ok", None
+
+    limits_cfg = config.limits if hasattr(config, "limits") else DEFAULT_LIMITS
+    ignore_windows = set(limits_cfg.get("ignore_windows") or ["cloud_credits"])
+    hide_margin = float(limits_cfg.get("hide_margin", 0.35))
+    scarce_margin = float(limits_cfg.get("scarce_margin", 0.15))
+    always_ok_below = float(limits_cfg.get("always_ok_below", 0.30))
+    custom_durations = limits_cfg.get("durations") or {}
+    pools = limits_cfg.get("pools") or {}
+
+    target_pool = pools.get(target) if prov_id == "agy" else None
+
+    applicable_windows = []
+    for w in raw_windows:
+        if not isinstance(w, dict):
+            continue
+        if w.get("disabled"):
+            continue
+        win_id = str(w.get("id") or "")
+        if win_id in ignore_windows:
+            continue
+
+        if prov_id == "agy":
+            group = w.get("group")
+            matches_group = (target_pool is not None) and (group == target_pool)
+            matches_model = (win_id == model_id)
+            if not (matches_group or matches_model):
+                continue
+
+        applicable_windows.append(w)
+
+    if not applicable_windows:
+        return "ok", None
+
+    SEVERITY = {"hidden": 2, "scarce": 1, "ok": 0}
+
+    worst_severity = 0
+    worst_state = "ok"
+    worst_detail = None
+    worst_ahead = -999.0
+    worst_used = -999.0
+
+    for w in applicable_windows:
+        win_id = str(w.get("id") or "")
+        resets_at = w.get("resets_at")
+        if resets_at is not None:
+            try:
+                resets_at = float(resets_at)
+            except (ValueError, TypeError):
+                resets_at = None
+
+        utilization = w.get("utilization")
+        if resets_at is not None and resets_at <= now:
+            used = 0.0
+        elif utilization is not None:
+            try:
+                used = float(utilization)
+            except (ValueError, TypeError):
+                continue
+        else:
+            continue
+
+        if isinstance(custom_durations.get(win_id), (int, float)) and custom_durations[win_id] > 0:
+            duration = float(custom_durations[win_id])
+        elif "five_hour" in win_id or "5h" in win_id:
+            duration = 18000.0
+        elif "seven_day" in win_id or "weekly" in win_id:
+            duration = 604800.0
+        else:
+            duration = None
+
+        ahead = None
+        if used >= 1.0:
+            w_state = "hidden"
+            if duration is not None and resets_at is not None:
+                elapsed = max(0.0, min(1.0, 1.0 - (resets_at - now) / duration))
+                ahead = used - elapsed
+            else:
+                ahead = 1.0
+        elif duration is None or resets_at is None or used < always_ok_below:
+            w_state = "ok"
+        else:
+            elapsed = max(0.0, min(1.0, 1.0 - (resets_at - now) / duration))
+            ahead = used - elapsed
+            if ahead >= hide_margin:
+                w_state = "hidden"
+            elif ahead >= scarce_margin:
+                w_state = "scarce"
+            else:
+                w_state = "ok"
+
+        w_detail = {
+            "window_id": win_id,
+            "label": w.get("label") or w.get("group") or win_id,
+            "group": w.get("group"),
+            "used": used,
+            "resets_at": resets_at,
+            "duration": duration,
+            "ahead": ahead,
+        }
+
+        sev = SEVERITY[w_state]
+        cur_ahead = ahead if ahead is not None else (used - 1.0)
+        if (sev > worst_severity) or (
+            sev == worst_severity and (cur_ahead > worst_ahead or (cur_ahead == worst_ahead and used > worst_used))
+        ):
+            worst_severity = sev
+            worst_state = w_state
+            worst_detail = w_detail
+            worst_ahead = cur_ahead
+            worst_used = used
+
+    if worst_state == "ok":
+        return "ok", None
+    return worst_state, worst_detail
+
+
+def get_handoff_targets(
+    chat,
+    config: HandoffConfig,
+    limits_data: dict | None = None,
+    now: float | None = None,
+) -> list[dict]:
     """Return targets this chat may request now.
 
     Excludes:
@@ -140,11 +319,20 @@ def get_handoff_targets(chat, config: HandoffConfig) -> list[dict]:
     - Targets with a 'deny' rule from this chat's target
     - Targets this chat already got a no for (meta['handoff_refused'])
     - Unavailable or non-project providers, models not in provider.model_ids
+    - Targets whose limit state is 'hidden'
 
-    Each item: {"target": str, "label": str, "mode": "auto"|"ask"}
+    Scarce targets are included with mode='ask' and 'scarce'=True.
+    Each item: {"target": str, "label": str, "mode": "auto"|"ask", ...}
     """
     if chat.meta.get("kind") != "project" or chat.meta.get("handed_off_to"):
         return []
+
+    if limits_data is None:
+        try:
+            from providers import limits
+            limits_data = limits.data
+        except Exception:
+            limits_data = None
 
     cur_provider = chat.meta.get("provider") or DEFAULT_PROVIDER
     cur_model = chat.meta.get("requested_model") or chat.meta.get("model")
@@ -181,14 +369,23 @@ def get_handoff_targets(chat, config: HandoffConfig) -> list[dict]:
                 continue
 
             # --- Stage 2 hook point (limits / pace / scarce) ---
-            # Stage 2 will insert limit pool checks and scarce mode filtering here.
+            state, detail = limit_state(target, limits_data, config, now=now)
+            if state == "hidden":
+                continue
 
             mode = "auto" if rule == "allow" else "ask"
-            results.append({
+            item: dict = {
                 "target": target,
                 "label": target_label(target),
                 "mode": mode,
-            })
+            }
+            if state == "scarce":
+                item["mode"] = "ask"
+                item["scarce"] = True
+                item["note"] = "limits are being spent fast; prefer another target"
+                if detail:
+                    item["limits_detail"] = detail
+            results.append(item)
 
     return results
 

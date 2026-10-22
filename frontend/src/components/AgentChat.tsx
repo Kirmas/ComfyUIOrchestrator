@@ -354,6 +354,28 @@ function agoText(t: ReturnType<typeof useT>, epochSeconds: number): string {
   return minutes < 60 ? t("agent.limits.minAgo", { m: minutes }) : t("agent.limits.hourAgo", { h: Math.floor(minutes / 60) });
 }
 
+function renderScarceNotice(t: ReturnType<typeof useT>, e: AgentEvent & { type: "handoff_request" }): string {
+  const d = e.limits_detail;
+  if (!d) {
+    return t("agent.handoff.scarceNoticeSimple", { target: e.target_label || e.target });
+  }
+  const label = (d.group && LIMIT_GROUP_LABELS[d.group] ? t(LIMIT_GROUP_LABELS[d.group]) : (d.label || d.window_id));
+  const pct = Math.round((d.used ?? 0) * 100);
+  let winStr = "";
+  if (d.duration === 18000 || d.window_id.includes("5h") || d.window_id.includes("five_hour")) {
+    winStr = t("agent.handoff.window5h");
+  } else if (d.duration === 604800 || d.window_id.includes("weekly") || d.window_id.includes("seven_day")) {
+    winStr = t("agent.handoff.window7d");
+  } else if (d.duration) {
+    winStr = t("agent.handoff.windowGeneric", { h: Math.round(d.duration / 3600) });
+  }
+  if (d.resets_at) {
+    const resetTime = new Date(d.resets_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return t("agent.handoff.scarceNotice", { label, pct, window: winStr, reset: resetTime });
+  }
+  return t("agent.handoff.scarceNoticeNoReset", { label, pct, window: winStr });
+}
+
 /** Plan usage per provider: how much of each window is used and when it
  * resets. The runner keeps the last reading (every turn brings a fresh one for
  * free); the refresh button spends a tiny turn to take one now. Only providers
@@ -1159,15 +1181,31 @@ function ChatView({
               ) : null;
             case "handoff_request": {
               const decision = handoffDecisions.get(e.request_id) || (chat.pending_handoff?.request_id === e.request_id ? null : (e.expires_at && e.expires_at < Date.now() / 1000 ? "timeout" : null));
+              const isScarce = Boolean(e.scarce || (chat.pending_handoff?.request_id === e.request_id && chat.pending_handoff?.scarce));
               return (
                 <div key={e.seq} className={cx("agent-permission", !decision && "pending")}>
                   <div>
                     <strong>🔄 {t("agent.handoff.asks", { target: e.target_label || e.target })}</strong>
                     {e.reason && <span className="node-cell-hint"> — {e.reason}</span>}
                   </div>
+                  {isScarce && (
+                    <div className="agent-handoff-scarce-notice">
+                      ⚠️ {renderScarceNotice(t, e)}
+                    </div>
+                  )}
                   <pre>{e.task_preview || e.task}</pre>
                   {decision ? (
                     <div className="agent-meta">{HANDOFF_DECIDED[decision] ? t(HANDOFF_DECIDED[decision]) : decision}</div>
+                  ) : isScarce ? (
+                    <div className="agent-permission-actions">
+                      <button className="primary" onClick={() => handleHandoffDecision(e.request_id, "allow_once")}>
+                        {t("agent.handoff.yes")}
+                      </button>
+                      <button className="agent-stop" onClick={() => handleHandoffDecision(e.request_id, "deny_once")}>
+                        {t("agent.handoff.no")}
+                      </button>
+                      {e.expires_at && <HandoffCountdown expiresAt={e.expires_at} />}
+                    </div>
                   ) : (
                     <div className="agent-permission-actions">
                       <button className="primary" onClick={() => handleHandoffDecision(e.request_id, "allow_once")}>

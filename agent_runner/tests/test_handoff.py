@@ -14,6 +14,7 @@ import json
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import handoff
 import providers
 import runner
-from handoff import HandoffConfig, get_handoff_targets, target_label, identity_label, build_first_message
+from handoff import HandoffConfig, get_handoff_targets, limit_state, target_label, identity_label, build_first_message
 
 
 def run(coro):
@@ -522,6 +523,314 @@ class HandoffTests(unittest.TestCase):
         self.assertNotIn("pending_handoff", chat.meta)
         self.assertIn("error", [c.args[0]["type"] for c in chat.emit.call_args_list])
 
+    # --- Stage 2 tests: pure limit_state & route limit checks ---
+
+    def test_pure_limits_exhausted_and_disabled(self):
+        """Exhausted window -> hidden; disabled exhausted window -> ignored."""
+        limits_data = {
+            "claude": {
+                "windows": [
+                    {"id": "five_hour", "utilization": 1.0, "resets_at": 20000.0}
+                ]
+            }
+        }
+        state, detail = limit_state("claude:sonnet", limits_data, self.config, now=10000.0)
+        self.assertEqual(state, "hidden")
+        self.assertIsNotNone(detail)
+        self.assertEqual(detail["window_id"], "five_hour")
+        self.assertEqual(detail["used"], 1.0)
+
+        # Disabled window
+        limits_data_disabled = {
+            "claude": {
+                "windows": [
+                    {"id": "five_hour", "utilization": 1.0, "resets_at": 20000.0, "disabled": True}
+                ]
+            }
+        }
+        state, detail = limit_state("claude:sonnet", limits_data_disabled, self.config, now=10000.0)
+        self.assertEqual(state, "ok")
+        self.assertIsNone(detail)
+
+    def test_pure_limits_person_example_moderate_and_on_pace(self):
+        """Person's example (80% used, 3 h of 5 h left) -> hidden; moderate -> scarce; on-pace -> ok."""
+        now = 10000.0
+        # 1. Person's example: 5h (18000s), 3h left (10800s), 80% used (0.8)
+        # elapsed = 1 - 10800/18000 = 0.4. ahead = 0.8 - 0.4 = 0.4 >= 0.35 -> hidden
+        limits_hidden = {
+            "claude": {
+                "windows": [
+                    {"id": "five_hour", "utilization": 0.8, "resets_at": now + 10800.0}
+                ]
+            }
+        }
+        state, detail = limit_state("claude:sonnet", limits_hidden, self.config, now=now)
+        self.assertEqual(state, "hidden")
+        self.assertAlmostEqual(detail["ahead"], 0.4)
+
+        # 2. Moderate case: 5h, 3.5h left (12600s), 50% used (0.5)
+        # elapsed = 1 - 12600/18000 = 0.3. ahead = 0.5 - 0.3 = 0.2 >= 0.15 and < 0.35 -> scarce
+        limits_scarce = {
+            "claude": {
+                "windows": [
+                    {"id": "five_hour", "utilization": 0.5, "resets_at": now + 12600.0}
+                ]
+            }
+        }
+        state, detail = limit_state("claude:sonnet", limits_scarce, self.config, now=now)
+        self.assertEqual(state, "scarce")
+        self.assertAlmostEqual(detail["ahead"], 0.2)
+
+        # 3. On-pace case: 5h, 4h left (14400s), 20% used (0.2)
+        # elapsed = 1 - 14400/18000 = 0.2. ahead = 0.2 - 0.2 = 0.0 < 0.15 -> ok
+        limits_ok = {
+            "claude": {
+                "windows": [
+                    {"id": "five_hour", "utilization": 0.2, "resets_at": now + 14400.0}
+                ]
+            }
+        }
+        state, detail = limit_state("claude:sonnet", limits_ok, self.config, now=now)
+        self.assertEqual(state, "ok")
+        self.assertIsNone(detail)
+
+    def test_pure_limits_reset_window_in_past(self):
+        """Reset window (resets_at in the past) -> ok."""
+        now = 10000.0
+        limits_reset = {
+            "claude": {
+                "windows": [
+                    {"id": "five_hour", "utilization": 0.99, "resets_at": now - 100.0}
+                ]
+            }
+        }
+        state, detail = limit_state("claude:sonnet", limits_reset, self.config, now=now)
+        self.assertEqual(state, "ok")
+        self.assertIsNone(detail)
+
+    def test_pure_limits_cloud_credits_ignored(self):
+        """cloud_credits window is ignored."""
+        now = 10000.0
+        limits_credits = {
+            "claude": {
+                "windows": [
+                    {"id": "cloud_credits", "label": "Cloud credits: $0 of $100 used", "utilization": 1.0, "resets_at": now + 50000.0}
+                ]
+            }
+        }
+        state, detail = limit_state("claude:sonnet", limits_credits, self.config, now=now)
+        self.assertEqual(state, "ok")
+        self.assertIsNone(detail)
+
+    def test_pure_limits_agy_pools_and_quota_windows(self):
+        """agy: Flash unaffected by exhausted 3p group; Sonnet-in-agy hidden by it;
+        model-id quota window hides only that model; target missing from pools isn't hidden by any group."""
+        now = 10000.0
+        # 3p-weekly exhausted
+        limits_3p_exhausted = {
+            "agy": {
+                "windows": [
+                    {"id": "3p-weekly", "group": "Claude and GPT models", "utilization": 1.0, "resets_at": now + 50000.0, "disabled": False},
+                    {"id": "gemini-5h", "group": "Gemini Models", "utilization": 0.05, "resets_at": now + 15000.0, "disabled": False},
+                ]
+            }
+        }
+        # Flash is in Gemini Models -> unaffected
+        state_flash, _ = limit_state("agy:gemini-3.8-flash", limits_3p_exhausted, self.config, now=now)
+        self.assertEqual(state_flash, "ok")
+
+        # Sonnet in agy is in Claude and GPT models -> hidden
+        state_sonnet, detail_sonnet = limit_state("agy:claude-sonnet-5-5", limits_3p_exhausted, self.config, now=now)
+        self.assertEqual(state_sonnet, "hidden")
+        self.assertEqual(detail_sonnet["window_id"], "3p-weekly")
+
+        # Model-id quota window hides only that model
+        limits_model_quota = {
+            "agy": {
+                "windows": [
+                    {"id": "gemini-3.8-flash", "utilization": 1.0, "resets_at": now + 20000.0}
+                ]
+            }
+        }
+        state_flash, _ = limit_state("agy:gemini-3.8-flash", limits_model_quota, self.config, now=now)
+        self.assertEqual(state_flash, "hidden")
+        state_sonnet, _ = limit_state("agy:claude-sonnet-5-5", limits_model_quota, self.config, now=now)
+        self.assertEqual(state_sonnet, "ok")
+
+        # Target missing from pools isn't hidden by any group
+        limits_all_groups_exhausted = {
+            "agy": {
+                "windows": [
+                    {"id": "3p-weekly", "group": "Claude and GPT models", "utilization": 1.0, "resets_at": now + 50000.0},
+                    {"id": "gemini-weekly", "group": "Gemini Models", "utilization": 1.0, "resets_at": now + 50000.0},
+                    {"id": "gemini-argon-wtu-weekly", "group": "Gemini 4 Argon", "utilization": 1.0, "resets_at": now + 50000.0},
+                ]
+            }
+        }
+        state_unknown, _ = limit_state("agy:unmapped-model", limits_all_groups_exhausted, self.config, now=now)
+        self.assertEqual(state_unknown, "ok")
+
+    def test_pure_limits_no_provider_data_and_unknown_window_id(self):
+        """No provider data -> ok; unknown window id (no duration) -> only the 100% rule."""
+        now = 10000.0
+        # No provider data
+        state, _ = limit_state("claude:sonnet", {}, self.config, now=now)
+        self.assertEqual(state, "ok")
+        state, _ = limit_state("claude:sonnet", None, self.config, now=now)
+        self.assertEqual(state, "ok")
+
+        # Unknown window id without duration
+        limits_unknown = {
+            "claude": {
+                "windows": [
+                    {"id": "custom-unrecognized-window", "utilization": 0.95, "resets_at": now + 1000.0}
+                ]
+            }
+        }
+        state, _ = limit_state("claude:sonnet", limits_unknown, self.config, now=now)
+        self.assertEqual(state, "ok")
+
+        limits_unknown_exhausted = {
+            "claude": {
+                "windows": [
+                    {"id": "custom-unrecognized-window", "utilization": 1.0, "resets_at": now + 1000.0}
+                ]
+            }
+        }
+        state, _ = limit_state("claude:sonnet", limits_unknown_exhausted, self.config, now=now)
+        self.assertEqual(state, "hidden")
+
+    def test_route_scarce_target_listed_with_mode_ask_even_with_allow_rule(self):
+        """Scarce target is listed with mode: 'ask' even with an allow rule."""
+        now = 10000.0
+        # Set an allow rule: claude:opus -> agy:gemini-3.8-flash
+        self.config.set_rule("claude:opus", "agy:gemini-3.8-flash", "allow")
+
+        # Set limits so agy:gemini-3.8-flash is scarce (5h window, 3.5h left, 50% used)
+        limits_data = {
+            "agy": {
+                "windows": [
+                    {"id": "gemini-5h", "group": "Gemini Models", "utilization": 0.5, "resets_at": now + 12600.0, "disabled": False}
+                ]
+            }
+        }
+
+        chat = SimpleNamespace(
+            id="chat-allow-scarce",
+            meta={
+                "kind": "project",
+                "provider": "claude",
+                "requested_model": "opus",
+            },
+        )
+
+        with patch.dict(providers.PROVIDERS, self.mock_providers, clear=True), \
+             patch.dict(handoff.PROVIDERS, self.mock_providers, clear=True):
+            targets = get_handoff_targets(chat, self.config, limits_data=limits_data, now=now)
+            flash_info = next((t for t in targets if t["target"] == "agy:gemini-3.8-flash"), None)
+            self.assertIsNotNone(flash_info)
+            self.assertEqual(flash_info["mode"], "ask")
+            self.assertTrue(flash_info.get("scarce"))
+            self.assertIn("limits_detail", flash_info)
+            self.assertEqual(flash_info.get("note"), "limits are being spent fast; prefer another target")
+
+    def test_route_allow_always_on_scarce_returns_400_and_still_pending(self):
+        """allow_always on a scarce request -> 400 and the request is still pending."""
+        chat = SimpleNamespace(
+            id="chat-scarce-pending",
+            meta={
+                "kind": "project",
+                "provider": "claude",
+                "requested_model": "opus",
+                "pending_handoff": {
+                    "request_id": "r-scarce",
+                    "target": "agy:gemini-3.8-flash",
+                    "task": "Do work",
+                    "reason": "Test",
+                    "scarce": True,
+                },
+            },
+            emit=AsyncMock(),
+            save_meta=MagicMock(),
+            proc=None,
+        )
+        req = SimpleNamespace(
+            path_params={"chat_id": chat.id, "request_id": "r-scarce"},
+            json=AsyncMock(return_value={"decision": "allow_always"}),
+        )
+
+        with patch.dict(runner.chats, {chat.id: chat}), \
+             patch.object(runner, "handoff_config", self.config):
+            resp = run(runner.decide_handoff_route(req))
+            self.assertEqual(resp.status_code, 400)
+            # The request must still be pending!
+            self.assertIn("pending_handoff", chat.meta)
+            self.assertEqual(chat.meta["pending_handoff"]["request_id"], "r-scarce")
+
+    def test_route_target_becomes_hidden_between_request_and_approval(self):
+        """Target becomes hidden between request and approval -> no handoff, error event, nothing pending."""
+        chat = SimpleNamespace(
+            id="chat-hide-between",
+            meta={
+                "kind": "project",
+                "provider": "claude",
+                "requested_model": "opus",
+                "pending_handoff": {
+                    "request_id": "r-hide",
+                    "target": "codex:gpt-6-astra",
+                    "target_label": "Codex (Astra)",
+                    "task": "Do work",
+                    "reason": "Test",
+                },
+            },
+            emit=AsyncMock(),
+            save_meta=MagicMock(),
+            set_status=AsyncMock(),
+            task=None,
+            proc=None,
+        )
+        req = SimpleNamespace(
+            path_params={"chat_id": chat.id, "request_id": "r-hide"},
+            json=AsyncMock(return_value={"decision": "allow_once"}),
+        )
+
+        perform = AsyncMock()
+        # Codex limit is exhausted (utilization 1.0, reset in the future)
+        exhausted_limits = {
+            "codex": {
+                "windows": [
+                    {"id": "five_hour", "utilization": 1.0, "resets_at": time.time() + 50000.0}
+                ]
+            }
+        }
+
+        with patch.dict(runner.chats, {chat.id: chat}), \
+             patch("runner.perform_handoff", perform), \
+             patch.object(runner.limits, "data", exhausted_limits), \
+             patch("runner.run_turn", AsyncMock()), \
+             patch.object(runner, "handoff_config", self.config):
+            resp = run(runner.decide_handoff_route(req))
+            self.assertEqual(resp.status_code, 409)
+            # No handoff performed
+            perform.assert_not_awaited()
+            # Request is claimed, nothing pending
+            self.assertNotIn("pending_handoff", chat.meta)
+            # The stopped requester is resumed with why, and won't ask for it again
+            emitted = [c.args[0] for c in chat.emit.call_args_list]
+            sys_msgs = [e for e in emitted if e.get("type") == "user" and e.get("origin") == "system"]
+            self.assertEqual(len(sys_msgs), 1)
+            self.assertIn("limit ran out meanwhile", sys_msgs[0]["text"])
+            self.assertIn("Continue the task yourself", sys_msgs[0]["text"])
+            self.assertIn("handoff_declined", [e.get("type") for e in emitted])
+
+
+    def test_low_usage_is_always_ok_whatever_the_pace(self):
+        """29% used ten minutes into a 5-hour window is far 'ahead', but under the floor: ok."""
+        now = 1_000_000.0
+        data = {"codex": {"windows": [{"id": "five_hour", "utilization": 0.29, "resets_at": now + 18000 - 600}]}}
+        self.assertEqual(handoff.limit_state("codex:gpt-6-luna", data, self.config, now=now)[0], "ok")
+        data["codex"]["windows"][0]["utilization"] = 0.31
+        self.assertEqual(handoff.limit_state("codex:gpt-6-luna", data, self.config, now=now)[0], "scarce")
 
 
 if __name__ == "__main__":

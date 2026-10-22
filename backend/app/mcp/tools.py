@@ -1203,6 +1203,7 @@ async def list_handoff_targets(chat_id: str) -> list[dict]:
     Use only when another model fits the task clearly better (cheaper for simple work,
     or can do what you can't). Returns only targets you are allowed to hand off to now.
     Targets in your task's chain, denied by rule, or previously refused are excluded.
+    A target marked scarce needs the person's approval every time and should be avoided when another fits.
     You cannot hand back to anyone in the chain.
     Validate chat_id with the current Agent chat_id from your session instructions.
     """

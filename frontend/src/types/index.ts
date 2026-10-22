@@ -609,6 +609,8 @@ export interface AgentChat {
     done_so_far?: string;
     focus?: string[];
     expires_at: number;
+    scarce?: boolean;
+    limits_detail?: HandoffLimitsDetail;
   };
   created_at: number;
   updated_at: number;
@@ -638,7 +640,7 @@ export type AgentEvent = { seq: number; ts: number } & (
   | { type: "permission_decision"; request_id: string; decision: PermissionDecision | "cancelled" | "deny_unattended" }
   | { type: "ask_user_question"; request_id: string; input: AskUserQuestionInput }
   | { type: "ask_user_answer"; request_id: string; answers: Record<string, string> }
-  | { type: "handoff_request"; request_id: string; target: string; target_label: string; reason: string; task: string; task_preview: string; expires_at: number; timeout_seconds: number }
+  | { type: "handoff_request"; request_id: string; target: string; target_label: string; reason: string; task: string; task_preview: string; expires_at: number; timeout_seconds: number; scarce?: boolean; limits_detail?: HandoffLimitsDetail }
   | { type: "handoff_declined"; request_id: string; target: string; target_label: string; timeout?: boolean }
   | { type: "handoff_out"; request_id?: string; chat_id: string; target: string; target_label: string; reason: string; at: number }
   | { type: "night"; text: string }
@@ -648,10 +650,23 @@ export type PermissionDecision = "allow" | "allow_session" | "deny";
 
 export type HandoffDecision = "allow_once" | "allow_always" | "deny_once" | "deny_always";
 
+export interface HandoffLimitsDetail {
+  window_id: string;
+  label?: string;
+  group?: string;
+  used: number;
+  resets_at?: number | null;
+  duration?: number | null;
+  ahead?: number | null;
+}
+
 export interface HandoffTarget {
   target: string;
   label: string;
   mode: "auto" | "ask";
+  scarce?: boolean;
+  note?: string;
+  limits_detail?: HandoffLimitsDetail;
 }
 
 export interface HandoffRules {

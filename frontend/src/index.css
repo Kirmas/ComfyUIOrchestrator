@@ -2663,6 +2663,12 @@ th, td {
   opacity: 1;
 }
 
+.agent-handoff-scarce-notice {
+  margin: 6px 0;
+  color: var(--warning, #eab308);
+  font-weight: 500;
+}
+
 .agent-permission pre {
   margin: 6px 0;
   max-height: 200px;
