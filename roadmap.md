@@ -4,7 +4,7 @@ Captures a design brainstorm (2026-07-27, recovered from a lost claude.ai sessio
 where this project goes next. Not a spec to implement literally — a record of decisions
 and open questions so we pick up where we left off. Priority order below is deliberate.
 
-**Shipped:** MCP server (2026-07-28/29), Idea board with stickers/ink/frames/connectors/comments, reference picker bridge, prompt macros with `{tag}`, 9 board MCP tools (2026-07-29). See CLAUDE.md for implementation details.
+**Shipped:** MCP server (2026-07-28/29), Idea board with stickers/ink/frames/connectors/comments, reference picker bridge, prompt macros with `{tag}`, 9 board MCP tools (2026-07-29), agent handoff between project chats (2026-10-22). See CLAUDE.md for implementation details.
 
 ## 1. Additional native node types
 
@@ -53,71 +53,245 @@ Status: sketch-level only, not started; blocked on the corresponding asset type 
 audio) actually landing first, except for the image-domain nodes which have no such
 blocker.
 
-## 3. Agent handoff between project chats
+## 2. Video board — MiniMax H3 ref2va
 
-Agreed 2026-10-21. One project-chat agent passes its task on to another model (a
-cheaper one, or one that can do something it can't, e.g. draw) **one way**: the source
-chat is frozen for good, even for the person, and shows a link to the continuation and
-the reason. This is a relay, not delegation — nothing comes back, so the source never has
-to verify a result, and two agents never own one task. The motivating case: a cheap model
-spent an hour unsure what was wanted, then did the work in seconds; an expensive model
-that understands the person can rewrite the task so the cheap one gets it at once.
+Design agreed 2026-08-22 (conversation, Ukrainian). **Not started**, and deliberately
+gated on two cheap experiments (see "Blocking experiments" below) — the answers change
+the shape of the feature, not just its priority.
 
-- **Project chats only.** They all work through `/mcp`, so a receiving agent can never
-  gain rights the sender lacked. Dev chats are out of scope.
-- **The system decides, never the agent.** The agent calls `hand_off`; the runner
-  checks the policy at no token cost. A rule in a prompt is not a permission.
-- **Chain ban.** Every handoff carries its chain (Opus → Flash → Astra). No model in it
-  can receive the task again, whatever the table says — so chains always end. The ban is
-  per *model identity*, not per provider: Claude Opus in Claude Code and in Antigravity
-  are one identity (no "returning" through another CLI), but two targets with separate
-  limit pools.
-- **One table of rules for the whole app**, keyed `from target -> to target`
-  (target = provider + model). Everything starts as *ask*. The popup offers Allow now /
-  Allow always / Deny now / Deny always; the "always" answers fill the table, and the
-  person can edit it in settings. No ranking formula: price is not the only axis (a
-  dearer model that can draw is a legitimate target).
-- **Agents only see targets they can actually use.** `list_handoff_targets` hides,
-  without explanation, anything in the chain, denied always, out of limits ("back at …"
-  is the only thing said), or spending too fast. Extra information is extra tokens and
-  extra hesitation.
-- **Limits are judged by pace, per pool, on the server.** A pool is what the provider
-  actually meters (Antigravity meters groups: "Gemini models", "Claude and GPT models",
-  Argon on its own). Any window at 100% → hidden. Used share far ahead of elapsed share
-  (e.g. 80% used with 3 h of 5 h left) → hidden. Moderately ahead → **scarce**: shown
-  with "better not", and **always asks** the person — even for an allowed-always pair —
-  with the numbers and Yes/No only (no "always": tomorrow the pool is different).
-  Thresholds live in config.
-- **A timeout is a soft no** (minutes, config): no handoff, table untouched. After any
-  no, that chat may not ask for the same target again.
-- **While the person decides, the sender is stopped**; on a no (or timeout) the system
-  itself resumes it with "not approved, continue yourself". Rules and denials are per
-  *target*, never per identity — a person may refuse Opus-in-Antigravity for its limits
-  while allowing Opus in Claude Code.
-- **Model profiles are written by hand, never inferred** (2026-10-22, replacing a
-  planned "learn capabilities from observation" stage). Each target carries
-  `good_for`, `appetite` and `draws_natively`, drafted from public reviews and then
-  corrected by the person's own experience, which wins (Opus spends fewer tokens per
-  task than its price suggests; Claude inside Antigravity is a different harness, so
-  nothing about Claude Code carries over). `draws_natively` means the model's *own*
-  image generator — every agent can draw through the orchestrator's ComfyUI tools
-  anyway — and the person deliberately leaves it off for Antigravity's Claude/GPT
-  models: they would rather drawing never lands there than test whether it works.
-  Editable in the Agent tab's handoff settings.
-- **The first turn of the new chat is assembled by the system** from a fixed template,
-  service text in English (cheaper), with an instruction to answer in the person's
-  language: header with the chain and who may not receive it back; the rewritten task;
-  why this model; what was already done; where to work (node/dashboard ids, validated);
-  the person's own messages **verbatim** as the source of truth (last N); attachment
-  names only (imported on demand from the old chat, never copied); "if unsure what the
-  person wants, ask one question, don't guess". Agent-written fields have hard length
-  caps. Not a copy of the chat: in project chats the state lives in the orchestrator
-  and the new agent reads it through MCP.
-- New chat starts **immediately**, at effort **low** by default (the hard part —
-  understanding the person — was done by the sender; low is cheap and usually enough),
-  configurable per model.
+### What it is (and what it deliberately is not)
 
-Shipped 2026-10-22: (1) core — tool, chain, table + popup, frozen chat, first-turn
-template; (2) limits — pools, pace, hidden/scarce, always ok under 30% used;
-(3) hand-written model profiles. Briefs: `docs/agent-handoff/stage1-brief.md`,
-`stage2-brief.md`.
+A **separate board view** per project, alongside Grid and Board — precedent is the idea
+board (§1): a third view with its own truth about its own relation, not a re-use of the
+grid. Backed by one ComfyUI workflow, `MiniMaxH3ReferenceToVideo` (ref2va): up to 9
+reference images, 3 reference videos (each optionally carrying its own audio), 3
+standalone audio references, native stereo audio generated jointly with the picture.
+
+It is a **video generator, not an editor** — the user's own framing, and it is what keeps
+the data model small:
+
+- you may only **append at the end**;
+- you may only **edit length-preserving** (a layer replaces a time range with a clip of
+  the same length);
+- therefore **no trimming exists at all** — no in/out points, no ripple, no
+  renumbering. A bad tail is fixed by a layer, never by shortening (shortening changes
+  time). This killed an entire subsystem that an earlier draft of this design had.
+
+Inserting new time in the middle is out of scope "at least for v1" — hence `Segment`
+ordering uses `core/track_order.py`'s existing linked list rather than a dense integer,
+so lifting that restriction later is not a migration.
+
+### Model
+
+```
+VideoBoard  settings{aspect, megapixels, ref_image_size, scheduler, crossfade_ms}
+            + global_refs[]  (2-3 images auto-attached to every new segment)
+Segment     prev/next · length_frames · prompt(tokens) · refs[]
+            continuation{seconds} · asset_id · history[]
+Layer       z · start_frames · length_frames · prompt(tokens) · refs[]
+            source_asset_id · asset_id · history[]
+```
+
+- **Layers, not clip-splicing.** A layer sits over a time range; render is base layer
+  then layers bottom-up. Non-destructive by construction (toggle a layer off, the
+  original is back) and it resolves the causality-vs-time conflict cleanly: layer N is
+  made from the render of layers 0..N-1 over its range — a monotone stack, not a graph.
+  The grid could not have carried this: its axis is causality (what was made from what),
+  a repair clip's causal position is "after both neighbours" while its temporal position
+  is "between them".
+- **Global reference images** are the main defence against identity drift over a long
+  chain of continuations — with ~700 segments nobody re-attaches the character sheet by
+  hand. Slot budget is visible in the UI: e.g. 3 global + 6 per-shot.
+- **History, not candidates.** At 6 min - 2 h per generation there is no room for "make 3
+  takes and pick one". But the same number is why a regeneration must never silently
+  destroy the previous result: keep prior takes, restorable, manually deletable.
+
+### Time is quantized — this leaks into the UI
+
+Valid lengths are `frames = 5 + 17k` at 24fps, i.e. a **0.708 s lattice**
+(…, 3.75, 4.46, 5.17, 5.88, …, 8.00, …). Consequences:
+
+- stored in **frames**, displayed in **seconds** (one decimal);
+- **no free-text duration input anywhere** — a typed "5.0" would silently become 5.17
+  and the timeline would drift from what the user typed. Slider/list that snaps, with
+  ruler ticks so the snapping is visible;
+- range selection: dragging either handle snaps the *length*, dragging the middle moves
+  the window freely;
+- a layer's output length == its reference length == the range it replaces, so
+  **repairs never ripple**;
+- feeding an already-valid length back through the graph's own math node is idempotent
+  (`107 mod 17 == 5`), which also removes any dependence on that node's negative-modulo
+  semantics. Better still: write `136.length` as a literal and let the orphan GC drop
+  nodes `131`/`132`.
+
+### Prompts
+
+- The prompt is a **chip editor**, not a textarea: the user picks a reference (thumbnail
+  / audio name) and the system emits the tag the model wants.
+- The canonical stored form is the **role-token** one. `<Video 1>` exists only at build
+  time. Never store the expanded text — it outlives the ref set that produced it and
+  then points at the wrong reference, silently and plausibly.
+- **`ref_video_0` is reserved** for the continuation/edit reference, always, even when
+  empty — so "continue" always means `<Video 1>` as a program-level invariant rather
+  than a convention. Visible consequence: 3 user video refs on a first segment, 2 on a
+  continuation.
+- **Prompt templates store roles, not indices**, for the same reason.
+- Continuation/edit refs are **always with audio**; the `with audio` checkbox exists only
+  on user-added refs. "Grab the audio of this range as a reference" (for catching a
+  voice) is the same range→asset primitive with a different output modality, and lands
+  in a `LoadAudio` slot, so it costs no video slot.
+
+### The one bridge between the two views
+
+**"take a range of the timeline as an asset"** (ffmpeg). Both features collapse into it:
+
+- *continue*: render the last N seconds → `ref_video_0`, "continue" preset;
+- *repair a seam*: render a window **spanning the cut** → `ref_video_0`, "fix `<Video 1>`,
+  keep the first and last frames, smooth the transition" preset.
+
+One reference, not two: the model sees the bad cut itself in temporal continuity, which
+makes it an in-painting-in-time task rather than "invent the span between A and B", and
+the keep-the-edges instruction is what makes the result splice back in.
+
+The rendered range is **materialized as a real asset**, never re-rendered at run time —
+otherwise re-running the node a week later reads a changed assembly and silently
+produces something else. Materialize at job start (so a chain can be queued before the
+earlier results exist), then reuse on re-run.
+
+### Preview and export
+
+The user must be able to watch the whole thing as one video **in the browser without
+saving**.
+
+- **v1**: two `<video>` elements, A/B swap with the next segment preloaded. Zero server
+  work, scrubbing is exact, only weakness is a micro-hitch at a boundary if the prefetch
+  is late.
+- **v2**: an **HLS playlist** generated from the timeline state, played via `hls.js` —
+  one continuous stream with seeking across the whole project. The segments already *are*
+  HLS-shaped; cost is a one-off **stream-copy remux** per segment (repackaging, no
+  decode/encode — an order of magnitude lighter than the Plex transcoding this box
+  already runs). Only segments a layer cuts mid-way need a short real re-encode; cached.
+- ⚠️ The bottleneck is RAM, not CPU. Measured 2026-08-22: the VM has **1951 MB total,
+  ~585 MB available, and is already 412 MB into a 975 MB swap** while merely idling —
+  Jellyfin (280 MB), Plex, transmission, docker and uvicorn (170 MB) all share it. Note
+  that measurement was taken with a Claude Code session resident, which is itself ~520 MB
+  (agent 417 + `claude rc` 105) — and that is the normal condition on this box, since
+  builds and deploys are driven from a session. So the `vite build` OOM is less "the VM
+  is too small for vite" than "the agent running the build outweighs the build": ~520 MB
+  agent + 515 MB tsc/vite on a 2 GB box that is already swapping. Plan
+  is to **raise the VM to 6 GB** (host has ~8 GB spare, earmarked for an Ollama that
+  never worked out), which retires this constraint along with the `vite build` OOM
+  workarounds. Until then: **one ffmpeg at a time**, thread-limited (4 cores, shared with
+  Plex/Jellyfin transcodes), never alongside a frontend build.
+- **Preview and export must share one flattening function** (base + layers → list of
+  `(file, from, to)`) with two serializers (playlist / concat). Two implementations would
+  drift, and the export differing from what the user just watched is the worst possible
+  bug in this feature.
+- Pin `92` SaveVideo to h264+aac explicitly. `format: auto, codec: auto` will one day
+  emit something Chrome won't play, for non-obvious reasons.
+
+### Workflow manifest (the "video workflow" section)
+
+The generic wizard *discovers* slots; a video workflow must *fill known roles*. So the
+video section is a role manifest, bound **by node id** (title-based binding was already
+proven to corrupt the wrong field when two nodes share a title):
+
+| role | node today | handling |
+|---|---|---|
+| output | `92` SaveVideo | sole output; pin h264+aac |
+| prompt | `138` | expanded chip text lands here |
+| resolution | `115` | `aspect_ratio` + `megapixels` from board settings |
+| length | `136.length` | literal in frames; GC drops `131`/`132` |
+| ref_image 0-8 | `137,139,141-147` | prune by `ref_images.ref_image_N` |
+| ref_video 0-2 | `150/151`, `152/153`, `155/154` | slot 0 reserved; audio checkbox on 1-2 only |
+| ref_audio 0-2 | `156,157,158` | prune by `ref_audios.ref_audio_N` |
+| scheduler | `124.scheduler` | board setting (`beta`/`normal` beat `simple` for ref-heavy) |
+| ref_image_size | `136.ref_image_size` | board setting (`match` fast / `max` faithful) |
+| seed | `129.noise_seed` | persisted, for the regenerate-at-higher-res flow |
+
+Re-exporting the workflow from ComfyUI means re-declaring the manifest, same rule as the
+existing wizard. Everything else (models, VAEs, sampler, guider) is fixed and hidden.
+
+### Dynamic graph assembly
+
+The graph must be pruned per generation to whatever references the user actually
+supplied. Two rules, both general rather than MiniMax-specific:
+
+1. **The unit of pruning is an input key, not a slot.** A ref video feeds two keys
+   (`ref_videos.ref_video_N` from `GetVideoComponents` output 0, and
+   `ref_video_audios.ref_video_audio_N` from output 1), so "video without audio" is just
+   dropping one key. Exposed in the UI as a single boolean; audio-only was considered and
+   rejected as meaningless (that is what the `LoadAudio` slots are for).
+2. **Orphan removal is a reachability walk from the output**, never a hand-written "if
+   slot N is empty delete nodes X and Y". Dropping both video keys makes `GetVideoComponents`
+   unreachable, and then `LoadVideo` in turn — the cascade falls out for free, and the
+   same machinery serves every future workflow.
+
+Reference tag numbering is per-modality, 1-based, and follows post-prune order — which is
+exactly why the chip editor and role-token storage above are load-bearing rather than
+cosmetic.
+
+### Prerequisites in existing code
+
+- `comfyui_backend.py` `result()` filters outputs to `class_type == "SaveImage"` — a
+  `SaveVideo` graph currently returns **zero assets** while reporting success.
+- `AssetKind` has no `video`; `for_mime` maps everything non-`image/*` to `other`.
+- `workflow_analyzer.py` `INPUT_IMAGE_CLASS_TYPES = {"LoadImage"}` — `LoadVideo`/`LoadAudio`
+  are invisible to it.
+- `_upload_image` needs correct extension/MIME for mp4/wav or `LoadVideo` won't find the file.
+- **ffmpeg is not installed on this box** and is foundational here (range render, remux,
+  crossfade, concat, poster frames, duration probing). Add it to `deploy/debian-setup.md`,
+  not just to the box, or dev and prod diverge.
+- `deploy/deploy.sh` restarts the unit; with 2-hour jobs and no durable queue, a deploy
+  mid-generation destroys the run. A "there are active jobs — continue?" guard is minutes
+  of work and covers the failure that will actually happen. (A real durable queue was
+  considered and explicitly declined as out of scope for a single-user hobby deployment.)
+
+### Blocking experiments
+
+Both are cheaper than any of the code above and both can invalidate parts of it.
+
+1. **Same seed at a higher resolution.** Generate at 0.2 MP, regenerate at 0.4 MP with
+   the identical seed, compare. The intended workflow is "tune everything cheap, then
+   press regenerate-all at full resolution and go to sleep" — but a different latent
+   shape means a different noise tensor and therefore a different denoising trajectory,
+   so composition and motion may not survive at all. If they don't, the button must
+   instead re-run with the **approved low-res clip as an additional video reference**
+   ("same shot, same motion, sharper") — H3 is a reference model, this is its native
+   mechanism. Costs one video slot during the regen.
+
+   Regeneration is a **different task from generation and takes a different prompt**
+   (user's call, 2026-08-22): the model must not invent detail, so the regen prompt is a
+   *systemic* one ("reproduce `<Video 1>` exactly — same composition, motion and timing;
+   more detail, sharper"), never the original generation prompt, and the only references
+   passed are the reference images plus the segment's own old output. That also settles
+   the slot budget: user video references are dropped by design during regen, so nothing
+   gets squeezed out.
+
+   Sub-question for the same run, therefore nearly free to answer: whether the original
+   prompt must still ride along (appended, "for reference only", as a role token in the
+   regen preset) to preserve **spoken dialogue**. The lines are written in the original
+   prompt; a purely systemic prompt leaves the model reconstructing speech from a blurry
+   low-res reference, and style anchors ("bold comic-book ink style") may not survive
+   being read off that reference either.
+
+   Consequence worth noting: with no continuation reference in the regen, each segment is
+   reproduced from its own old output alone, so **regenerate-all is an independent batch,
+   not a chain** — restartable per segment, no cascade when one fails. Whether
+   inter-segment continuity survives that is exactly what this experiment measures.
+2. **Listen to a seam.** Two segments joined with a continuation reference carrying
+   audio. Audio is generated jointly per segment, so ambience level, music phrase and
+   reverb tail are independent across a cut; an audio reference makes the model *imitate*
+   the previous audio, not continue it sample-accurately. The `crossfade_ms` board
+   setting is the agreed fallback (~20-40 ms hides most of it). If seams are audible even
+   with the reference, that changes which content this feature suits (dialogue vs action
+   under music), which matters more than any ordering decision below.
+
+### Order of work (after the experiments)
+
+1. Make the workflow simply *work* as an ordinary template node: `SaveVideo` in the
+   output allow-list, `AssetKind.video`, video/audio upload, `<video>` in a cell.
+2. Prune-by-input-key + reachability GC + literal `length` + the audio checkbox.
+3. `Segment`/`Layer` + the timeline view with lattice-snapped selection.
+4. Range→asset primitive + prompt presets. "Continue" and "repair" are two presets of one
+   action, not two features — this is the cheapest part of the plan and the whole point of it.

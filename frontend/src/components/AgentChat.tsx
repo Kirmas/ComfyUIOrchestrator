@@ -762,8 +762,37 @@ interface ChatMediaItem {
   downloadUrl?: string;
 }
 
-function ChatMedia({ items, large = false, caption = "" }: { items: ChatMediaItem[]; large?: boolean; caption?: string }) {
+function ChatMedia({
+  items,
+  large = false,
+  caption = "",
+  onQuote,
+}: {
+  items: ChatMediaItem[];
+  large?: boolean;
+  caption?: string;
+  onQuote?: (item: ChatMediaItem) => void;
+}) {
   const t = useT();
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const copyLink = async (item: ChatMediaItem) => {
+    try {
+      await navigator.clipboard.writeText(item.url);
+      setCopiedId(item.id);
+      setTimeout(() => setCopiedId((c) => (c === item.id ? null : c)), 2000);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = item.url;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      setCopiedId(item.id);
+      setTimeout(() => setCopiedId((c) => (c === item.id ? null : c)), 2000);
+    }
+  };
+
   return (
     <>
       <div className={cx("agent-images", large && "agent-generated-images")}>
@@ -778,11 +807,31 @@ function ChatMedia({ items, large = false, caption = "" }: { items: ChatMediaIte
             ) : item.mimeType.startsWith("audio/") ? (
               <audio src={item.url} controls preload="metadata" />
             ) : null}
-            {item.downloadUrl && (
-              <a className="agent-media-download" href={item.downloadUrl} download={item.name || true}>
-                ↓ {t("agent.downloadFile")}{item.name ? ` · ${item.name}` : ""}
-              </a>
-            )}
+            <div className="agent-media-actions">
+              {item.downloadUrl && (
+                <a className="agent-media-download" href={item.downloadUrl} download={item.name || true}>
+                  ↓ {t("agent.downloadFile")}{item.name ? ` · ${item.name}` : ""}
+                </a>
+              )}
+              {onQuote && (
+                <button
+                  type="button"
+                  className="agent-media-action"
+                  title={t("agent.quoteImageTitle")}
+                  onClick={() => onQuote(item)}
+                >
+                  ↩ {t("agent.quote")}
+                </button>
+              )}
+              <button
+                type="button"
+                className="agent-media-action"
+                title={t("agent.copyLinkTitle")}
+                onClick={() => copyLink(item)}
+              >
+                {copiedId === item.id ? `✓ ${t("agent.copied")}` : `🔗 ${t("agent.copyLink")}`}
+              </button>
+            </div>
           </div>
         ))}
       </div>
@@ -791,12 +840,34 @@ function ChatMedia({ items, large = false, caption = "" }: { items: ChatMediaIte
   );
 }
 
-function ChatImages({ chatId, images, generated = false }: { chatId: string; images: string[]; generated?: boolean }) {
-  return <ChatMedia large={generated} items={images.map((name) => {
-    const url = agentChatsApi.attachmentUrl(chatId, name);
-    return { id: name, url, mimeType: "image/*", previewUrl: generated ? agentChatsApi.attachmentUrl(chatId, name, true) : undefined,
-             downloadUrl: generated ? agentChatsApi.attachmentUrl(chatId, name, false, true) : undefined };
-  })} />;
+function ChatImages({
+  chatId,
+  images,
+  generated = false,
+  onQuote,
+}: {
+  chatId: string;
+  images: string[];
+  generated?: boolean;
+  onQuote?: (item: ChatMediaItem) => void;
+}) {
+  return (
+    <ChatMedia
+      large={generated}
+      onQuote={onQuote}
+      items={images.map((name) => {
+        const url = agentChatsApi.attachmentUrl(chatId, name);
+        return {
+          id: name,
+          name,
+          url,
+          mimeType: "image/*",
+          previewUrl: generated ? agentChatsApi.attachmentUrl(chatId, name, true) : undefined,
+          downloadUrl: generated ? agentChatsApi.attachmentUrl(chatId, name, false, true) : undefined,
+        };
+      })}
+    />
+  );
 }
 
 function ChatView({
@@ -821,6 +892,7 @@ function ChatView({
   const [sending, setSending] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const isFrozen = !!chat.handed_off_to;
 
@@ -855,6 +927,38 @@ function ChatView({
         alert(t("agent.imageFailed", { name: file.name || "image" }));
       }
     }
+  };
+
+  const quoteMedia = async (item: ChatMediaItem) => {
+    if (chat.accepts_images && item.mimeType.startsWith("image/")) {
+      try {
+        const resp = await fetch(item.previewUrl ?? item.url);
+        if (resp.ok) {
+          const blob = await resp.blob();
+          const file = new File([blob], item.name || `${item.id}.png`, { type: blob.type || "image/png" });
+          const a = await readAttachment(file);
+          setAttachments((list) => (list.some((existing) => existing.data === a.data) ? list : [...list, a]));
+        }
+      } catch (err) {
+        console.warn("Could not attach media directly", err);
+      }
+    }
+    const label = item.name ? `[${t("agent.image")}: ${item.name}]` : `[${t("agent.image")}]`;
+    const quoteLine = `> ${label}\n`;
+    setDraft((prev) => (prev ? `${prev.trimEnd()}\n\n${quoteLine}` : quoteLine));
+    textareaRef.current?.focus();
+  };
+
+  const quoteText = (text: string) => {
+    const sel = window.getSelection()?.toString()?.trim();
+    const target = sel || text.trim();
+    if (!target) return;
+    const quoted = target
+      .split("\n")
+      .map((line) => `> ${line}`)
+      .join("\n");
+    setDraft((prev) => (prev ? `${prev.trimEnd()}\n\n${quoted}\n\n` : `${quoted}\n\n`));
+    textareaRef.current?.focus();
   };
 
   // The stream is the source of truth for status; the list's copy may be up
@@ -1108,7 +1212,7 @@ function ChatView({
               return (
                 <div key={e.seq} className="agent-msg agent-msg-user">
                   {e.images && e.images.length > 0 && (
-                    <ChatImages chatId={chat.id} images={e.images} />
+                    <ChatImages chatId={chat.id} images={e.images} onQuote={quoteMedia} />
                   )}
                   {e.text}
                 </div>
@@ -1116,28 +1220,43 @@ function ChatView({
             case "media":
               return (
                 <div key={e.seq} className="agent-msg agent-msg-assistant">
-                  <ChatMedia large caption={e.caption} items={[{
-                    id: e.asset_id, name: e.name, mimeType: e.mime_type,
-                    url: agentChatsApi.assetMediaUrl(e.asset_id),
-                    previewUrl: e.mime_type.startsWith("image/") ? agentChatsApi.assetMediaUrl(e.asset_id, "fit") : undefined,
-                    downloadUrl: agentChatsApi.assetMediaUrl(e.asset_id, "file", true),
-                  }]} />
+                  <ChatMedia
+                    large
+                    caption={e.caption}
+                    onQuote={quoteMedia}
+                    items={[{
+                      id: e.asset_id, name: e.name, mimeType: e.mime_type,
+                      url: agentChatsApi.assetMediaUrl(e.asset_id),
+                      previewUrl: e.mime_type.startsWith("image/") ? agentChatsApi.assetMediaUrl(e.asset_id, "fit") : undefined,
+                      downloadUrl: agentChatsApi.assetMediaUrl(e.asset_id, "file", true),
+                    }]}
+                  />
                 </div>
               );
             case "image":
               return (
                 <div key={e.seq} className="agent-msg agent-msg-assistant">
-                  <ChatImages chatId={chat.id} images={e.images} generated />
+                  <ChatImages chatId={chat.id} images={e.images} generated onQuote={quoteMedia} />
                 </div>
               );
             case "text":
               return (
-                <div
-                  key={e.seq}
-                  className="agent-msg agent-msg-assistant"
-                  // renderMarkdown escapes before it formats (see markdown.ts).
-                  dangerouslySetInnerHTML={{ __html: renderMarkdown(e.text) }}
-                />
+                <div key={e.seq} className="agent-msg agent-msg-assistant">
+                  <div
+                    // renderMarkdown escapes before it formats (see markdown.ts).
+                    dangerouslySetInnerHTML={{ __html: renderMarkdown(e.text) }}
+                  />
+                  <div className="agent-msg-actions">
+                    <button
+                      type="button"
+                      className="agent-msg-action"
+                      title={t("agent.quoteMessageTitle")}
+                      onClick={() => quoteText(e.text)}
+                    >
+                      ↩ {t("agent.quote")}
+                    </button>
+                  </div>
+                </div>
               );
             case "tool_use": {
               const result = results.get(e.id);
@@ -1361,6 +1480,7 @@ function ChatView({
           </>
         )}
         <textarea
+          ref={textareaRef}
           value={draft}
           placeholder={isFrozen ? t("agent.handoff.chatFrozen") : t("agent.placeholder")}
           disabled={isFrozen || running || sending}

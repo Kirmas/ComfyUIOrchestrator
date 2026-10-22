@@ -430,6 +430,7 @@ class Profile:
 
 class ProjectProfile(Profile):
     kind = "project"
+    accepts_images = True
 
     def new_meta(self, body):
         for field in ("project_id", "project_name", "mcp_url", "mcp_token"):

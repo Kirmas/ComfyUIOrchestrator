@@ -449,5 +449,11 @@ class AgyOnEventTests(unittest.IsolatedAsyncioTestCase):
                 "caption": "Test",
             })
 
+    def test_profiles_accept_images(self):
+        import runner
+        self.assertTrue(runner.PROFILES["project"].accepts_images)
+        self.assertTrue(runner.PROFILES["dev"].accepts_images)
+
+
 
 

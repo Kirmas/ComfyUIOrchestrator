@@ -222,12 +222,12 @@ still only one runs at a time.
     keresh reachable by anyone holding the orchestrator's API token, so that
     token has to be a real random secret before this is switched on.
 
-- **Pictures** (dev chats only, `Profile.accepts_images`): the page shrinks a
+- **Pictures** (`Profile.accepts_images`): the page shrinks a
   pasted / dropped / picked image to <=1568px and posts it base64 with the
   message; the runner keeps it in `chats/<id>/attachments/` (for the
   transcript, `GET /chats/<id>/attachments/<name>`) and sends it to the CLI as
-  an `image` content block, like a paste in a terminal. Project chats refuse
-  them: their world is the project, which MCP already reaches.
+  an `image` content block (or read_file instruction in Antigravity), like a paste in a terminal.
+  Both dev and project chats accept pictures.
 
 ## Night mode (`night.py`)
 

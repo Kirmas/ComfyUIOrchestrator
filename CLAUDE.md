@@ -255,6 +255,24 @@ choice. If you find the dev copy on a `night/*` branch with a stash named
 "night session ...", a night session is open: decide it in the Agent tab
 rather than by hand.
 
+**Handoff** (`agent_runner/handoff.py`, config `handoff.json` in the runner's
+data dir): a project-chat agent can pass its task to another provider+model
+**one way** -- the source chat freezes for good, nothing comes back, so the
+sender never verifies a result. The runner enforces everything, never the
+agent's prompt: a chain ban per model *identity* (no returning the task through
+another CLI), allow/deny rules per *target* (`provider:model`) learned from the
+person's four-button card, a timeout that is a soft no, and limits judged per
+pool by pace (100% or far ahead of the window's elapsed time = hidden from the
+agent outright; moderately ahead = "scarce", which always asks Yes/No; under 30%
+used is always ok). Model profiles (`good_for`/`appetite`/`draws_natively`) are
+**hand-written and editable, never inferred**: the person refused a "learn
+capabilities from observation" stage, and `draws_natively` means the model's
+*own* image generator -- every agent can draw through the orchestrator anyway.
+The new chat's first message is system-assembled (English service text, the
+person's own messages verbatim and carried down the whole chain). On
+Antigravity, project chats run hook mode `project`, which refuses commands and
+file writes (`comfy_hook_bridge.py`). Briefs: `docs/agent-handoff/`.
+
 ## Dev environment (`backend/.venv` + `backend/.env`, both gitignored)
 
 The dev copy is runnable now: a venv plus a `.env` pointing at

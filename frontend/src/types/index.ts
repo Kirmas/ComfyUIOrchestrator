@@ -578,7 +578,7 @@ export interface AgentChat {
   // Dev chats: how tool calls get approved -- auto (classifier), default
   // (ask for everything not allowlisted) or acceptEdits.
   permission_mode?: string;
-  // Whether a message may carry pictures from the person's machine (dev only).
+  // Whether a message may carry pictures from the person's machine.
   accepts_images?: boolean;
   supports_compact?: boolean;
   context_tokens?: number | null;
