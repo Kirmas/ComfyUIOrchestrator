@@ -1472,6 +1472,25 @@ async def decide_handoff_route(request: Request):
     return JSONResponse({"status": "started", "chat_id": new_chat.id})
 
 
+async def get_handoff_profiles_route(request: Request):
+    targets = [
+        {"target": f"{prov.id}:{m['id']}", "label": target_label(f"{prov.id}:{m['id']}")}
+        for prov in PROVIDERS.values() if prov.supports_project
+        for m in prov.models
+    ]
+    return JSONResponse({"profiles": handoff_config.profiles, "targets": targets})
+
+
+async def update_handoff_profile_route(request: Request):
+    body = await request.json()
+    target = body.get("target")
+    good_for, appetite = body.get("good_for"), body.get("appetite")
+    if not isinstance(target, str) or ":" not in target or not isinstance(good_for, str) or not isinstance(appetite, str):
+        return JSONResponse({"detail": "target, good_for and appetite are required strings"}, status_code=400)
+    handoff_config.set_profile(target, good_for, appetite, bool(body.get("draws_natively")))
+    return JSONResponse({"profiles": handoff_config.profiles})
+
+
 async def get_handoff_rules_route(request: Request):
     return JSONResponse({"rules": handoff_config.rules})
 
@@ -1946,6 +1965,8 @@ routes = [
     Route("/reports/{report_id}", read_report, methods=["GET"]),
     Route("/handoff/rules", get_handoff_rules_route, methods=["GET"]),
     Route("/handoff/rules", update_handoff_rules_route, methods=["PUT"]),
+    Route("/handoff/profiles", get_handoff_profiles_route, methods=["GET"]),
+    Route("/handoff/profiles", update_handoff_profile_route, methods=["PUT"]),
     Route("/night", night_status, methods=["GET"]),
     Route("/night", night_update, methods=["PATCH"]),
     Route("/night/diff", night_diff, methods=["GET"]),

@@ -4042,3 +4042,24 @@ th, td {
 .doc-link-whole {
   font-weight: 600;
 }
+
+.agent-handoff-profiles {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.agent-handoff-profile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.agent-handoff-profile button {
+  align-self: flex-start;
+}

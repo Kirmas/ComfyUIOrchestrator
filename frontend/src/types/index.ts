@@ -673,6 +673,18 @@ export interface HandoffRules {
   rules: Record<string, "allow" | "deny">;
 }
 
+// Hand-written description of a handoff target, shown to agents choosing one.
+export interface HandoffProfile {
+  good_for: string;
+  appetite: string;
+  draws_natively: boolean;
+}
+
+export interface HandoffProfiles {
+  profiles: Record<string, HandoffProfile>;
+  targets: { target: string; label: string }[];
+}
+
 // The built-in AskUserQuestion tool's own input schema (reverse-engineered
 // against a live `claude -p --input-format stream-json` run, 2026-10-01 --
 // not documented anywhere the runner could import it from).

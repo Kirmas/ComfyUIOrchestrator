@@ -832,6 +832,19 @@ class HandoffTests(unittest.TestCase):
         data["codex"]["windows"][0]["utilization"] = 0.31
         self.assertEqual(handoff.limit_state("codex:gpt-6-luna", data, self.config, now=now)[0], "scarce")
 
+    def test_profiles_reach_the_agent_and_persist(self):
+        """Profiles are hand-written: they show up in the target list and survive a reload."""
+        chat = SimpleNamespace(id="chat-prof", meta={"kind": "project", "provider": "claude", "requested_model": "opus"})
+        self.config.set_profile("codex:gpt-6-astra", "bulk work", "tiny", True)
+        with patch.dict(handoff.PROVIDERS, self.mock_providers, clear=True):
+            items = {t["target"]: t for t in get_handoff_targets(chat, self.config, limits_data={})}
+        astra = items["codex:gpt-6-astra"]
+        self.assertEqual((astra["good_for"], astra["appetite"], astra["draws_natively"]), ("bulk work", "tiny", True))
+        reloaded = HandoffConfig(self.config.path)
+        self.assertEqual(reloaded.profiles["codex:gpt-6-astra"]["good_for"], "bulk work")
+        # Defaults for the others are still there after a partial override
+        self.assertIn("claude:opus", reloaded.profiles)
+
 
 if __name__ == "__main__":
     unittest.main()

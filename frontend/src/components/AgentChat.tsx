@@ -17,6 +17,8 @@ import type {
   AskUserQuestionInput,
   AskUserQuestionItem,
   HandoffDecision,
+  HandoffProfile,
+  HandoffProfiles,
   PermissionDecision,
 } from "../types";
 import { cx } from "../utils";
@@ -551,7 +553,67 @@ function HandoffRulesPanel({ onBack }: { onBack: () => void }) {
             ))}
           </div>
         )}
+        <HandoffProfilesEditor />
       </div>
+    </div>
+  );
+}
+
+/** What each handoff target is good for, as agents see it. Edited by hand on
+ * purpose: nothing infers it at run time. */
+function HandoffProfilesEditor() {
+  const t = useT();
+  const [data, setData] = useState<HandoffProfiles | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, HandoffProfile>>({});
+
+  useEffect(() => {
+    agentChatsApi.getHandoffProfiles().then(
+      (res) => {
+        setData(res);
+        setDrafts(res.profiles);
+      },
+      (err) => console.error("Failed to load handoff profiles:", err),
+    );
+  }, []);
+
+  if (!data) return null;
+  const draftOf = (target: string): HandoffProfile =>
+    drafts[target] ?? { good_for: "", appetite: "", draws_natively: false };
+  const edit = (target: string, patch: Partial<HandoffProfile>) =>
+    setDrafts((d) => ({ ...d, [target]: { ...draftOf(target), ...patch } }));
+  const save = async (target: string) => {
+    try {
+      const res = await agentChatsApi.updateHandoffProfile(target, draftOf(target));
+      setData((prev) => (prev ? { ...prev, profiles: res.profiles } : prev));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    }
+  };
+  const dirty = (target: string) => JSON.stringify(draftOf(target)) !== JSON.stringify(data.profiles[target] ?? null);
+
+  return (
+    <div className="agent-handoff-profiles">
+      <strong>{t("agent.handoff.profiles")}</strong>
+      <div className="node-cell-hint">{t("agent.handoff.profilesHint")}</div>
+      {data.targets.map(({ target, label }) => {
+        const p = draftOf(target);
+        return (
+          <div key={target} className="agent-handoff-profile">
+            <div className="agent-handoff-rule-pair">{label}</div>
+            <input value={p.good_for} placeholder={t("agent.handoff.goodFor")} onChange={(e) => edit(target, { good_for: e.target.value })} />
+            <input value={p.appetite} placeholder={t("agent.handoff.appetite")} onChange={(e) => edit(target, { appetite: e.target.value })} />
+            <label>
+              <input type="checkbox" checked={p.draws_natively} onChange={(e) => edit(target, { draws_natively: e.target.checked })} />{" "}
+              {t("agent.handoff.drawsNatively")}
+            </label>
+            {dirty(target) && (
+              <button className="primary" onClick={() => save(target)}>
+                {t("agent.handoff.saveProfile")}
+              </button>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

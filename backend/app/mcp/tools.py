@@ -1204,6 +1204,10 @@ async def list_handoff_targets(chat_id: str) -> list[dict]:
     or can do what you can't). Returns only targets you are allowed to hand off to now.
     Targets in your task's chain, denied by rule, or previously refused are excluded.
     A target marked scarce needs the person's approval every time and should be avoided when another fits.
+    good_for / appetite describe each target (written by the person; trust them over your
+    own assumptions). draws_natively means the model has its own built-in image generator;
+    every agent, you included, can still generate images through this orchestrator's
+    tools, so only hand off for drawing when the person wants that model's own generator.
     You cannot hand back to anyone in the chain.
     Validate chat_id with the current Agent chat_id from your session instructions.
     """

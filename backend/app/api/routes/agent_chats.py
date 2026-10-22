@@ -80,6 +80,13 @@ class HandoffDecision(BaseModel):
     decision: str  # allow_once | allow_always | deny_once | deny_always
 
 
+class HandoffProfileUpdate(BaseModel):
+    target: str = Field(max_length=200)
+    good_for: str = Field(max_length=300)
+    appetite: str = Field(max_length=300)
+    draws_natively: bool = False
+
+
 class HandoffRulesUpdate(BaseModel):
     rules: dict[str, str] = Field(default_factory=dict)
 
@@ -159,6 +166,16 @@ async def get_handoff_rules():
 @router.put("/handoff-rules")
 async def update_handoff_rules(payload: HandoffRulesUpdate):
     return await _call("PUT", "/handoff/rules", json=payload.model_dump())
+
+
+@router.get("/handoff-profiles")
+async def get_handoff_profiles():
+    return await _call("GET", "/handoff/profiles")
+
+
+@router.put("/handoff-profiles")
+async def update_handoff_profile(payload: HandoffProfileUpdate):
+    return await _call("PUT", "/handoff/profiles", json=payload.model_dump())
 
 
 @router.post("")

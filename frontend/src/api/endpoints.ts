@@ -23,6 +23,8 @@ import type {
   DirBrowseResult,
   GridLayout,
   HandoffDecision,
+  HandoffProfile,
+  HandoffProfiles,
   HandoffRules,
   HandoffTarget,
   IdeaText,
@@ -416,6 +418,9 @@ export const agentChatsApi = {
     api.post<{ status: string; chat_id?: string }>(`/api/agent-chats/${id}/handoffs/${requestId}`, { decision }),
   getHandoffRules: () => api.get<HandoffRules>("/api/agent-chats/handoff-rules"),
   updateHandoffRules: (rules: Record<string, "allow" | "deny">) => api.put<HandoffRules>("/api/agent-chats/handoff-rules", { rules }),
+  getHandoffProfiles: () => api.get<HandoffProfiles>("/api/agent-chats/handoff-profiles"),
+  updateHandoffProfile: (target: string, profile: HandoffProfile) =>
+    api.put<{ profiles: Record<string, HandoffProfile> }>("/api/agent-chats/handoff-profiles", { target, ...profile }),
   setModel: (id: string, model: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { model }),
   setDone: (id: string, done: boolean) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { done }),
   remove: (id: string) => api.delete(`/api/agent-chats/${id}`),

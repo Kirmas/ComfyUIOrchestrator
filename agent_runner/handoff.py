@@ -38,6 +38,73 @@ DEFAULT_LIMITS = {
 }
 
 
+# What each target is good for, how hungry it is, and whether it can draw by
+# itself. Written by hand from public reviews (2026-10-22) plus the person's own
+# experience, which wins: e.g. Opus spends fewer tokens per task than its price
+# suggests, and Claude inside Antigravity is a different harness, so nothing
+# about Claude Code carries over to it. Never inferred at run time.
+# draws_natively = a built-in image generator of the model's own CLI. Every
+# agent can draw through the orchestrator's ComfyUI tools regardless.
+DEFAULT_PROFILES = {
+    "claude:opus": {
+        "good_for": "hardest work: understanding what the person wants, design decisions, rewriting a task for another model",
+        "appetite": "high per token, but spends fewer tokens per task than its price suggests",
+        "draws_natively": False,
+    },
+    "claude:sonnet": {
+        "good_for": "everyday agentic work, multi-step tool use",
+        "appetite": "medium per token, wordy",
+        "draws_natively": False,
+    },
+    "claude:haiku": {
+        "good_for": "narrow mechanical subtasks; weak on long multi-step chains",
+        "appetite": "very low",
+        "draws_natively": False,
+    },
+    "codex:gpt-6-astra": {
+        "good_for": "maximum capability, hard science/terminal-style problems",
+        "appetite": "highest of all targets",
+        "draws_natively": True,
+    },
+    "codex:gpt-6.1-sol": {
+        "good_for": "demanding everyday coding and reasoning, close to Astra",
+        "appetite": "medium per token (about 1/5 of Astra), uses more tokens",
+        "draws_natively": True,
+    },
+    "codex:gpt-6-luna": {
+        "good_for": "repetitive high-volume work; clearly weaker",
+        "appetite": "very low",
+        "draws_natively": True,
+    },
+    "agy:gemini-3.8-flash": {
+        "good_for": "simple to medium tasks, fast; the default cheap target",
+        "appetite": "low, generous separate pool",
+        "draws_natively": True,
+    },
+    "agy:gemini-4-argon": {
+        "good_for": "strongest Gemini: code, tool use, reasoning",
+        "appetite": "high in practice (thinking billed as output), small separate pool",
+        "draws_natively": True,
+    },
+    "agy:claude-sonnet-5-5": {
+        "good_for": "Sonnet in a foreign harness; behaviour may differ from Claude Code",
+        "appetite": "unknown here; shares the Antigravity 'Claude and GPT' pool",
+        "draws_natively": False,
+    },
+    "agy:claude-opus-5-5": {
+        "good_for": "Opus in a foreign harness; behaviour may differ from Claude Code",
+        "appetite": "unknown here; shares the Antigravity 'Claude and GPT' pool",
+        "draws_natively": False,
+    },
+    "agy:gpt-oss-120b": {
+        "good_for": "only very simple tasks; weak instruction following",
+        "appetite": "low; shares the Antigravity 'Claude and GPT' pool",
+        "draws_natively": False,
+    },
+}
+PROFILE_TEXT_MAX = 300
+
+
 class HandoffConfig:
     """Manages handoff settings and persistent rules in DATA_DIR / 'handoff.json'."""
 
@@ -60,6 +127,7 @@ class HandoffConfig:
         self.default_effort: dict[str, str] = dict(self.DEFAULT_EFFORT)
         self.rules: dict[str, str] = {}
         self.limits: dict = copy.deepcopy(DEFAULT_LIMITS)
+        self.profiles: dict[str, dict] = copy.deepcopy(DEFAULT_PROFILES)
         self.load()
 
     def load(self) -> None:
@@ -85,6 +153,12 @@ class HandoffConfig:
                     else:
                         lim[k] = v
                 self.limits = lim
+            if isinstance(data.get("profiles"), dict):
+                profiles = copy.deepcopy(DEFAULT_PROFILES)
+                for target, prof in data["profiles"].items():
+                    if isinstance(prof, dict):
+                        profiles.setdefault(target, {}).update(prof)
+                self.profiles = profiles
         except (OSError, ValueError):
             pass
 
@@ -97,6 +171,7 @@ class HandoffConfig:
             "default_effort": self.default_effort,
             "rules": self.rules,
             "limits": self.limits,
+            "profiles": self.profiles,
         }
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -121,6 +196,14 @@ class HandoffConfig:
 
     def update_rules(self, new_rules: dict[str, str]) -> None:
         self.rules = dict(new_rules)
+        self.save()
+
+    def set_profile(self, target: str, good_for: str, appetite: str, draws_natively: bool) -> None:
+        self.profiles[target] = {
+            "good_for": good_for.strip()[:PROFILE_TEXT_MAX],
+            "appetite": appetite.strip()[:PROFILE_TEXT_MAX],
+            "draws_natively": bool(draws_natively),
+        }
         self.save()
 
     def effort_for(self, target: str, provider) -> str | None:
@@ -379,6 +462,12 @@ def get_handoff_targets(
                 "label": target_label(target),
                 "mode": mode,
             }
+            profile = config.profiles.get(target)
+            if profile:
+                for key in ("good_for", "appetite"):
+                    if profile.get(key):
+                        item[key] = profile[key]
+                item["draws_natively"] = bool(profile.get("draws_natively"))
             if state == "scarce":
                 item["mode"] = "ask"
                 item["scarce"] = True

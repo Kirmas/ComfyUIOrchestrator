@@ -94,9 +94,16 @@ that understands the person can rewrite the task so the cheap one gets it at onc
   itself resumes it with "not approved, continue yourself". Rules and denials are per
   *target*, never per identity — a person may refuse Opus-in-Antigravity for its limits
   while allowing Opus in Claude Code.
-- **Capabilities are learned, not declared** (e.g. "has produced an image": the runner
-  already sees generated images). Until observed: "unknown", never "no". We were wrong
-  ourselves about which Antigravity models can draw.
+- **Model profiles are written by hand, never inferred** (2026-10-22, replacing a
+  planned "learn capabilities from observation" stage). Each target carries
+  `good_for`, `appetite` and `draws_natively`, drafted from public reviews and then
+  corrected by the person's own experience, which wins (Opus spends fewer tokens per
+  task than its price suggests; Claude inside Antigravity is a different harness, so
+  nothing about Claude Code carries over). `draws_natively` means the model's *own*
+  image generator — every agent can draw through the orchestrator's ComfyUI tools
+  anyway — and the person deliberately leaves it off for Antigravity's Claude/GPT
+  models: they would rather drawing never lands there than test whether it works.
+  Editable in the Agent tab's handoff settings.
 - **The first turn of the new chat is assembled by the system** from a fixed template,
   service text in English (cheaper), with an instruction to answer in the person's
   language: header with the chain and who may not receive it back; the rewritten task;
@@ -110,6 +117,7 @@ that understands the person can rewrite the task so the cheap one gets it at onc
   understanding the person — was done by the sender; low is cheap and usually enough),
   configurable per model.
 
-Order: (1) core — tool, chain, table + popup, frozen chat, first-turn template;
-(2) limits — pools, pace, hidden/scarce; (3) learned capabilities.
-Brief for stage 1: `docs/agent-handoff/stage1-brief.md`.
+Shipped 2026-10-22: (1) core — tool, chain, table + popup, frozen chat, first-turn
+template; (2) limits — pools, pace, hidden/scarce, always ok under 30% used;
+(3) hand-written model profiles. Briefs: `docs/agent-handoff/stage1-brief.md`,
+`stage2-brief.md`.
