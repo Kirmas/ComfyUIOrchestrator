@@ -244,6 +244,16 @@ stream (SSE keyed by a per-chat sequence) resumes by itself through the proxy.
 The proxy authenticates to the runner with this instance's own `API_TOKEN`,
 so the runner's `RUNNER_TOKENS` must list it (`agent_runner/install.sh`).
 `deploy.sh` does not restart the runner. Details: `agent_runner/README.md`.
+**Agent dock** (`AgentDock.tsx`, `state/agentDock.ts`): the project chats
+are also reachable from the grid, board and design doc through a 💬 bubble
+(bottom sheet on a phone, side panel when wide). It reuses the tab's own
+`ChatView` (a `dock` prop, not a copy), and lists project chats only, never
+dev chats. Every message sent from it starts with an English line
+saying which view it came from. That line can't be switched off, by the
+user's choice: to send without it, use the Agent tab. Grid cells attach via 🎯 pick-mode or the
+selection bar, and go as node_id/dashboard_id text plus the face picture.
+Unsent text/pictures persist per chat in IndexedDB (`chatDrafts.ts`),
+attached cells per project in localStorage.
 **Night mode** (`agent_runner/night.py`): while the person has it switched on,
 agents can file bugs in this app with the MCP tool `report_bug`; a dev agent
 works each one unattended, refuses non-bugs with reasons, fixes real ones, and

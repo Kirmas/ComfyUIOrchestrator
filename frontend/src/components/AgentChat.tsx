@@ -21,6 +21,8 @@ import type {
   HandoffProfiles,
   PermissionDecision,
 } from "../types";
+import { loadChatDraft, saveChatDraft } from "../chatDrafts";
+import type { AgentNodeRef } from "../state/agentDock";
 import { cx } from "../utils";
 
 const LAST_CHAT_KEY = "comfy-orchestrator:lastAgentChat";
@@ -125,6 +127,34 @@ async function readAttachment(file: File): Promise<Attachment> {
   return { media_type: blob.type, data: dataUrl.slice(dataUrl.indexOf(",") + 1), preview: dataUrl };
 }
 
+/** Remember the chat to open next time the Agent tab is shown. */
+export function rememberAgentChat(id: string) {
+  localStorage.setItem(LAST_CHAT_KEY, id);
+}
+
+/** A new chat on whatever model/effort/mode was picked last for this provider. */
+export async function createAgentChat(kind: AgentChatKind, projectId: string | null, provider: AgentProviderInfo): Promise<Chat> {
+  const lastModel = localStorage.getItem(lastModelKey(provider.id));
+  const model = provider.models.some((m) => m.id === lastModel)
+    ? lastModel!
+    : (provider.models.find((m) => lastModel?.startsWith(m.id))?.id ?? undefined);
+  const effectiveModelId = model ?? provider.default;
+  const modelInfo = provider.models.find((m) => m.id === effectiveModelId);
+  const modelEfforts = modelInfo?.efforts ?? provider.efforts;
+  const lastMode = localStorage.getItem(lastModeKey(provider.id));
+  const permissionMode = kind === "dev" && lastMode && provider.permission_modes.includes(lastMode) ? lastMode : undefined;
+  const lastEffort = localStorage.getItem(lastEffortKey(provider.id));
+  const effort = lastEffort && modelEfforts.includes(lastEffort) ? lastEffort : undefined;
+  const fastMode = provider.fast_models.length > 0 && localStorage.getItem(lastFastKey(provider.id)) === "1";
+  return agentChatsApi.create(kind, kind === "project" ? projectId : null, {
+    provider: provider.id,
+    model,
+    permissionMode,
+    effort,
+    fastMode,
+  });
+}
+
 /** Agent chats. Two kinds, listed in their own sections:
  * - project: an agent bound to the selected project, working only through the
  *   orchestrator's MCP tools;
@@ -171,31 +201,13 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
 
   const select = (id: string | null) => {
     setSelectedId(id);
-    if (id) localStorage.setItem(LAST_CHAT_KEY, id);
+    if (id) rememberAgentChat(id);
     else localStorage.removeItem(LAST_CHAT_KEY);
   };
 
   const createChat = async (kind: AgentChatKind, provider: AgentProviderInfo) => {
     try {
-      const lastModel = localStorage.getItem(lastModelKey(provider.id));
-      const model = provider.models.some((m) => m.id === lastModel)
-        ? lastModel!
-        : (provider.models.find((m) => lastModel?.startsWith(m.id))?.id ?? undefined);
-      const effectiveModelId = model ?? provider.default;
-      const modelInfo = provider.models.find((m) => m.id === effectiveModelId);
-      const modelEfforts = modelInfo?.efforts ?? provider.efforts;
-      const lastMode = localStorage.getItem(lastModeKey(provider.id));
-      const permissionMode = kind === "dev" && lastMode && provider.permission_modes.includes(lastMode) ? lastMode : undefined;
-      const lastEffort = localStorage.getItem(lastEffortKey(provider.id));
-      const effort = lastEffort && modelEfforts.includes(lastEffort) ? lastEffort : undefined;
-      const fastMode = provider.fast_models.length > 0 && localStorage.getItem(lastFastKey(provider.id)) === "1";
-      const chat = await agentChatsApi.create(kind, kind === "project" ? projectId : null, {
-        provider: provider.id,
-        model,
-        permissionMode,
-        effort,
-        fastMode,
-      });
+      const chat = await createAgentChat(kind, projectId, provider);
       setChats((cs) => [chat, ...cs]);
       select(chat.id);
     } catch (err) {
@@ -618,7 +630,7 @@ function HandoffProfilesEditor() {
   );
 }
 
-function statusLabel(t: ReturnType<typeof useT>, status: string): string {
+export function statusLabel(t: ReturnType<typeof useT>, status: string): string {
   switch (status) {
     case "running":
       return t("agent.status.running");
@@ -870,13 +882,34 @@ function ChatImages({
   );
 }
 
-function ChatView({
+/** What the agent dock (AgentDock.tsx) adds to a chat: every message says
+ * where it was sent from, and grid cells can ride along with it. */
+export type ChatDockExtras = {
+  /** One line of English service text naming the view the message came from. */
+  origin: () => string;
+  refs: AgentNodeRef[];
+  onRemoveRef: (nodeId: string) => void;
+  onSent: () => void;
+  onPick: () => void;
+};
+
+/** "- grid node_id=… (dashboard_id=…): label" lines for attached cells. */
+function describeRefs(refs: AgentNodeRef[]): string {
+  if (!refs.length) return "";
+  const lines = refs.map(
+    (r) => `- grid node_id=${r.nodeId}${r.dashboardId ? ` (dashboard_id=${r.dashboardId})` : ""}: ${r.label} (row:column)`,
+  );
+  return `Attached grid cells:\n${lines.join("\n")}`;
+}
+
+export function ChatView({
   chat,
   provider,
   onBack,
   onChanged,
   onSetDone,
   onOpenChat,
+  dock,
 }: {
   chat: Chat;
   provider: AgentProviderInfo | undefined;
@@ -884,6 +917,7 @@ function ChatView({
   onChanged: () => void;
   onSetDone: (done: boolean) => void;
   onOpenChat?: (chatId: string) => void;
+  dock?: ChatDockExtras;
 }) {
   const t = useT();
   const { events, connected } = useChatEvents(chat.id);
@@ -1003,31 +1037,66 @@ function ChatView({
     return map;
   }, [events]);
 
-  useEffect(() => {
+  // Follow the bottom unless the person scrolled up. Starts stuck, so an
+  // opened chat lands on its last message: the replay arrives one event at a
+  // time after the stream opens, so "jump once connected" used to fire while
+  // the transcript was still short and leave a long chat at its top.
+  const stuckToBottom = useRef(true);
+  const followBottom = () => {
     const el = boxRef.current;
-    if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
-  }, [events]);
+    if (el && stuckToBottom.current) el.scrollTop = el.scrollHeight;
+  };
+  useEffect(followBottom, [events]);
 
-  // Jump to the bottom once the replay of an opened chat has arrived.
+  // Unsent text and pictures survive a reload (chatDrafts.ts). Loaded once;
+  // anything typed before the load finishes wins over the stored copy.
+  const draftLoaded = useRef(false);
   useEffect(() => {
-    const el = boxRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [connected]);
+    loadChatDraft(chat.id).then((saved) => {
+      if (saved) {
+        setDraft((d) => d || saved.text);
+        setAttachments((a) => (a.length ? a : saved.attachments));
+      }
+      draftLoaded.current = true;
+    });
+  }, [chat.id]);
+  useEffect(() => {
+    if (!draftLoaded.current) return;
+    const id = setTimeout(() => saveChatDraft(chat.id, { text: draft, attachments }), 400);
+    return () => clearTimeout(id);
+  }, [chat.id, draft, attachments]);
 
+  const refs = dock?.refs ?? [];
   const send = async () => {
     const text = draft.trim();
-    if ((!text && !attachments.length) || running || sending || isFrozen) return;
+    if ((!text && !attachments.length && !refs.length) || running || sending || isFrozen) return;
     setSending(true);
     try {
-      await agentChatsApi.send(
-        chat.id,
-        text,
-        attachments.map(({ media_type, data }) => ({ media_type, data })),
-      );
+      const images = attachments.map(({ media_type, data }) => ({ media_type, data }));
+      let body = text;
+      if (dock) {
+        body = [dock.origin(), describeRefs(refs), text].filter(Boolean).join("\n\n");
+        // A cell's picture goes along so the agent sees it without a tool
+        // call; one that fails to load still leaves its id in the text.
+        if (chat.accepts_images) {
+          for (const r of refs) {
+            if (!r.previewUrl) continue;
+            try {
+              const resp = await fetch(r.previewUrl);
+              if (!resp.ok) continue;
+              const blob = await resp.blob();
+              const { media_type, data } = await readAttachment(new File([blob], "cell", { type: blob.type || "image/png" }));
+              images.push({ media_type, data });
+            } catch (err) {
+              console.warn("Could not attach cell preview", err);
+            }
+          }
+        }
+      }
+      await agentChatsApi.send(chat.id, body, images);
       setDraft("");
       setAttachments([]);
+      dock?.onSent();
       onChanged();
     } catch (err) {
       alert(err instanceof Error ? err.message : String(err));
@@ -1076,7 +1145,7 @@ function ChatView({
         <span className={cx("agent-status-dot", `agent-status-${status}`)} />
         <span className="node-cell-hint">{statusLabel(t, status)}</span>
         {!connected && <span className="node-cell-hint">· {t("agent.reconnecting")}</span>}
-        <span className="agent-header-controls">
+        {!dock && <span className="agent-header-controls">
         <span title={provider?.label}>
           <AgentProviderIcon provider={chat.provider} />
         </span>
@@ -1178,9 +1247,18 @@ function ChatView({
         >
           ✓ {t("agent.done")}
         </button>
-        </span>
+        </span>}
       </div>
-      <div className="agent-transcript" ref={boxRef}>
+      <div
+        className="agent-transcript"
+        ref={boxRef}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          stuckToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+        }}
+        // Pictures load after their message is placed and push the bottom down.
+        onLoadCapture={followBottom}
+      >
         {events.map((e) => {
           switch (e.type) {
             case "user":
@@ -1448,6 +1526,19 @@ function ChatView({
           ))}
         </div>
       )}
+      {dock && refs.length > 0 && (
+        <div className="agent-dock-refs">
+          {refs.map((r) => (
+            <span key={r.nodeId} className="agent-dock-ref">
+              {r.previewUrl ? <img src={r.previewUrl} alt="" /> : <span>🔗</span>}
+              <span className="agent-dock-ref-label">{r.label}</span>
+              <button title={t("agent.removeImage")} onClick={() => dock.onRemoveRef(r.nodeId)}>
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       <div
         className="agent-input"
         onDragOver={chat.accepts_images ? (e) => e.preventDefault() : undefined}
@@ -1478,6 +1569,11 @@ function ChatView({
               }}
             />
           </>
+        )}
+        {dock && (
+          <button className="agent-attach" title={t("agentDock.pickTitle")} disabled={isFrozen || running || sending} onClick={dock.onPick}>
+            🎯
+          </button>
         )}
         <textarea
           ref={textareaRef}
@@ -1527,7 +1623,7 @@ function ChatView({
               {t("agent.stop")}
             </button>
           ) : (
-            <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length) || sending || isFrozen}>
+            <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length && !refs.length) || sending || isFrozen}>
               {t("agent.send")}
             </button>
           )}

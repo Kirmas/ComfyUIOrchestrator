@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AgentChat } from "./components/AgentChat";
+import { AgentDock } from "./components/AgentDock";
 import { ApiError, getApiToken } from "./api/client";
 import { designDocApi, projectsApi } from "./api/endpoints";
 import type { DesignDocSummary, Project } from "./types";
@@ -270,6 +271,9 @@ export default function App() {
         <Board projectId={projectId} />
       ) : (
         projectId && <Grid projectId={projectId} />
+      )}
+      {projectId && (view === "grid" || view === "board" || view === "doc") && (
+        <AgentDock projectId={projectId} projectName={projectName} view={view} onExpand={() => goTo("agent")} />
       )}
     </div>
   );

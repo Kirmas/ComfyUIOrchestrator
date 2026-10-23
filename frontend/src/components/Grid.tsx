@@ -4,6 +4,7 @@ import { useProjectWs } from "../api/useProjectWs";
 import { assetClipboard, subgraphClipboard, useClipboardSlot } from "../clipboard";
 import { assetFace, assetNodeKind } from "../assetNodes";
 import { useProjectStore } from "../state/projectStore";
+import { attachNodeToAgent, useAgentDock } from "../state/agentDock";
 import type { Asset, Backend, Capability, NodeItem, NodeKind, NodeTemplate, Project, Track } from "../types";
 import { useT } from "../i18n";
 import { cx } from "../utils";
@@ -68,6 +69,7 @@ export function Grid({ projectId }: { projectId: string }) {
   // cell toggles membership; a plain click is left alone so it keeps meaning
   // whatever it meant before (compare, ref, open).
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
+  const agentPicking = useAgentDock((s) => s.picking);
   // The comment thread open in its dialog: an existing one by id (read live
   // from the store, so an agent's reply appears while it's open), or the cells
   // a new one is about to be started on.
@@ -633,6 +635,18 @@ export function Grid({ projectId }: { projectId: string }) {
     const nodeIds = [...selectedNodeIds];
     const existing = annotations.find((a) => a.node_ids.length === nodeIds.length && nodeIds.every((id) => a.node_ids.includes(id)));
     setOpenThread(existing ? { id: existing.id } : { nodeIds });
+    setSelectedNodeIds(new Set());
+  };
+
+  // Cells for the agent dock (AgentDock.tsx): the type the card itself shows.
+  const nodeTypeLabel = (node: NodeItem) =>
+    templates.find((tpl) => tpl.node_type === node.node_type)?.name ?? node.node_type ?? node.kind;
+
+  const attachSelectionToAgent = async () => {
+    for (const id of selectedNodeIds) {
+      const node = nodesById[id];
+      if (node) await attachNodeToAgent(node, nodeTypeLabel(node));
+    }
     setSelectedNodeIds(new Set());
   };
 
@@ -1516,6 +1530,9 @@ export function Grid({ projectId }: { projectId: string }) {
           <button onClick={commentOnSelection} title={t("grid.addCommentTitle")}>
             {t("grid.addComment")}
           </button>
+          <button onClick={attachSelectionToAgent} title={t("agentDock.attachSelectionTitle")}>
+            💬 {t("agentDock.attachSelection")}
+          </button>
           <button onClick={() => setSelectedNodeIds(new Set())} title={t("grid.clearSelectionTitle")}>
             {t("common.clearLower")}
           </button>
@@ -1641,6 +1658,12 @@ export function Grid({ projectId }: { projectId: string }) {
                   // Capture phase, so ticking a cell for a comment block never
                   // also triggers whatever a plain click on that cell does.
                   onClickCapture={(e) => {
+                    if (agentPicking) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      void attachNodeToAgent(node, nodeTypeLabel(node));
+                      return;
+                    }
                     if (!(e.shiftKey || e.ctrlKey || e.metaKey)) return;
                     e.preventDefault();
                     e.stopPropagation();
