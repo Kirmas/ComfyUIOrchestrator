@@ -277,6 +277,9 @@ export interface NodeItem {
   // backend/app/db/models.py's Node.exclude_from_dashboard_preview
   // docstring. Toggled from the node's own card (SubgraphNodeView).
   exclude_from_dashboard_preview: boolean;
+  // Marked True when created by an AI agent over MCP. Removable by the user in
+  // the UI. delete_node over MCP is only permitted while this remains True.
+  is_agent_created: boolean;
   created_at: string;
 }
 
@@ -418,6 +421,10 @@ export type ProgressEvent =
       status: string;
       progress?: number;
       error?: string;
+    }
+  | {
+      type: "node_deleted";
+      node_id: string;
     }
   // Something in the project's comment threads changed -- possibly an agent
   // writing through MCP, which this tab would otherwise never hear about.

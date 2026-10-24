@@ -244,6 +244,7 @@ async def project_recipe(project_id: uuid.UUID, dashboard_id: uuid.UUID | None =
                 "slot_count": len([f for f in schema_fields if f.get("type") in ("image", "file")]),
                 "prompt_link": prompt_links.get(slug),
                 "created_by_node_id": str(node.created_by_node_id) if node.created_by_node_id else None,
+                "is_agent_created": bool(node.is_agent_created),
                 # The pointer-to-sub-dashboard field (asset.subgraph nodes
                 # only). Surfaced here, not just on GET /api/nodes/{id}, so an
                 # agent can discover every nested subgraph in one recipe read

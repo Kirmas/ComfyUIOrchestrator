@@ -447,6 +447,11 @@ class Node(Base):
     # reclaimed row now splices a fresh track for it (_ensure_rows_up_to)
     # instead of relying on the row having stayed pre-reserved underneath.
     visible_slot_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Set to True when the node was created by an AI agent / MCP tool.
+    # Displayed as a badge in the UI and can be removed (unmarked) by the user
+    # to protect the node from deletion. The MCP delete_node tool permits an agent
+    # to delete ONLY nodes that have is_agent_created=True.
+    is_agent_created: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     track: Mapped["Track"] = relationship(back_populates="nodes", foreign_keys=[track_id])

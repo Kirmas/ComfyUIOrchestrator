@@ -193,6 +193,10 @@ async def create_node(
 ) -> dict:
     """Create a node at one cell.
 
+    Each cell (track_id, step_index) holds at most one node. If a node already
+    exists in this cell, this call will fail with 409. Use delete_node or
+    set_node_params if you need to replace or update an existing node.
+
     Column kind (asset vs workflow) alternates project-wide and is dictated by
     step_index, not by `kind` -- only the very first node in a project uses it
     to fix the pattern.
@@ -220,6 +224,20 @@ async def set_node_params(node_id: str, params: dict) -> dict:
     """Replace a node's params (prompts exposed as grid-editable fields,
     sampler settings, etc.). For a workflow's *baked* prompt use set_prompt."""
     return await _patch(f"/api/nodes/{node_id}", {"params": params})
+
+
+@mcp_server.tool()
+async def delete_node(node_id: str) -> dict:
+    """Delete a node from the grid that was created by an agent.
+
+    Only nodes marked as agent-created (is_agent_created=True) can be deleted.
+    If the user has reviewed the node and removed the agent mark (or if the node
+    was created by a human), deletion is refused.
+    For workflow nodes, any generated output nodes will also be deleted,
+    provided none of them were verified/unmarked by the user.
+    """
+    await _delete(f"/api/nodes/{node_id}?require_agent_created=true")
+    return {"deleted": True, "node_id": node_id}
 
 
 @mcp_server.tool()
@@ -395,9 +413,9 @@ async def list_prompt_fields(capability_id: str) -> list[dict]:
 # existed since sub-dashboards shipped, but nothing in this file ever wrapped
 # them, so create_node(node_type="asset.subgraph") could produce a node whose
 # subgraph_dashboard_id stays permanently null -- a dead pointer with no nested
-# grid behind it, and no MCP path to attach one. Fixed 2026-09-14. There is
-# still deliberately no delete_dashboard/delete_node/delete_track tool here --
-# not attempted, at the user's own instruction.
+# grid behind it, and no MCP path to attach one. Fixed 2026-09-14.
+# delete_node allows agents to clean up nodes they created (is_agent_created=True),
+# while dashboards and tracks still have no agent delete tool.
 async def _resolve_or_create_pointer_cell(node_id: str | None, track_id: str | None, step_index: int | None) -> str:
     """Shared by every tool below that needs a free asset cell to turn into a
     pointer: reuse an existing one (`node_id`) or create a fresh empty one at
@@ -408,7 +426,14 @@ async def _resolve_or_create_pointer_cell(node_id: str | None, track_id: str | N
         return node_id
     if track_id is None or step_index is None:
         raise RuntimeError("Pass either node_id, or both track_id and step_index, to name the pointer cell.")
-    node = await _post("/api/nodes", {"track_id": track_id, "step_index": step_index, "kind": "asset"})
+    node = await _post(
+        "/api/nodes",
+        {
+            "track_id": track_id,
+            "step_index": step_index,
+            "kind": "asset",
+        },
+    )
     return node["id"]
 
 

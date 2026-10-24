@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -422,6 +422,9 @@ class NodeUpdate(BaseModel):
     backend_mode: str | None = None
     manual_backend_id: uuid.UUID | None = None
     use_api: bool | None = None
+    # Unmark only (the user verifying an agent's node). Marking is never a
+    # client's call: create_node stamps it from the MCP client's X-Actor header.
+    is_agent_created: Literal[False] | None = None
     # Opt this node out of a parent container dashboard's collage preview --
     # see Node.exclude_from_dashboard_preview in db/models.py.
     exclude_from_dashboard_preview: bool | None = None
@@ -450,6 +453,7 @@ class NodeRead(ORMModel):
     backend_mode: str
     manual_backend_id: uuid.UUID | None
     use_api: bool
+    is_agent_created: bool
     exclude_from_dashboard_preview: bool
     error: str | None
     # Read-only -- see db/models.py's Node.created_by_node_id docstring.

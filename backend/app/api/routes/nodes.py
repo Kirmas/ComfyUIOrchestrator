@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +20,8 @@ from app.core.track_order import ordered_tracks, scope_of, splice_after
 from app.core.subgraph_copy import workflow_node_copy
 from app.core.storage import build_asset_url, get_storage
 from app.core.upload_type import resolve_upload
+from app.core.ws_manager import ws_manager
+from app.mcp.client import AGENT_ACTOR_HEADER
 from app.api.routes.assets import to_asset_read
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Dashboard, Job, JobStatusEnum, Node, NodeKind, NodeStatus, Track
@@ -43,6 +45,24 @@ def _opposite_kind(kind: NodeKind) -> NodeKind:
 
 def _kind_for_step(start_kind: NodeKind, step_index: int) -> NodeKind:
     return start_kind if step_index % 2 == 0 else _opposite_kind(start_kind)
+
+
+def _status_value(status) -> str:
+    return status.value if hasattr(status, "value") else str(status)
+
+
+async def _broadcast(db: AsyncSession, track_id, *events: dict) -> None:
+    """Tell every open browser tab of the node's project what just changed --
+    the page otherwise only learns about changes its own requests made, so an
+    agent's create/delete/re-roll would leave a stale card on screen."""
+    track = await db.get(Track, track_id)
+    if track:
+        for event in events:
+            await ws_manager.broadcast(str(track.project_id), event)
+
+
+def _node_event(node_id, status) -> dict:
+    return {"type": "node", "node_id": str(node_id), "status": _status_value(status)}
 
 
 async def _ensure_slot_free(db: AsyncSession, track_id, step_index: int, exclude_node_id=None) -> None:
@@ -589,6 +609,7 @@ async def _pick_candidate(db: AsyncSession, picker: Node, kept: Asset) -> Node |
         node_type="asset.single",
         created_by_node_id=picker.created_by_node_id,
         status=NodeStatus.done,
+        is_agent_created=picker.is_agent_created,
     )
     db.add(settled)
     await db.flush()
@@ -651,8 +672,24 @@ async def pick_all_candidates(node_id: uuid.UUID, db: AsyncSession = Depends(get
     await db.commit()
 
 
+async def _unmark_referenced_source(db: AsyncSession, ref: Node) -> None:
+    """The person pointing a reference at an agent's picture is them adopting
+    it: drop the agent mark so the agent can no longer delete it from under
+    the reference (see delete_node's require_agent_created)."""
+    for inp in ref.inputs or []:
+        if not isinstance(inp, dict) or inp.get("type") != "explicit":
+            continue
+        source_id = inp.get("node_id")
+        if not source_id and inp.get("output_id"):
+            asset = await db.get(Asset, uuid.UUID(str(inp["output_id"])))
+            source_id = asset.node_id if asset else None
+        source = await db.get(Node, uuid.UUID(str(source_id))) if source_id else None
+        if source is not None:
+            source.is_agent_created = False
+
+
 @router.post("", response_model=NodeRead, status_code=201)
-async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)):
+async def create_node(payload: NodeCreate, request: Request, db: AsyncSession = Depends(get_db)):
     """Column kind (asset/workflow) is a per-scope pattern, not a free choice
     per node: only the very first node created in a given grid scope picks it
     (via payload.kind); every node after that gets its kind computed from its
@@ -674,7 +711,11 @@ async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)):
 
     data = payload.model_dump(mode="json")
     data["kind"] = resolved_kind
+    by_agent = request.headers.get(AGENT_ACTOR_HEADER) == "agent"
+    data["is_agent_created"] = by_agent
     node = Node(**data)
+    if not by_agent and node.node_type == "asset.refasset":
+        await _unmark_referenced_source(db, node)
     if node.created_by_node_id is not None:
         await _ensure_output_binding(db, node, payload.track_id, payload.step_index)
     db.add(node)
@@ -699,6 +740,7 @@ async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)):
         await ensure_span_rows(db, node)
     await db.commit()
     await db.refresh(node)
+    await _broadcast(db, node.track_id, _node_event(node.id, node.status))
     return node
 
 
@@ -740,6 +782,12 @@ async def update_node(node_id: uuid.UUID, payload: NodeUpdate, db: AsyncSession 
                 raise HTTPException(409, "This cell already owns generated assets -- can't convert it into a reference.")
     for field, value in data.items():
         setattr(node, field, value)
+    if data.get("is_agent_created") is False and node.kind == NodeKind.workflow:
+        # Adopting a workflow adopts what it generated -- otherwise the agent
+        # stays unable to delete the workflow over an output nobody can tell
+        # is still marked.
+        for out in await own_output_nodes(db, node.id):
+            out.is_agent_created = False
     if "node_type" in data:
         # Template (re)assigned -- materialize the input-slot rows this
         # workflow now needs, right below it (see ensure_span_rows). Replaces
@@ -757,7 +805,11 @@ async def update_node(node_id: uuid.UUID, payload: NodeUpdate, db: AsyncSession 
 
 
 @router.delete("/{node_id}", status_code=204)
-async def delete_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def delete_node(
+    node_id: uuid.UUID,
+    require_agent_created: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
     """Deletes this one node -- an asset node never cascades to anything
     else, not even something sitting after it in the same track: in the
     row-span paradigm, inputs/outputs are addressed by
@@ -790,15 +842,30 @@ async def delete_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     if not node:
         raise HTTPException(404, "Node not found")
 
+    if require_agent_created and not node.is_agent_created:
+        raise HTTPException(
+            403,
+            "Cannot delete node: it is not marked as agent-created (the user may have verified/unmarked it or created it manually).",
+        )
+
     # A smart pointer may be the only way back to a sub-dashboard -- refuse, or
     # auto-promote another pointer, before anything is actually removed.
     await enforce_pointer_deletion(db, node)
 
     nodes_to_delete = [node]
     if node.kind == NodeKind.workflow:
-        nodes_to_delete.extend(await own_output_nodes(db, node.id))
+        outputs = await own_output_nodes(db, node.id)
+        if require_agent_created:
+            for out in outputs:
+                if not out.is_agent_created:
+                    raise HTTPException(
+                        403,
+                        f"Cannot delete workflow node: its output node {out.id} was verified/unmarked by the user.",
+                    )
+        nodes_to_delete.extend(outputs)
 
     node_ids = [n.id for n in nodes_to_delete]
+    track_id = node.track_id
 
     if node_ids:
         result = await db.execute(select(Asset).where(Asset.node_id.in_(node_ids)))
@@ -810,6 +877,8 @@ async def delete_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         await db.delete(n)
 
     await db.commit()
+
+    await _broadcast(db, track_id, *({"type": "node_deleted", "node_id": str(nid)} for nid in node_ids))
 
 
 @router.get("/{node_id}/outputs", response_model=list[AssetRead])
@@ -1114,6 +1183,7 @@ async def discard_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     node.status = NodeStatus.discarded
     await db.commit()
     await db.refresh(node)
+    await _broadcast(db, node.track_id, _node_event(node.id, node.status))
     return node
 
 
@@ -1137,7 +1207,9 @@ async def reroll_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     # appending its results next to any of them. new_node below gets a
     # brand-new id, so own_output_nodes(new_node.id) is empty regardless --
     # nothing further to do to make that true.
-    for old_output in await own_output_nodes(db, old.id):
+    old_outputs = await own_output_nodes(db, old.id)
+    old_output_ids = [out.id for out in old_outputs]
+    for old_output in old_outputs:
         old_output.status = NodeStatus.discarded
 
     # Checked here, before creating anything -- same reasoning and same
@@ -1173,11 +1245,20 @@ async def reroll_node(node_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         backend_mode=old.backend_mode,
         manual_backend_id=old.manual_backend_id,
         use_api=old.use_api,
+        is_agent_created=old.is_agent_created,
         status=NodeStatus.queued,
     )
     db.add(new_node)
     await db.commit()
     await db.refresh(new_node)
+
+    await _broadcast(
+        db,
+        old.track_id,
+        _node_event(old.id, NodeStatus.discarded),
+        *(_node_event(out_id, NodeStatus.discarded) for out_id in old_output_ids),
+        _node_event(new_node.id, new_node.status),
+    )
 
     await job_queue.enqueue(enqueue_node_job, str(new_node.id))
     return new_node

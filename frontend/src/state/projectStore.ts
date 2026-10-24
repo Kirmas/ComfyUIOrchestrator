@@ -274,6 +274,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (pid) get().reloadAnnotations(pid).catch(() => undefined);
       return;
     }
+    if (event.type === "node_deleted") {
+      get().removeNode(event.node_id);
+      return;
+    }
     const node = get().nodesById[event.node_id];
 
     if (event.type === "node") {

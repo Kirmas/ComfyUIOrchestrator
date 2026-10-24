@@ -291,21 +291,30 @@ export function Grid({ projectId }: { projectId: string }) {
 
   useProjectWs(projectId, applyProgressEvent);
 
+  // A discarded node stays on the grid (marked) until something live takes
+  // over its cell -- a re-roll puts the new attempt in the very same
+  // (track, step), and the old one must not be drawn underneath it.
+  const shownNodes = useMemo(() => {
+    const all = Object.values(nodesById);
+    const liveCells = new Set(all.filter((n) => n.status !== "discarded").map((n) => `${n.track_id}:${n.step_index}`));
+    return all.filter((n) => n.status !== "discarded" || !liveCells.has(`${n.track_id}:${n.step_index}`));
+  }, [nodesById]);
+
   const nodesByTrack = useMemo(() => {
     const map = new Map<string, NodeItem[]>();
-    for (const node of Object.values(nodesById)) {
+    for (const node of shownNodes) {
       if (!map.has(node.track_id)) map.set(node.track_id, []);
       map.get(node.track_id)!.push(node);
     }
     for (const list of map.values()) list.sort((a, b) => a.step_index - b.step_index);
     return map;
-  }, [nodesById]);
+  }, [shownNodes]);
 
   const maxStep = useMemo(() => {
     let max = 0;
-    for (const node of Object.values(nodesById)) max = Math.max(max, node.step_index);
+    for (const node of shownNodes) max = Math.max(max, node.step_index);
     return max;
-  }, [nodesById]);
+  }, [shownNodes]);
 
   const sortedTracks = useMemo(() => [...tracks].sort((a, b) => a.row_index - b.row_index), [tracks]);
 
@@ -347,12 +356,10 @@ export function Grid({ projectId }: { projectId: string }) {
 
   const nodesByRowStep = useMemo(() => {
     const map = new Map<string, NodeItem>();
-    for (const node of Object.values(nodesById)) {
-      map.set(`${effectiveRow(node)}:${node.step_index}`, node);
-    }
+    for (const node of shownNodes) map.set(`${effectiveRow(node)}:${node.step_index}`, node);
     return map;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodesById, tracks]);
+  }, [shownNodes, tracks]);
 
   // The ideal number of rows a workflow node's merged cell wants: enough to
   // reach every image/file input slot on one side, and every row currently

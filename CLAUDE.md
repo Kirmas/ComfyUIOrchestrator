@@ -102,10 +102,10 @@ grid. This is *organisational decomposition*, not a performance trick.
   `name` also happens to be the only place in this app a grid *container* gets
   a name at all (a `Node`/`Track` has no name column); naming an individual
   node or track is a real gap, not an MCP one, and remains unsolved.
-  Deliberately still no `delete_dashboard`/`delete_node`/`delete_track` tool --
-  not attempted, at the user's own instruction (an agent that creates the
-  wrong thing here flags it or leaves it for a human, it doesn't clean up
-  after itself). Found and fixed same day: `get_project_recipe` also used to
+  `delete_node` is available for agent-created nodes (`is_agent_created=True`)
+  so agents can clean up their own mistakes, but deletion is rejected if the
+  user has verified/unmarked the node or created it manually. Still no
+  `delete_dashboard`/`delete_track` tool. Found and fixed same day: `get_project_recipe` also used to
   inline `native.mask`/`native.transplant`'s `mask_png`/`transplant_png`
   base64 blobs (params of schema type `"mask"`/`"layer_mask"`) straight into
   every node's `params`, which is exactly the megabyte-blowup

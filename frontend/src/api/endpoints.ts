@@ -225,6 +225,7 @@ export const nodesApi = {
     backend_mode?: string;
     manual_backend_id?: string | null;
     use_api?: boolean;
+    is_agent_created?: boolean;
     // Forwarding-only: passes an EXISTING node's own created_by_node_id
     // through to a new node standing in for it (Grid.tsx's
     // onSelectCandidate settling a candidate into the vacated cell) --

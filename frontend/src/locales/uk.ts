@@ -679,6 +679,8 @@ export const uk: Record<TKey, string> = {
   "cell.chainNoParams": "параметрів немає",
   "cell.reference": "↗ Посилання",
   "cell.refPill": "реф",
+  "cell.agentCreated": "Агент",
+  "cell.agentCreatedTitle": "Створено агентом. Натисніть, щоб зняти мітку та захистити від видалення агентом.",
   "cell.confirmRemoveRef": "Прибрати це посилання? Справжній ассет в іншому місці не постраждає.",
   "cell.removeRefTitle": "Прибрати це посилання (справжнього ассета не чіпає)",
 

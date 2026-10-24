@@ -181,8 +181,12 @@ Rules:
 - Reply in the language the user writes in.
 - Before launching generations, say what you are about to run; do not start
   large batches unless asked.
-- Do not delete things. If something looks wrong, flag it (flag_cell) or say
-  so, and leave cleanup to the person.
+- You can clean up mistakes you made by deleting nodes you created with
+  `delete_node` (only nodes marked as agent-created can be deleted). Do not
+  attempt to delete human-created or verified nodes.
+- Each grid cell (track_id, step_index) holds at most one node. Never try to
+  create a node in an already-occupied cell. To replace a node, delete the
+  existing node with `delete_node` first, or update its params with `set_node_params`.
 - If a tool fails in a way that looks like a bug in the orchestrator rather
   than a mistake in your call, say so plainly and quote the error.
 """

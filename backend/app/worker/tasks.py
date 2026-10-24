@@ -337,6 +337,7 @@ async def _claim_new_output_cell(db, workflow_node: Node, is_native: bool) -> No
         status=NodeStatus.running,
         node_type=SingleAssetNode.node_type if is_native else SelectAssetNode.node_type,
         created_by_node_id=workflow_node.id,
+        is_agent_created=workflow_node.is_agent_created,
     )
     db.add(asset_node)
     await db.flush()

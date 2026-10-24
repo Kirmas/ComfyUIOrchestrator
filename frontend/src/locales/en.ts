@@ -677,6 +677,8 @@ export const en = {
   "cell.chainNoParams": "no params",
   "cell.reference": "↗ Reference",
   "cell.refPill": "ref",
+  "cell.agentCreated": "Agent",
+  "cell.agentCreatedTitle": "Created by agent. Click to remove mark and protect from agent deletion.",
   "cell.confirmRemoveRef": "Remove this reference? The real asset elsewhere is untouched.",
   "cell.removeRefTitle": "Remove this reference (doesn't touch the real asset)",
 

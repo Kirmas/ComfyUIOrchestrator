@@ -335,6 +335,27 @@ input, select, textarea {
   letter-spacing: 0.03em;
 }
 
+.agent-pill {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--warning-dim, rgba(234, 179, 8, 0.15));
+  color: var(--warning, #eab308);
+  border: 1px solid var(--warning, #eab308);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  letter-spacing: 0.03em;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+
+.agent-pill:hover {
+  background: var(--warning, #eab308);
+  color: #000;
+}
+
 .field-row {
   display: flex;
   flex-direction: column;

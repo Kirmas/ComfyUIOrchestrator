@@ -518,6 +518,26 @@ function useAssetFace(node: NodeItem): Asset | null {
   return face;
 }
 
+function AgentBadge({ node }: { node: NodeItem }) {
+  const t = useT();
+  const setNode = useProjectStore((s) => s.setNode);
+  if (!node.is_agent_created) return null;
+  return (
+    <button
+      type="button"
+      className="agent-pill"
+      onClick={async (e) => {
+        e.stopPropagation();
+        const updated = await nodesApi.update(node.id, { is_agent_created: false });
+        setNode(updated);
+      }}
+      title={t("cell.agentCreatedTitle")}
+    >
+      🤖 {t("cell.agentCreated")} ×
+    </button>
+  );
+}
+
 function BaseAssetNodeView({
   node,
   outputs,
@@ -885,6 +905,7 @@ function BaseAssetNodeView({
             📌
           </span>
         )}
+        <AgentBadge node={node} />
         <span className="status-pill">{statusLabel(t, node.status)}</span>
       </div>
 
@@ -1060,6 +1081,7 @@ function BaseAssetNodeView({
 function BaseWorkflowNodeView({ node, templates, backends, capabilities, registerRef, onShrinkToFit, onStartCopy, isCopySource, collapseInfo }: Props) {
   const t = useT();
   const setNode = useProjectStore((s) => s.setNode);
+  const replaceNode = useProjectStore((s) => s.replaceNode);
   const tracks = useProjectStore((s) => s.tracks);
   const nodesById = useProjectStore((s) => s.nodesById);
   const outputsByNode = useProjectStore((s) => s.outputsByNode);
@@ -1314,8 +1336,9 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   };
 
   const reroll = async () => {
-    await nodesApi.reroll(node.id);
-    const list = await nodesApi.jobs(node.id).catch(() => []);
+    const updated = await nodesApi.reroll(node.id);
+    replaceNode(node.id, updated);
+    const list = await nodesApi.jobs(updated.id).catch(() => []);
     setJobs(list);
   };
 
@@ -1523,6 +1546,7 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
             {t("cell.collapsed")}
           </span>
         )}
+        <AgentBadge node={node} />
         <span className="status-pill">{statusLabel(t, node.status)}</span>
         {canEditParams && (
           // Double-click still works (desktop), but it's an unreliable gesture
@@ -2018,6 +2042,7 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked, onS
     >
       <div className="node-cell-header">
         <span>{t("cell.reference")}</span>
+        <AgentBadge node={node} />
         <span className="status-pill">{t("cell.refPill")}</span>
       </div>
 
@@ -2235,6 +2260,7 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
         <span onDoubleClick={rename} title={t("subgraph.renameTitle")}>
           {info?.name || t("subgraph.untitled")}
         </span>
+        <AgentBadge node={node} />
         <span className="status-pill">{t("subgraph.pill")}</span>
       </div>
 

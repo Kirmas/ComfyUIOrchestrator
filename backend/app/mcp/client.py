@@ -14,6 +14,8 @@ from app.config import get_settings
 
 _app = None
 
+AGENT_ACTOR_HEADER = "X-Actor"
+
 
 def set_app(app) -> None:
     global _app
@@ -26,7 +28,10 @@ def get_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=_app),
         base_url="http://internal",
-        headers={"Authorization": f"Bearer {get_settings().api_token}"},
+        # X-Actor is how routes tell an agent's call from the web page's (e.g.
+        # create_node stamps Node.is_agent_created) -- the client never sends
+        # the flag itself, so it can't be forged through the request body.
+        headers={"Authorization": f"Bearer {get_settings().api_token}", AGENT_ACTOR_HEADER: "agent"},
         timeout=120.0,
     )
 
