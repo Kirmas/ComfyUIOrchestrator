@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { createPortal } from "react-dom";
-import { resolveAssetPreviewUrl, resolveAssetUrl } from "../api/client";
+import { previewUrlOfFileUrl, resolveAssetPreviewUrl, resolveAssetUrl } from "../api/client";
 import { assetsApi, dashboardsApi, nodesApi, nodeTemplatesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
 import { isFileDrag } from "../dragUtils";
@@ -2279,7 +2279,7 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
         // (useRandomSample re-picks from the full pool every 2s).
         <div className="subgraph-collage">
           {collageSample.map((url, i) => (
-            <CrossfadeImage key={i} url={url} onDoubleClick={() => openFullSize(url)} />
+            <CrossfadeImage key={i} url={previewUrlOfFileUrl(url)} onDoubleClick={() => openFullSize(url)} />
           ))}
         </div>
       ) : (

@@ -40,6 +40,14 @@ export function resolveAssetPreviewUrl(asset: { url: string | null; preview_url?
   return resolveAssetUrl(asset.preview_url ?? asset.url);
 }
 
+/** The grid-sized thumbnail URL for an asset file URL as the backend hands it
+ * out in lists (`/api/assets/{id}/file?...`) -- for lists that carry only the
+ * original's URL (a container collage), so a 118 px tile doesn't decode a
+ * 33-megapixel original. The preview route falls back to the original itself. */
+export function previewUrlOfFileUrl(url: string): string {
+  return url.replace(/\/file(\?|$)/, "/preview$1");
+}
+
 class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
