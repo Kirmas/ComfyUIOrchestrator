@@ -32,6 +32,7 @@ from app.core.native_backend import (
     NativeBackend,
     ScaleMaskBackend,
     TransplantBackend,
+    VideoTrimBackend,
 )
 from app.db.models import Node, NodeTemplate
 
@@ -136,6 +137,19 @@ NATIVE_NODE_TYPES: dict[str, NativeNodeType] = {
         },
         defaults={"scale_percent": 10.0},
         backend_cls=ScaleMaskBackend,
+    ),
+    "video_trim": NativeNodeType(
+        slug="video_trim",
+        name="Video Trim",
+        param_schema={
+            "fields": [
+                {"name": "video", "type": "video", "label": "Video", "required": True},
+                {"name": "start_frame", "type": "int", "label": "Start Frame", "default": 0, "min": 0},
+                {"name": "end_frame", "type": "int", "label": "End Frame (0 = end)", "default": 0, "min": 0},
+            ]
+        },
+        defaults={"start_frame": 0, "end_frame": 0},
+        backend_cls=VideoTrimBackend,
     ),
 }
 

@@ -12,7 +12,13 @@ by the node type's own param_schema field names, so `_run()` reads `inputs`
 directly by those names.
 """
 import base64
+import fractions
+import logging
 import math
+import os
+import shutil
+import subprocess
+import tempfile
 import uuid
 from io import BytesIO
 from typing import Any
@@ -21,6 +27,8 @@ import numpy as np
 from PIL import Image, ImageChops, ImageFilter
 
 from app.core.job_backend import AssetRef, CapacityInfo, JobStatus
+
+logger = logging.getLogger(__name__)
 
 # In-memory result cache for the lifetime of the worker process -- same
 # reasoning as api_backend.py's _RESULTS/_ERRORS.
@@ -466,3 +474,147 @@ class ScaleMaskBackend(NativeBackend):
         buf = BytesIO()
         result.save(buf, format="PNG")
         return [AssetRef(data=buf.getvalue(), mime_type="image/png", kind="mask")]
+
+
+def find_ffmpeg_binary() -> str | None:
+    candidate = shutil.which("ffmpeg")
+    if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    for path in (
+        "/usr/lib/jellyfin-ffmpeg/ffmpeg",
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+    ):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def trim_video_frames(video_data: bytes, start_frame: int, end_frame: int) -> bytes:
+    """Trim an input video between start_frame and end_frame (inclusive).
+    end_frame=0 means trim until the end of the video.
+    Re-encodes video frames via libx264 with faststart and proper timestamps,
+    and preserves audio if present.
+    """
+    import av
+
+    in_buf = BytesIO(video_data)
+    with av.open(in_buf) as in_c:
+        if not in_c.streams.video:
+            raise ValueError("No video stream found in input")
+
+        in_v = in_c.streams.video[0]
+        rate = in_v.average_rate or in_v.base_rate or 24
+        fps_float = float(rate)
+        if fps_float <= 0:
+            fps_float = 24.0
+        fps_int = int(round(fps_float))
+        has_audio = bool(in_c.streams.audio)
+
+    start_sec = max(0.0, start_frame / fps_float)
+    duration_sec = ((end_frame - start_frame + 1) / fps_float) if end_frame > 0 else None
+
+    # First attempt: FFmpeg binary for exact A/V sync and container interleaving
+    ffmpeg_bin = find_ffmpeg_binary()
+    if ffmpeg_bin:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tf_in:
+            in_path = tf_in.name
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tf_out:
+            out_path = tf_out.name
+
+        try:
+            with open(in_path, "wb") as f:
+                f.write(video_data)
+
+            cmd = [ffmpeg_bin, "-y"]
+            if start_sec > 0:
+                cmd.extend(["-ss", f"{start_sec:.6f}"])
+            if duration_sec is not None and duration_sec > 0:
+                cmd.extend(["-t", f"{duration_sec:.6f}"])
+            cmd.extend(["-i", in_path])
+            cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            if has_audio:
+                cmd.extend(["-c:a", "aac"])
+            else:
+                cmd.append("-an")
+            cmd.extend(["-movflags", "+faststart", out_path])
+
+            res = subprocess.run(cmd, capture_output=True)
+            if res.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                with open(out_path, "rb") as f:
+                    return f.read()
+            else:
+                logger.warning("FFmpeg command failed (%s): %s", res.returncode, res.stderr.decode(errors="replace")[-500:])
+        except Exception as exc:
+            logger.warning("FFmpeg execution error: %s, falling back to PyAV", exc)
+        finally:
+            for p in (in_path, out_path):
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+
+    # Fallback: PyAV in-process trimming with explicit frame time base and sequential PTS
+    with av.open(BytesIO(video_data)) as in_c:
+        in_v = in_c.streams.video[0]
+        raw_w = in_v.codec_context.width or in_v.width or 0
+        raw_h = in_v.codec_context.height or in_v.height or 0
+        width = raw_w - (raw_w % 2)
+        height = raw_h - (raw_h % 2)
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tf:
+            tmp_path = tf.name
+
+        try:
+            with av.open(tmp_path, mode="w", format="mp4", options={"movflags": "faststart"}) as out_c:
+                out_v = out_c.add_stream("libx264", rate=rate)
+                out_v.width = width
+                out_v.height = height
+                out_v.pix_fmt = "yuv420p"
+                out_v.options = {"bf": "0"}
+
+                f_idx = 0
+                written = 0
+                for frame in in_c.decode(video=0):
+                    if f_idx >= start_frame and (end_frame <= 0 or f_idx <= end_frame):
+                        conv = frame.reformat(width=width, height=height, format="yuv420p")
+                        conv.time_base = fractions.Fraction(1, fps_int)
+                        conv.pts = written
+                        written += 1
+                        for packet in out_v.encode(conv):
+                            out_c.mux(packet)
+                    f_idx += 1
+                    if end_frame > 0 and f_idx > end_frame:
+                        break
+
+                for packet in out_v.encode():
+                    out_c.mux(packet)
+
+                if written == 0:
+                    raise ValueError(f"No frames fell in range [{start_frame}, {end_frame}]. Total input frames: {f_idx}")
+
+            with open(tmp_path, "rb") as f:
+                return f.read()
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+
+class VideoTrimBackend(NativeBackend):
+    async def _run(self, execution_config: dict, inputs: dict[str, Any]) -> list[AssetRef]:
+        video_data = inputs.get("video")
+        if not video_data or not isinstance(video_data, (bytes, bytearray)):
+            raise ValueError("video input is required and must be non-empty bytes")
+
+        start_frame = max(0, int(inputs.get("start_frame", 0)))
+        end_frame = int(inputs.get("end_frame", 0))
+
+        if end_frame > 0 and end_frame < start_frame:
+            raise ValueError(f"end_frame ({end_frame}) cannot be less than start_frame ({start_frame})")
+
+        trimmed = trim_video_frames(video_data, start_frame, end_frame)
+        return [AssetRef(data=trimmed, mime_type="video/mp4", kind="video")]

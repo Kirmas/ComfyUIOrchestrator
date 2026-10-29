@@ -20,6 +20,7 @@ import { CaptionBoxEditor, type CaptionBgOption } from "./CaptionBoxEditor";
 import { CropPreview, type CropBox } from "./CropPreview";
 import { MaskPreview } from "./MaskPreview";
 import { TransplantPreview } from "./TransplantPreview";
+import { VideoTrimPreview } from "./VideoTrimPreview";
 import { IdeaTextPicker, MacroPreview } from "./IdeaTextPicker";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
 import { MeshThumb, MeshViewer, meshDownloadName } from "./Mesh3D";
@@ -1420,6 +1421,25 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paramsOpen, template, node.inputs, layerGroups]);
 
+  const isVideoTrim = template?.node_type_slug === "video_trim" || template?.node_type === "native.video_trim";
+  const [videoTrimSourceUrl, setVideoTrimSourceUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!paramsOpen || !isVideoTrim) {
+      setVideoTrimSourceUrl(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const url = await slotImageUrl("video");
+      if (!cancelled) setVideoTrimSourceUrl(url);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paramsOpen, isVideoTrim, node.inputs]);
+
   // Always available, not just for the last cell in a track -- unlike an
   // asset cell, a workflow node's own output(s) aren't guaranteed to still
   // be sitting right after it in the same track (_claim_new_output_cell,
@@ -1489,6 +1509,13 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
 
   const updateParam = async (name: string, value: unknown) => {
     const params = { ...node.params, [name]: value };
+    setNode({ ...node, params });
+    const updated = await nodesApi.update(node.id, { params });
+    setNode(updated);
+  };
+
+  const updateParams = async (patch: Record<string, unknown>) => {
+    const params = { ...node.params, ...patch };
     setNode({ ...node, params });
     const updated = await nodesApi.update(node.id, { params });
     setNode(updated);
@@ -2199,6 +2226,22 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                   </div>
                 );
               })}
+
+              {isVideoTrim && (
+                <div className="field-row">
+                  <VideoTrimPreview
+                    videoUrl={videoTrimSourceUrl}
+                    startFrame={Number(node.params.start_frame ?? 0)}
+                    endFrame={Number(node.params.end_frame ?? 0)}
+                    onCommit={(start, end) => {
+                      updateParams({
+                        start_frame: start,
+                        end_frame: end,
+                      });
+                    }}
+                  />
+                </div>
+              )}
 
               {paramFieldInputs}
             </div>

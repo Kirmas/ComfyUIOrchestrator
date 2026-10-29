@@ -776,6 +776,20 @@ export const en = {
   "transplant.topOpacity": "Top layer",
   "transplant.hint": "Paint over the top image to bring that area back from the one underneath.",
 
+  // --- Video Trim (native.video_trim) -----------------------------------
+  "videoTrim.noSource": "No source video connected yet -- connect a video to slot to preview and pick frames",
+  "videoTrim.current": "Current: frame ~{frame} ({time}s)",
+  "videoTrim.total": "of ~{total} frames",
+  "videoTrim.setStart": "Set Start (frame {frame})",
+  "videoTrim.setEnd": "Set End (frame {frame})",
+  "videoTrim.toEnd": "To end of video (0)",
+  "videoTrim.playRange": "▶ Play selected range",
+  "videoTrim.pause": "⏸ Pause",
+  "videoTrim.range": "Selected: frame {start} → {end} ({count} frames)",
+  "videoTrim.rangeToEnd": "Selected: frame {start} → end of video",
+  "videoTrim.stepBackward": "-1 frame",
+  "videoTrim.stepForward": "+1 frame",
+
   // --- Comment thread (annotation) -------------------------------------
   "annotation.empty": "(empty comment)",
   "annotation.title": "Comments",

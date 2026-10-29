@@ -778,6 +778,20 @@ export const uk: Record<TKey, string> = {
   "transplant.topOpacity": "Верхній шар",
   "transplant.hint": "Малюй по верхньому зображенню — там проступить ця ділянка з нижнього.",
 
+  // --- Video Trim (native.video_trim) -----------------------------------
+  "videoTrim.noSource": "Вихідного відео ще немає — підключіть відео у слот, щоб бачити прев'ю та обирати кадри",
+  "videoTrim.current": "Поточний: кадр ~{frame} ({time}с)",
+  "videoTrim.total": "з ~{total} кадрів",
+  "videoTrim.setStart": "Початок (кадр {frame})",
+  "videoTrim.setEnd": "Кінець (кадр {frame})",
+  "videoTrim.toEnd": "До кінця відео (0)",
+  "videoTrim.playRange": "▶ Програти відрізок",
+  "videoTrim.pause": "⏸ Пауза",
+  "videoTrim.range": "Вибрано: кадр {start} → {end} ({count} кадр.)",
+  "videoTrim.rangeToEnd": "Вибрано: кадр {start} → кінець відео",
+  "videoTrim.stepBackward": "-1 кадр",
+  "videoTrim.stepForward": "+1 кадр",
+
   // --- Comment thread (annotation) -------------------------------------
   "annotation.empty": "(порожній коментар)",
   "annotation.title": "Коментарі",
