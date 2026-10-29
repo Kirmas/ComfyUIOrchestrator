@@ -61,6 +61,8 @@ _KIND_TO_CODE = {
     AssetKind.mask: 2,
     AssetKind.mesh: 3,
     AssetKind.other: 4,
+    AssetKind.video: 5,
+    AssetKind.audio: 6,
 }
 _CODE_TO_KIND = {code: kind for kind, code in _KIND_TO_CODE.items()}
 
@@ -87,6 +89,21 @@ def _pack_descriptor(kind: AssetKind, descriptor: dict) -> bytes:
         body = struct.pack("<II", int(descriptor.get("width", 0)), int(descriptor.get("height", 0)))
     elif kind == AssetKind.mesh:
         body = struct.pack("<II", int(descriptor.get("verts", 0)), int(descriptor.get("faces", 0)))
+    elif kind == AssetKind.video:
+        body = struct.pack(
+            "<IIII",
+            int(descriptor.get("width", 0)),
+            int(descriptor.get("height", 0)),
+            int(descriptor.get("duration_ms", 0)),
+            int(round(float(descriptor.get("fps", 0)) * 1000)),
+        )
+    elif kind == AssetKind.audio:
+        body = struct.pack(
+            "<III",
+            int(descriptor.get("duration_ms", 0)),
+            int(descriptor.get("sample_rate", 0)),
+            int(descriptor.get("channels", 0)),
+        )
     else:
         body = b""
     return body.ljust(DESCRIPTOR_SIZE, b"\0")
@@ -99,6 +116,12 @@ def _unpack_descriptor(kind: AssetKind, body: bytes) -> dict:
     if kind == AssetKind.mesh:
         verts, faces = struct.unpack_from("<II", body, 0)
         return {"verts": verts, "faces": faces}
+    if kind == AssetKind.video:
+        width, height, duration_ms, fps_milli = struct.unpack_from("<IIII", body, 0)
+        return {"width": width, "height": height, "duration_ms": duration_ms, "fps": fps_milli / 1000}
+    if kind == AssetKind.audio:
+        duration_ms, sample_rate, channels = struct.unpack_from("<III", body, 0)
+        return {"duration_ms": duration_ms, "sample_rate": sample_rate, "channels": channels}
     return {}
 
 

@@ -445,7 +445,7 @@ async def resolve_node_inputs(
     slot_field_names = [f["name"] for f in slot_fields(param_schema)]
     optional_slot_names = {f["name"] for f in slot_fields(param_schema) if not f.get("required", True)}
     fixed_image_field_names = [
-        f["name"] for f in fields if f.get("type") in ("image", "file") and f.get("fixed")
+        f["name"] for f in fields if f.get("type") in ("image", "file", "video", "audio") and f.get("fixed")
     ]
     seed_fields = [f["name"] for f in fields if f.get("type") == "seed"]
     storage = get_storage()

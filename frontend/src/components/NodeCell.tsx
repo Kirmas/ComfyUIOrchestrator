@@ -234,6 +234,27 @@ function CandidatesGrid({
               onOpen={() => onImageOpen(resolveAssetUrl(asset.url), asset)}
               onCompare={() => onCompare(asset)}
             />
+          ) : asset.kind === "audio" ? (
+            <div
+              className="output-thumb audio-thumb"
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: 6,
+                minHeight: 118,
+                background: "var(--bg-secondary)",
+              }}
+            >
+              <span style={{ fontSize: 24, marginBottom: 4 }}>🎵</span>
+              <audio src={resolveAssetUrl(asset.url)} controls style={{ width: "100%", height: 30 }} onClick={(e) => e.stopPropagation()} />
+              <AssetMetaTag
+                dims={undefined}
+                backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
+                kind={asset.kind}
+              />
+            </div>
           ) : (
             <div className="output-thumb">
               <img
@@ -256,6 +277,24 @@ function CandidatesGrid({
                 title={t("cell.doubleClickFullSize")}
                 style={{ cursor: "zoom-in" }}
               />
+              {asset.kind === "video" && (
+                <span
+                  style={{
+                    position: "absolute",
+                    top: 6,
+                    left: 6,
+                    background: "rgba(0,0,0,0.65)",
+                    color: "#fff",
+                    fontSize: 10,
+                    fontWeight: "bold",
+                    padding: "1px 5px",
+                    borderRadius: 3,
+                    pointerEvents: "none",
+                  }}
+                >
+                  ▶ VIDEO
+                </span>
+              )}
               {/* Double-click alone is unreliable on a phone (same reason the
                   params modal grew a button) -- a tappable icon is a sure thing. */}
               <button
@@ -368,6 +407,36 @@ function AssetFaceView({
             onOpen={() => onImageOpen(url, asset)}
             onCompare={() => onCompare(asset)}
           />
+        ) : asset.kind === "audio" ? (
+          <div
+            className="output-thumb audio-thumb"
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 6,
+              minHeight: 118,
+              background: "var(--bg-secondary)",
+            }}
+          >
+            <span style={{ fontSize: 24, marginBottom: 4 }}>🎵</span>
+            <audio src={url} controls style={{ width: "100%", height: 30 }} onClick={(e) => e.stopPropagation()} />
+            <a
+              className="zoom-button download-button"
+              href={url}
+              download={downloadName ?? true}
+              onClick={(e) => e.stopPropagation()}
+              title={t("cell.download")}
+            >
+              ⬇
+            </a>
+            <AssetMetaTag
+              dims={undefined}
+              backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
+              kind={asset.kind}
+            />
+          </div>
         ) : (
           <div className="output-thumb">
             <img
@@ -376,7 +445,7 @@ function AssetFaceView({
               loading="lazy"
               decoding="async"
               draggable={false}
-              onDoubleClick={() => onImageOpen(url)}
+              onDoubleClick={() => onImageOpen(url, asset)}
               onLoad={(e) => {
                 const img = e.currentTarget;
                 if (!img) return;
@@ -385,12 +454,30 @@ function AssetFaceView({
               title={t("cell.doubleClickFullSize")}
               style={{ cursor: "zoom-in", opacity: borrowed ? 0.85 : undefined }}
             />
+            {asset.kind === "video" && (
+              <span
+                style={{
+                  position: "absolute",
+                  top: 6,
+                  left: 6,
+                  background: "rgba(0,0,0,0.65)",
+                  color: "#fff",
+                  fontSize: 10,
+                  fontWeight: "bold",
+                  padding: "1px 5px",
+                  borderRadius: 3,
+                  pointerEvents: "none",
+                }}
+              >
+                ▶ VIDEO
+              </span>
+            )}
             <button
               type="button"
               className="zoom-button"
               onClick={(e) => {
                 e.stopPropagation();
-                onImageOpen(url);
+                onImageOpen(url, asset);
               }}
               title={t("cell.openFullSize")}
             >
@@ -466,7 +553,36 @@ export function FullSizeModal({
         <button type="button" className="image-modal-close" onClick={onClose} title={t("cell.closeFullSize")}>
           ×
         </button>
-        {asset?.kind === "mesh" ? <MeshViewer url={url} asset={asset} /> : <ZoomableImage src={url} />}
+        {asset?.kind === "mesh" ? (
+          <MeshViewer url={url} asset={asset} />
+        ) : asset?.kind === "video" ? (
+          <video
+            src={url}
+            controls
+            autoPlay
+            playsInline
+            loop
+            style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+          />
+        ) : asset?.kind === "audio" ? (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 16,
+              padding: 32,
+              background: "var(--bg-secondary)",
+              borderRadius: 8,
+            }}
+          >
+            <span style={{ fontSize: 56 }}>🎵</span>
+            <audio src={url} controls autoPlay />
+          </div>
+        ) : (
+          <ZoomableImage src={url} />
+        )}
         {(onSelect || onDiscard) && (
           <div className="candidate-actions">
             {onSelect && (
@@ -912,7 +1028,7 @@ function BaseAssetNodeView({
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
+        accept="image/*,video/*,audio/*,.glb,.gltf"
         multiple
         style={{ display: "none" }}
         onChange={(e) => {
@@ -1140,6 +1256,66 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     [template, capabilities],
   );
   const [captionField, setCaptionField] = useState<string | null>(null);
+
+  interface ResolvedRefSlot {
+    slotIndex: number;
+    fieldName: string;
+    fieldLabel: string;
+    kind: AssetKind;
+    tag: string;
+    altTag: string;
+    asset: Asset;
+  }
+  const [resolvedSlotRefs, setResolvedSlotRefs] = useState<ResolvedRefSlot[]>([]);
+
+  useEffect(() => {
+    if (!paramsOpen || !template) {
+      setResolvedSlotRefs([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const slots = slotFields(template.param_schema);
+      const refs: ResolvedRefSlot[] = [];
+      let pictureCount = 0;
+      let videoCount = 0;
+      let audioCount = 0;
+      for (let i = 0; i < slots.length; i++) {
+        const field = slots[i];
+        const asset = await resolveSlotAsset(node, i, tracks, nodesById);
+        if (!asset) continue;
+        const kind = asset.kind;
+        let tag = "";
+        let altTag = "";
+        if (kind === "video") {
+          videoCount++;
+          tag = `<Video ${videoCount}>`;
+          altTag = `<video${videoCount}>`;
+        } else if (kind === "audio") {
+          audioCount++;
+          tag = `<Audio ${audioCount}>`;
+          altTag = `<audio${audioCount}>`;
+        } else {
+          pictureCount++;
+          tag = `<Picture ${pictureCount}>`;
+          altTag = `<image${pictureCount}>`;
+        }
+        refs.push({
+          slotIndex: i,
+          fieldName: field.name,
+          fieldLabel: field.label ?? field.name,
+          kind,
+          tag,
+          altTag,
+          asset,
+        });
+      }
+      if (!cancelled) setResolvedSlotRefs(refs);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [paramsOpen, template, node.inputs, tracks, nodesById]);
 
   // Backgrounds to draw the layout over: this node's own generated images and
   // nothing else. A text-to-image node has no input slots, and its outputs
@@ -1395,8 +1571,11 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     slotFields(template.param_schema).map((field, slotIndex) => {
       const ref = node.inputs[slotIndex];
       const index = ref?.type === "cell_index" ? ref.index : slotIndex;
+      const isVideo = field.expects_kind === "video" || field.name.toLowerCase().includes("video");
+      const audioParamKey = `${field.name}_audio`;
+      const withAudio = (node.params[audioParamKey] as boolean | undefined) ?? true;
       return (
-        <div key={field.name} className="slot-row">
+        <div key={field.name} className="slot-row" style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span>{t("cell.slotCell", { label: field.label ?? field.name })}</span>
           <input
             type="number"
@@ -1406,6 +1585,16 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
             style={{ width: 44 }}
             onChange={(e) => setSlotSource(slotIndex, { type: "cell_index", index: Math.max(0, Number(e.target.value)) })}
           />
+          {isVideo && (
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, cursor: "pointer", marginLeft: "auto" }}>
+              <input
+                type="checkbox"
+                checked={withAudio}
+                onChange={(e) => updateParam(audioParamKey, e.target.checked)}
+              />
+              <span>audio</span>
+            </label>
+          )}
         </div>
       );
     });
@@ -1429,6 +1618,8 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
         (f) =>
           f.type !== "image" &&
           f.type !== "file" &&
+          f.type !== "video" &&
+          f.type !== "audio" &&
           f.type !== "seed" &&
           !cropFieldNames.has(f.name) &&
           !maskFieldNames.has(f.name) &&
@@ -1447,6 +1638,75 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
             </select>
           ) : field.type === "text" ? (
             <>
+              {resolvedSlotRefs.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                  <span style={{ fontSize: 11, color: "var(--muted)" }}>Refs:</span>
+                  {resolvedSlotRefs.map((r) => (
+                    <span
+                      key={r.slotIndex}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 4,
+                        padding: "2px 6px",
+                        fontSize: 11,
+                        borderRadius: 4,
+                        background: "var(--bg-secondary)",
+                        border: "1px solid var(--border)",
+                      }}
+                    >
+                      {r.kind === "audio" ? (
+                        <span>🎵</span>
+                      ) : (
+                        <img
+                          src={resolveAssetPreviewUrl(r.asset)}
+                          alt=""
+                          style={{ width: 18, height: 18, objectFit: "cover", borderRadius: 2 }}
+                        />
+                      )}
+                      <button
+                        type="button"
+                        style={{
+                          padding: "1px 4px",
+                          fontSize: 11,
+                          cursor: "pointer",
+                          background: "none",
+                          border: "none",
+                          color: "var(--accent)",
+                          fontWeight: 500,
+                        }}
+                        onClick={() => {
+                          const cur = (node.params[field.name] as string) ?? "";
+                          updateParam(field.name, cur ? `${cur} ${r.tag}` : r.tag);
+                        }}
+                        title={`${r.fieldLabel} (${r.kind}) -> ${r.tag}`}
+                      >
+                        {r.tag}
+                      </button>
+                      {r.altTag !== r.tag && (
+                        <button
+                          type="button"
+                          style={{
+                            padding: "1px 3px",
+                            fontSize: 10,
+                            cursor: "pointer",
+                            background: "none",
+                            border: "none",
+                            color: "var(--muted)",
+                          }}
+                          onClick={() => {
+                            const cur = (node.params[field.name] as string) ?? "";
+                            updateParam(field.name, cur ? `${cur} ${r.altTag}` : r.altTag);
+                          }}
+                          title={`${r.fieldLabel} -> ${r.altTag}`}
+                        >
+                          {r.altTag}
+                        </button>
+                      )}
+                    </span>
+                  ))}
+                </div>
+              )}
               <textarea
                 rows={2}
                 value={(node.params[field.name] as string) ?? ""}

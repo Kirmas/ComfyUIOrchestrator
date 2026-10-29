@@ -28,7 +28,13 @@ from PIL import Image
 from app.core.job_backend import AssetRef, CapacityInfo, JobStatus
 from app.core.model_overrides import apply_model_overrides
 from app.core.template_engine import build_workflow
-from app.core.workflow_analyzer import SAVE_IMAGE_CLASS_TYPES, SAVE_MESH_CLASS_TYPES
+from app.core.upload_type import extension_for, resolve_upload
+from app.core.workflow_analyzer import (
+    SAVE_AUDIO_CLASS_TYPES,
+    SAVE_IMAGE_CLASS_TYPES,
+    SAVE_MESH_CLASS_TYPES,
+    SAVE_VIDEO_CLASS_TYPES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +76,9 @@ class ComfyUIBackend:
             return data["prompt_id"]
 
     async def _upload_image(self, client: httpx.AsyncClient, data: bytes) -> str:
-        files = {"image": (f"{uuid.uuid4()}.png", data, "image/png")}
+        ext = extension_for(data, fallback=".png")
+        mime_type, _ = resolve_upload(data, None)
+        files = {"image": (f"{uuid.uuid4()}{ext}", data, mime_type)}
         resp = await client.post("/upload/image", files=files)
         resp.raise_for_status()
         return resp.json()["name"]
@@ -252,6 +260,8 @@ class ComfyUIBackend:
             # leftover Preview3D or stray SaveImage can't leak its output in.
             prompt = history.get("prompt")
             save_node_ids: set[str] | None = None
+            video_node_ids: set[str] | None = None
+            audio_node_ids: set[str] | None = None
             mesh_node_ids: set[str] | None = None
             mask_node_ids: set[str] = set()
             if isinstance(prompt, list) and len(prompt) > 2 and isinstance(prompt[2], dict):
@@ -261,6 +271,16 @@ class ComfyUIBackend:
                     for node_id, node in graph.items()
                     if isinstance(node, dict) and node.get("class_type") in SAVE_IMAGE_CLASS_TYPES
                 }
+                video_node_ids = {
+                    node_id
+                    for node_id, node in graph.items()
+                    if isinstance(node, dict) and node.get("class_type") in SAVE_VIDEO_CLASS_TYPES
+                }
+                audio_node_ids = {
+                    node_id
+                    for node_id, node in graph.items()
+                    if isinstance(node, dict) and node.get("class_type") in SAVE_AUDIO_CLASS_TYPES
+                }
                 mesh_node_ids = {
                     node_id
                     for node_id, node in graph.items()
@@ -269,6 +289,42 @@ class ComfyUIBackend:
                 mask_node_ids = self._mask_save_node_ids(graph)
 
             for node_id, node_output in history.get("outputs", {}).items():
+                if video_node_ids is not None and node_id in video_node_ids:
+                    video_items = (
+                        node_output.get("videos", [])
+                        + node_output.get("gifs", [])
+                        + node_output.get("images", [])
+                    )
+                    for item in video_items:
+                        resp = await client.get(
+                            "/view",
+                            params={
+                                "filename": item["filename"],
+                                "subfolder": item.get("subfolder", ""),
+                                "type": item.get("type", "output"),
+                            },
+                        )
+                        resp.raise_for_status()
+                        mime_type = resp.headers.get("content-type") or "video/mp4"
+                        assets.append(AssetRef(data=resp.content, mime_type=mime_type, kind="video", meta=item))
+                    continue
+
+                if audio_node_ids is not None and node_id in audio_node_ids:
+                    audio_items = node_output.get("audio", [])
+                    for item in audio_items:
+                        resp = await client.get(
+                            "/view",
+                            params={
+                                "filename": item["filename"],
+                                "subfolder": item.get("subfolder", ""),
+                                "type": item.get("type", "output"),
+                            },
+                        )
+                        resp.raise_for_status()
+                        mime_type = resp.headers.get("content-type") or "audio/mpeg"
+                        assets.append(AssetRef(data=resp.content, mime_type=mime_type, kind="audio", meta=item))
+                    continue
+
                 is_save_node = save_node_ids is None or node_id in save_node_ids
                 for image in node_output.get("images", []) if is_save_node else []:
                     resp = await client.get(

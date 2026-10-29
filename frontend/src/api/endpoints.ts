@@ -98,6 +98,10 @@ export const nodeTemplatesApi = {
   setDescription: (slug: string, description: string) =>
     api.patch(`/api/node-templates/by-slug/${slug}/description`, { description }),
   resetDescription: (slug: string) => api.delete(`/api/node-templates/by-slug/${slug}/description`),
+  getPromptInstruction: (slug: string) =>
+    api.get<{ node_type_slug: string; prompt_instruction: string | null }>(`/api/node-templates/by-slug/${slug}/prompt-instruction`),
+  setPromptInstruction: (slug: string, prompt_instruction: string | null) =>
+    api.patch<{ node_type_slug: string; prompt_instruction: string | null }>(`/api/node-templates/by-slug/${slug}/prompt-instruction`, { prompt_instruction }),
   // list() strips `defaults` from every item (see the route's own docstring
   // -- a "fixed" image/file field can bake megabytes of base64 in there).
   // Fetch one type's defaults here instead, right when something actually

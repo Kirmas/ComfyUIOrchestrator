@@ -363,7 +363,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
       } else {
         paramFields.push({ name: fieldName, type: "image", label: slot.label, required: !slot.optional, ...expectsKind });
       }
-      paramMapping[fieldName] = { node_id: node.node_id, title: node.title, input_key: "image" };
+      paramMapping[fieldName] = { node_id: node.node_id, title: node.title, input_key: node.input_key || "image" };
     });
 
     for (const f of analysis.detected_fields) {
@@ -407,7 +407,7 @@ export function NodeTypeWizard({ backends, mode, onCancel, onSaved }: { backends
       const node = analysis.input_image_nodes.find((n) => n.node_id === nodeId);
       if (!node) throw new Error(`Image field "${field.label ?? field.name}" has no assigned node.`);
       if (!node.title) throw new Error(`The LoadImage node assigned to "${field.label ?? field.name}" has no title in ComfyUI -- rename it and re-export.`);
-      paramMapping[field.name] = { node_id: node.node_id, title: node.title, input_key: "image" };
+      paramMapping[field.name] = { node_id: node.node_id, title: node.title, input_key: node.input_key || "image" };
     });
 
     for (const field of templateOtherFields) {

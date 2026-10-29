@@ -56,6 +56,19 @@ from dataclasses import dataclass, field
 from typing import Any
 
 INPUT_IMAGE_CLASS_TYPES = {"LoadImage"}
+INPUT_VIDEO_CLASS_TYPES = {"LoadVideo", "VHS_LoadVideo", "VHS_LoadVideoPath"}
+INPUT_AUDIO_CLASS_TYPES = {"LoadAudio", "VHS_LoadAudio"}
+INPUT_ASSET_CLASS_TYPES = INPUT_IMAGE_CLASS_TYPES | INPUT_VIDEO_CLASS_TYPES | INPUT_AUDIO_CLASS_TYPES
+
+INPUT_LOADER_DEFAULT_KEYS = {
+    "LoadImage": "image",
+    "LoadVideo": "file",
+    "VHS_LoadVideo": "video",
+    "VHS_LoadVideoPath": "video",
+    "LoadAudio": "audio",
+    "VHS_LoadAudio": "audio",
+}
+
 # Nodes that write the deliverable to disk. SaveImageAdvanced is ComfyUI's
 # own newer variant (per-format bit depth/colour space) and the one every
 # Qwen Image 2.1 workflow is built with -- left out of here, its graphs
@@ -67,7 +80,11 @@ SAVE_IMAGE_CLASS_TYPES = {"SaveImage", "SaveImageAdvanced"}
 # key, see comfyui_backend.py result()). Save3DAdvanced is ComfyUI's newer
 # viewport-aware variant of Save3D, same shape as SaveImageAdvanced above.
 SAVE_MESH_CLASS_TYPES = {"Save3D", "Save3DAdvanced", "SaveGLB"}
-OUTPUT_CLASS_TYPES = SAVE_IMAGE_CLASS_TYPES | SAVE_MESH_CLASS_TYPES | {"PreviewImage"}
+SAVE_VIDEO_CLASS_TYPES = {"SaveVideo", "VHS_VideoCombine", "SaveAnimatedWEBP"}
+SAVE_AUDIO_CLASS_TYPES = {"SaveAudio", "VHS_SaveAudio"}
+OUTPUT_CLASS_TYPES = (
+    SAVE_IMAGE_CLASS_TYPES | SAVE_MESH_CLASS_TYPES | SAVE_VIDEO_CLASS_TYPES | SAVE_AUDIO_CLASS_TYPES | {"PreviewImage"}
+)
 SAMPLER_CLASS_TYPES = {"KSampler", "KSamplerAdvanced", "SamplerCustomAdvanced"}
 # SamplerCustomAdvanced-style graphs (Flux2, Ideogram 4) carry no
 # positive/negative of their own -- conditioning reaches the sampler through a
@@ -116,6 +133,19 @@ SAMPLER_LITERAL_FIELDS = [
 # Other well-known custom nodes whose literal widgets are worth surfacing,
 # keyed by class_type. Same shape as SAMPLER_LITERAL_FIELDS, but scanned for
 # every matching node in the workflow rather than assuming a single instance.
+KNOWN_NODE_COMBO_OPTIONS: dict[tuple[str, str], list[str]] = {
+    ("ResolutionSelector", "aspect_ratio"): [
+        "1:1 (Square)",
+        "2:3 (Portrait Photo)",
+        "3:2 (Photo)",
+        "3:4 (Portrait Standard)",
+        "4:3 (Standard)",
+        "9:16 (Portrait Widescreen)",
+        "16:9 (Widescreen)",
+        "21:9 (Ultrawide)",
+    ],
+}
+
 KNOWN_NODE_LITERAL_FIELDS: dict[str, list[tuple[tuple[str, ...], str, str]]] = {
     "ResolutionSelector": [
         (("aspect_ratio",), "aspect_ratio", "text"),
@@ -307,6 +337,7 @@ class WorkflowNodeInfo:
     # 2-LoadImage workflow got its image/mask slots swapped because the
     # graph's own node order didn't match the order the slots were typed in).
     likely_kind: str | None = None
+    input_key: str = "image"
 
 
 @dataclass
@@ -353,8 +384,16 @@ class WorkflowAnalysis:
     loras: list[LoraInfo] = field(default_factory=list)
 
 
-def _node_info(node_id: str, node: dict) -> WorkflowNodeInfo:
-    return WorkflowNodeInfo(node_id=node_id, class_type=node.get("class_type", ""), title=(node.get("_meta") or {}).get("title"))
+def _node_info(node_id: str, node: dict, likely_kind: str | None = None) -> WorkflowNodeInfo:
+    class_type = node.get("class_type", "")
+    input_key = INPUT_LOADER_DEFAULT_KEYS.get(class_type, "image")
+    return WorkflowNodeInfo(
+        node_id=node_id,
+        class_type=class_type,
+        title=(node.get("_meta") or {}).get("title"),
+        likely_kind=likely_kind,
+        input_key=input_key,
+    )
 
 
 def _is_link(value: Any) -> bool:
@@ -423,8 +462,13 @@ def analyze_workflow(workflow_json: dict) -> WorkflowAnalysis:
         if not isinstance(node, dict):
             continue
         class_type = node.get("class_type")
-        if class_type in INPUT_IMAGE_CLASS_TYPES:
-            input_nodes.append(_node_info(node_id, node))
+        if class_type in INPUT_ASSET_CLASS_TYPES:
+            likely_kind = None
+            if class_type in INPUT_VIDEO_CLASS_TYPES:
+                likely_kind = "video"
+            elif class_type in INPUT_AUDIO_CLASS_TYPES:
+                likely_kind = "audio"
+            input_nodes.append(_node_info(node_id, node, likely_kind=likely_kind))
         elif class_type in OUTPUT_CLASS_TYPES:
             output_nodes.append(_node_info(node_id, node))
 
@@ -526,10 +570,20 @@ def analyze_workflow(workflow_json: dict) -> WorkflowAnalysis:
 
     used_keys = {f.key for f in detected_fields}
 
-    def _add_field(key: str, label: str, ftype: str, node_id: str, input_key: str, default: Any) -> None:
+    def _add_field(key: str, label: str, ftype: str, node_id: str, input_key: str, default: Any, options: list[str] | None = None) -> None:
         unique_key = key if key not in used_keys else f"{key}_{node_id}"
         used_keys.add(unique_key)
-        detected_fields.append(DetectedField(key=unique_key, label=label, type=ftype, node_id=node_id, input_key=input_key, default=default))
+        detected_fields.append(
+            DetectedField(
+                key=unique_key,
+                label=label,
+                type=ftype,
+                node_id=node_id,
+                input_key=input_key,
+                default=default,
+                options=options,
+            )
+        )
 
     for node_id, node in workflow_json.items():
         if not isinstance(node, dict):
@@ -540,7 +594,17 @@ def analyze_workflow(workflow_json: dict) -> WorkflowAnalysis:
         for input_keys, field_key, field_type in KNOWN_NODE_LITERAL_FIELDS.get(class_type, []):
             for input_key in input_keys:
                 if input_key in inputs and not _is_link(inputs[input_key]):
-                    _add_field(field_key, field_key.replace("_", " ").title(), field_type, node_id, input_key, inputs[input_key])
+                    combo_opts = KNOWN_NODE_COMBO_OPTIONS.get((class_type, input_key))
+                    actual_type = "enum" if combo_opts is not None else field_type
+                    _add_field(
+                        field_key,
+                        field_key.replace("_", " ").title(),
+                        actual_type,
+                        node_id,
+                        input_key,
+                        inputs[input_key],
+                        options=list(combo_opts) if combo_opts else None,
+                    )
                     break
 
         for input_key, field_key_prefix, label_prefix in KNOWN_NODE_COMPOSITE_FIELDS.get(class_type, []):
@@ -607,10 +671,11 @@ def _combo_options(entry: dict, input_key: str) -> list[str] | None:
     """The option list of a ComfyUI combo widget, or None if that input isn't
     a combo. In an /object_info payload every input is `[spec, {...opts}]`,
     where spec is a type name ("INT", "STRING") for a scalar widget and the
-    literal list of choices for a combo -- so "is this a dropdown" is exactly
-    "is the spec a list". Non-string choices (a combo of ints) are skipped:
-    param_schema's enum fields are string-valued, and writing an int back as a
-    string would not match any option on the ComfyUI side."""
+    literal list of choices for a combo -- so "is this a dropdown" is either
+    "is the spec a list" (classic ComfyUI) or "is spec == 'COMBO' with an options
+    list in opts" (ComfyUI 0.3+). Non-string choices (a combo of ints) are
+    skipped: param_schema's enum fields are string-valued, and writing an int
+    back as a string would not match any option on the ComfyUI side."""
     for section in ("required", "optional"):
         spec = (entry.get("input", {}).get(section) or {}).get(input_key)
         if not isinstance(spec, list) or not spec:
@@ -618,6 +683,10 @@ def _combo_options(entry: dict, input_key: str) -> list[str] | None:
         choices = spec[0]
         if isinstance(choices, list) and choices and all(isinstance(c, str) for c in choices):
             return list(choices)
+        if choices == "COMBO" and len(spec) > 1 and isinstance(spec[1], dict):
+            options = spec[1].get("options")
+            if isinstance(options, list) and options and all(isinstance(c, str) for c in options):
+                return list(options)
     return None
 
 

@@ -42,7 +42,9 @@ def validate_param_mapping(analysis: WorkflowAnalysis, param_mapping: dict) -> N
         raise AuthoringError("param_mapping is required: name every field that should be settable per cell")
 
     known_fields = {(f.node_id, f.input_key) for f in analysis.detected_fields}
-    known_images = {(n.node_id, "image") for n in analysis.input_image_nodes}
+    known_images = {(n.node_id, n.input_key) for n in analysis.input_image_nodes} | {
+        (n.node_id, "image") for n in analysis.input_image_nodes
+    }
     image_field_of: dict[str, str] = {}
     for field_name, target in param_mapping.items():
         if not isinstance(target, dict) or "node_id" not in target or "input_key" not in target:
@@ -103,7 +105,14 @@ def build_param_schema(analysis: WorkflowAnalysis, param_mapping: dict) -> dict:
     mapped_image_node_ids: set[str] = set()
     for field_name, target in param_mapping.items():
         node_id, input_key = str(target["node_id"]), str(target["input_key"])
-        image_node = image_nodes_by_id.get(node_id) if input_key == "image" else None
+        image_node = (
+            image_nodes_by_id.get(node_id)
+            if (
+                node_id in image_nodes_by_id
+                and (input_key == image_nodes_by_id[node_id].input_key or input_key in ("image", "file", "video", "audio"))
+            )
+            else None
+        )
         if image_node is not None:
             mapped_image_node_ids.add(node_id)
             label = target.get("label") or image_node.title or field_name.replace("_", " ").title()
@@ -126,14 +135,15 @@ def build_param_schema(analysis: WorkflowAnalysis, param_mapping: dict) -> dict:
         field_type = _FIELD_TYPES.get(detected.type if detected else "text", "text")
         if field_name == "seed":
             field_type = "seed"
-        fields.append(
-            {
-                "name": field_name,
-                "type": field_type,
-                "label": field_name.replace("_", " ").title(),
-                "default": detected.default if detected else None,
-            }
-        )
+        field_dict = {
+            "name": field_name,
+            "type": field_type,
+            "label": field_name.replace("_", " ").title(),
+            "default": detected.default if detected else None,
+        }
+        if field_type == "enum" and detected and detected.options:
+            field_dict["options"] = list(detected.options)
+        fields.append(field_dict)
     used_names = {f["name"] for f in fields}
     index = 0
     for node in analysis.input_image_nodes:

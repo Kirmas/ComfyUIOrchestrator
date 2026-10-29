@@ -2,7 +2,7 @@ export type BackendKind = "comfyui" | "api_provider" | "native";
 export type ExecutionType = "comfyui_workflow" | "api_call" | "native";
 export type NodeStatus = "draft" | "queued" | "running" | "done" | "error" | "discarded";
 export type JobStatus = "pending" | "waiting_for_backend" | "running" | "done" | "error" | "cancelled";
-export type AssetKind = "image" | "mesh" | "mask" | "other";
+export type AssetKind = "image" | "mesh" | "mask" | "video" | "audio" | "other";
 export type BackendMode = "auto" | "comfyui_only" | "api_only" | "manual";
 export type NodeKind = "asset" | "workflow";
 
@@ -57,7 +57,7 @@ export interface ParamField {
   // "layer_mask" is the same storage for a mask painted over two stacked
   // image slots rather than one -- see native.transplant and
   // TransplantPreview.tsx.
-  type: "image" | "text" | "int" | "float" | "seed" | "enum" | "file" | "bool" | "mask" | "layer_mask";
+  type: "image" | "video" | "audio" | "text" | "int" | "float" | "seed" | "enum" | "file" | "bool" | "mask" | "layer_mask";
   label?: string;
   required?: boolean;
   // Not every capability for this node_type_slug has to honor this field --
@@ -113,6 +113,7 @@ export interface NodeTemplate {
   // nothing about the type says which model it runs on.
   category?: string;
   category_source?: "auto" | "manual";
+  prompt_instruction?: string | null;
   // "template.<slug>" for a real DB-backed type, "native.<slug>" for one
   // synthesized from the backend's native registry (no DB row behind it).
   node_type: string;
@@ -438,6 +439,7 @@ export interface WorkflowNodeInfo {
   // Same value space as AssetKind -- see workflow_analyzer.WorkflowNodeInfo's
   // own docstring for why this is a kind string rather than a mask-only bool.
   likely_kind: string | null;
+  input_key?: string;
 }
 
 export interface DetectedField {

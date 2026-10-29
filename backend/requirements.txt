@@ -27,3 +27,6 @@ mcp==1.28.1
 # 50.0.2 carries none.
 pywebpush==2.5.0
 cryptography==50.0.2
+# Video & Audio decoding / poster frames (app/core/asset_preview.py). Bundles
+# ffmpeg 7.x libraries inside the manylinux binary wheel.
+av==19.0.2

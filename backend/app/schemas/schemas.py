@@ -110,6 +110,8 @@ class NodeTemplateCreate(BaseModel):
     name: str
     param_schema: dict[str, Any] = {}
     defaults: dict[str, Any] = {}
+    category_override: str | None = None
+    prompt_instruction: str | None = None
 
 
 class NodeTemplateUpdate(BaseModel):
@@ -120,6 +122,7 @@ class NodeTemplateUpdate(BaseModel):
     # Null/empty clears the override and puts the type back under its derived
     # (model-family) category -- there's no separate "reset" route.
     category_override: str | None = None
+    prompt_instruction: str | None = None
 
 
 class NodeTemplateListRead(ORMModel):
@@ -148,6 +151,7 @@ class NodeTemplateListRead(ORMModel):
     # a plain column read -- both are filled in by the route.
     category: str = ""
     category_source: str = "auto"
+    prompt_instruction: str | None = None
 
 
 class NodeTemplateRead(ORMModel):
@@ -172,6 +176,11 @@ class NodeTemplateRead(ORMModel):
     # inputs, prompt... Values differing between backends are shown per
     # backend, so "same node, configured differently here" is visible.
     fingerprint: dict[str, str] = {}
+    prompt_instruction: str | None = None
+
+
+class PromptInstructionWrite(BaseModel):
+    prompt_instruction: str | None = None
 
 
 class ManualDescriptionWrite(BaseModel):
@@ -195,6 +204,7 @@ class WorkflowNodeInfoOut(BaseModel):
     # Same value space as AssetKind -- see workflow_analyzer.WorkflowNodeInfo's
     # own docstring for why this is a kind string rather than a mask-only bool.
     likely_kind: str | None = None
+    input_key: str = "image"
 
 
 class DetectedFieldOut(BaseModel):

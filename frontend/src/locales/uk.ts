@@ -488,6 +488,14 @@ export const uk: Record<TKey, string> = {
   "desc.resetTitle": "Повернутися до опису, виведеного з воркфлоу",
   "desc.facts": "факти",
 
+  // --- Prompt instruction ---------------------------------------------
+  "promptInstruction.title": "Інструкція для промтів (агент)",
+  "promptInstruction.add": "додати інструкцію",
+  "promptInstruction.placeholder": "Інструкція зі складання промтів для агента (синтаксис, структура, референси)...",
+  "promptInstruction.none": "(інструкції немає)",
+  "promptInstruction.expand": "розгорнути",
+  "promptInstruction.collapse": "згорнути",
+
   // --- Multiple-Angles builder ----------------------------------------
   "angle.builder": "Конструктор ракурсів (Multiple-Angles)",
   "angle.trigger": "тригер",

@@ -43,6 +43,7 @@ class NativeNodeType:
     param_schema: dict[str, Any]
     defaults: dict[str, Any]
     backend_cls: type[NativeBackend]
+    prompt_instruction: str | None = None
 
 
 NATIVE_NODE_TYPES: dict[str, NativeNodeType] = {
@@ -140,14 +141,14 @@ NATIVE_NODE_TYPES: dict[str, NativeNodeType] = {
 
 
 def is_slot_field(field: dict[str, Any]) -> bool:
-    """True for an image/file field that draws its value from a grid cell each
+    """True for an image/file/video/audio field that draws its value from a grid cell each
     run (positionally, via Node.inputs -- see resolve_node_inputs in
     worker/tasks.py) and therefore needs a row of its own in the workflow
     node's span. False for one marked "fixed": its value is a constant
     (base64 bytes in NodeTemplate.defaults[field["name"]]) baked onto the
     node type itself, resolved the same way on every instance, so it never
     occupies a row or shows a per-cell picker."""
-    return field.get("type") in ("image", "file") and not field.get("fixed")
+    return field.get("type") in ("image", "file", "video", "audio") and not field.get("fixed")
 
 
 def slot_fields(schema: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -181,13 +182,13 @@ def reserved_slot_target(node: Node, schema: dict[str, Any] | None) -> int:
 
 
 def image_field_count(schema: dict[str, Any] | None) -> int:
-    """Every image/file field, fixed or not. Used only where the question is
-    "how many LoadImage-shaped inputs does this node type's workflow.json
+    """Every media (image/file/video/audio) field, fixed or not. Used only where
+    the question is "how many media inputs does this node type's workflow.json
     need" (add_validated_capability's cross-backend consistency check) --
     a fixed field still needs its own param_mapping entry on every backend
     even though it doesn't affect row-span, so that check must not use
     slot_count()."""
-    return len([f for f in (schema or {}).get("fields", []) if f.get("type") in ("image", "file")])
+    return len([f for f in (schema or {}).get("fields", []) if f.get("type") in ("image", "file", "video", "audio")])
 
 
 @dataclass
@@ -201,6 +202,14 @@ class EffectiveTemplate:
     is_native: bool
     native: NativeNodeType | None = None
     db_template: NodeTemplate | None = None
+
+    @property
+    def prompt_instruction(self) -> str | None:
+        if self.db_template is not None:
+            return self.db_template.prompt_instruction
+        if self.native is not None:
+            return self.native.prompt_instruction
+        return None
 
     @property
     def is_deterministic(self) -> bool:

@@ -52,16 +52,32 @@ class AssetKind(str, enum.Enum):
     image = "image"
     mesh = "mesh"
     mask = "mask"
+    video = "video"
+    audio = "audio"
     other = "other"
 
     @classmethod
     def for_mime(cls, mime_type: str) -> "AssetKind":
-        """Kind for a file known only by its MIME type. Never `mesh` or `mask`
-        from MIME alone: a .glb arrives as application/octet-stream, and a
-        mask is just an image/png. Uploads decide mesh from the bytes instead
-        (core/upload_type.py's resolve_upload); masks are only ever set by the
-        producer that made them (comfyui_backend.py)."""
-        return cls.image if mime_type.startswith("image/") else cls.other
+        """Kind for a file known only by its MIME type. Never `mask` from MIME
+        alone (a mask is just an image/png -- only the producer that made one
+        knows, see comfyui_backend.py), and `mesh` only for an explicit
+        model/gltf-binary: a .glb usually arrives as application/octet-stream,
+        which is why uploads sniff the bytes first (core/upload_type.py's
+        resolve_upload) and only fall back to this.
+
+        video/audio were `other` until 2026-10-29 -- the board stored its
+        clips that way, and nothing could tell a generated video from an
+        unknown blob. Rows written before that are reclassified by migration
+        0032."""
+        if mime_type.startswith("image/"):
+            return cls.image
+        if mime_type.startswith("video/"):
+            return cls.video
+        if mime_type.startswith("audio/"):
+            return cls.audio
+        if mime_type == "model/gltf-binary":
+            return cls.mesh
+        return cls.other
 
 
 class Backend(Base):
@@ -122,6 +138,9 @@ class NodeTemplate(Base):
     # one" -- deliberately not denormalized into a stored value, so attaching
     # a backend that runs a different checkpoint re-groups the type by itself.
     category_override: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Optional prompt construction guide / instructions for LLM agents authoring
+    # prompts for this node type (e.g. required prompt sections, syntax, role tokens).
+    prompt_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

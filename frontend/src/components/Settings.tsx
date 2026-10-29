@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { assetsApi, backendsApi, capabilitiesApi, nodeTemplatesApi, projectsApi, systemApi } from "../api/endpoints";
 import { NodeTypeDescription } from "./NodeTypeDescription";
+import { NodeTypePromptInstruction } from "./NodeTypePromptInstruction";
 import { ModelOverridesModal } from "./ModelOverridesModal";
 import type {
   Backend,
@@ -1236,6 +1237,7 @@ function NodeTypeCard({
       </div>
 
       <NodeTypeDescription template={template} onChanged={reloadTemplates} />
+      <NodeTypePromptInstruction template={template} onChanged={reloadTemplates} />
       <NodeTypeCategoryField template={template} onChanged={reloadTemplates} />
 
       <table>

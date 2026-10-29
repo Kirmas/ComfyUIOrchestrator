@@ -154,9 +154,26 @@ async def list_node_types() -> list[dict]:
 
 @mcp_server.tool()
 async def get_node_type_description(node_type_slug: str) -> dict:
-    """What a node type does, plus the facts it was derived from (model, LoRAs,
-    image inputs, prompt) -- shown per backend where they differ."""
+    """What a node type does, its prompt writing instructions/guide (prompt_instruction)
+    if defined, plus the facts it was derived from (model, LoRAs, image inputs, prompt)
+    -- shown per backend where they differ."""
     return await _get(f"/api/node-templates/by-slug/{node_type_slug}/description")
+
+
+@mcp_server.tool()
+async def get_node_type_prompt_instruction(node_type_slug: str) -> dict:
+    """Prompt writing instructions and guidelines for a node type (e.g. required
+    prompt format, sections, syntax, role labels like <Picture 1>, <Subject 1>)."""
+    return await _get(f"/api/node-templates/by-slug/{node_type_slug}/prompt-instruction")
+
+
+@mcp_server.tool()
+async def set_node_type_prompt_instruction(node_type_slug: str, prompt_instruction: str | None) -> dict:
+    """Update or set the prompt writing instructions/guide for a node type."""
+    return await _patch(
+        f"/api/node-templates/by-slug/{node_type_slug}/prompt-instruction",
+        {"prompt_instruction": prompt_instruction},
+    )
 
 
 @mcp_server.tool()

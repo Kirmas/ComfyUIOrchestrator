@@ -19,6 +19,7 @@ from app.schemas.schemas import (
     NodeTemplateListRead,
     NodeTemplateRead,
     NodeTemplateUpdate,
+    PromptInstructionWrite,
     WorkflowAnalysisOut,
 )
 
@@ -38,6 +39,7 @@ def _native_template_read(native) -> NodeTemplateRead:
         defaults=native.defaults,
         created_at=datetime.now(UTC),
         node_type=f"native.{native.slug}",
+        prompt_instruction=native.prompt_instruction,
     )
 
 
@@ -213,13 +215,42 @@ async def get_defaults(slug: str, db: AsyncSession = Depends(get_db)):
 @router.get("/by-slug/{slug}/description")
 async def get_description(slug: str, db: AsyncSession = Depends(get_db)):
     entry = await _resolve_one(db, slug)
+    result = await db.execute(select(NodeTemplate).where(NodeTemplate.node_type_slug == slug))
+    template = result.scalar_one_or_none()
+    native = NATIVE_NODE_TYPES.get(slug)
+    prompt_instruction = template.prompt_instruction if template else (native.prompt_instruction if native else None)
     return {
         "node_type_slug": slug,
         "description": entry.description,
         "description_source": entry.source,
         "fingerprint": entry.fingerprint,
         "config_hash": entry.config_hash,
+        "prompt_instruction": prompt_instruction,
     }
+
+
+@router.get("/by-slug/{slug}/prompt-instruction")
+async def get_prompt_instruction(slug: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(NodeTemplate).where(NodeTemplate.node_type_slug == slug))
+    template = result.scalar_one_or_none()
+    if template is not None:
+        return {"node_type_slug": slug, "prompt_instruction": template.prompt_instruction}
+    native = NATIVE_NODE_TYPES.get(slug)
+    if native is not None:
+        return {"node_type_slug": slug, "prompt_instruction": native.prompt_instruction}
+    raise HTTPException(404, f"Unknown node type: {slug}")
+
+
+@router.patch("/by-slug/{slug}/prompt-instruction")
+async def set_prompt_instruction(slug: str, payload: PromptInstructionWrite, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(NodeTemplate).where(NodeTemplate.node_type_slug == slug))
+    template = result.scalar_one_or_none()
+    if template is None:
+        raise HTTPException(404, f"Node template '{slug}' not found (or is a native type)")
+    template.prompt_instruction = payload.prompt_instruction
+    await db.commit()
+    await db.refresh(template)
+    return {"node_type_slug": slug, "prompt_instruction": template.prompt_instruction}
 
 
 @router.patch("/by-slug/{slug}/description")

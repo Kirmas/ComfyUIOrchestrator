@@ -140,10 +140,93 @@ class MeshProducer(PreviewProducer):
         return b"", {"verts": vertices, "faces": triangles}
 
 
+class VideoPreviewProducer(PreviewProducer):
+    """Produces a 384x384 WebP poster frame from the video's first frame,
+    and records dimensions, duration, and FPS in the descriptor."""
+
+    def wants_preview(self, path: Path) -> bool:
+        return True
+
+    def build(self, data: bytes, capacity: int) -> tuple[bytes, dict] | None:
+        try:
+            import av
+
+            container = av.open(io.BytesIO(data))
+            if not container.streams.video:
+                return None
+            stream = container.streams.video[0]
+            width = stream.width or 0
+            height = stream.height or 0
+            fps = float(stream.average_rate or stream.base_rate or 24.0)
+            duration_ms = int(container.duration / 1000) if container.duration is not None else 0
+            if not duration_ms and stream.duration and stream.time_base:
+                duration_ms = int(float(stream.duration * stream.time_base) * 1000)
+
+            frame = None
+            for f in container.decode(video=0):
+                frame = f
+                break
+            if frame is None:
+                return None
+
+            img = frame.to_image()
+            w, h = img.size
+            if not width or not height:
+                width, height = w, h
+            edge = min(w, h)
+            left, top = (w - edge) // 2, (h - edge) // 2
+            thumb = img.convert("RGB").resize(
+                (PREVIEW_EDGE, PREVIEW_EDGE), Image.LANCZOS, box=(left, top, left + edge, top + edge)
+            )
+        except Exception:
+            return None
+
+        descriptor = {
+            "width": width,
+            "height": height,
+            "duration_ms": duration_ms,
+            "fps": fps,
+        }
+        for quality in QUALITY_LADDER:
+            buf = io.BytesIO()
+            thumb.save(buf, "WEBP", quality=quality, method=4)
+            encoded = buf.getvalue()
+            if len(encoded) <= capacity:
+                return encoded, descriptor
+        return None
+
+
+class AudioProducer(PreviewProducer):
+    """Audio has no picture. Extracts duration, sample rate, and channel count
+    into the descriptor block; the preview is empty."""
+
+    def wants_preview(self, path: Path) -> bool:
+        return False
+
+    def build(self, data: bytes, capacity: int) -> tuple[bytes, dict] | None:
+        try:
+            import av
+
+            container = av.open(io.BytesIO(data))
+            if not container.streams.audio:
+                return None
+            stream = container.streams.audio[0]
+            rate = stream.rate or 0
+            channels = getattr(stream, "channels", 0) or 0
+            duration_ms = int(container.duration / 1000) if container.duration is not None else 0
+            if not duration_ms and stream.duration and stream.time_base:
+                duration_ms = int(float(stream.duration * stream.time_base) * 1000)
+            return b"", {"duration_ms": duration_ms, "sample_rate": rate, "channels": channels}
+        except Exception:
+            return None
+
+
 PREVIEW_PRODUCERS: dict[AssetKind, PreviewProducer] = {
     AssetKind.image: RasterPreviewProducer(),
     AssetKind.mask: RasterPreviewProducer(),
     AssetKind.mesh: MeshProducer(),
+    AssetKind.video: VideoPreviewProducer(),
+    AssetKind.audio: AudioProducer(),
     AssetKind.other: NoPreviewProducer(),
 }
 

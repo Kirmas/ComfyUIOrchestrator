@@ -7,7 +7,9 @@ import type { InputRef, NodeItem, NodeTemplate, ParamSchema, Track } from "./typ
 // not something a grid cell supplies, so it never occupies a row and never
 // gets a per-cell picker.
 export function slotFields(schema: ParamSchema | undefined | null) {
-  return (schema?.fields ?? []).filter((f) => (f.type === "image" || f.type === "file") && !f.fixed);
+  return (schema?.fields ?? []).filter(
+    (f) => (f.type === "image" || f.type === "file" || f.type === "video" || f.type === "audio") && !f.fixed,
+  );
 }
 
 /** Context defaultInputsForSchema needs to smart-default by kind -- everything

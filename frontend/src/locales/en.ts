@@ -488,6 +488,14 @@ export const en = {
   "desc.resetTitle": "Go back to the description derived from the workflows",
   "desc.facts": "facts",
 
+  // --- Prompt instruction ---------------------------------------------
+  "promptInstruction.title": "Prompt Instruction (Agent)",
+  "promptInstruction.add": "add instruction",
+  "promptInstruction.placeholder": "Prompt writing guidelines for agents (syntax, structure, reference labels)...",
+  "promptInstruction.none": "(no prompt instruction)",
+  "promptInstruction.expand": "expand",
+  "promptInstruction.collapse": "collapse",
+
   // --- Multiple-Angles builder ----------------------------------------
   "angle.builder": "Multiple-Angles builder",
   "angle.trigger": "trigger",
