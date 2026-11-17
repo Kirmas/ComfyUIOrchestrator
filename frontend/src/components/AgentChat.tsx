@@ -24,6 +24,7 @@ import type {
 import { loadChatDraft, saveChatDraft } from "../chatDrafts";
 import type { AgentNodeRef } from "../state/agentDock";
 import { cx } from "../utils";
+import { MeshAssetPreview } from "./MeshAssetPreview";
 
 const LAST_CHAT_KEY = "comfy-orchestrator:lastAgentChat";
 // A new chat starts on whatever model was picked last, not always the default.
@@ -772,6 +773,9 @@ interface ChatMediaItem {
   name?: string;
   previewUrl?: string;
   downloadUrl?: string;
+  // Set only for an orchestrator asset (a "media" event). A 3D model needs the
+  // asset record itself, not just a URL, so only those can show one.
+  assetId?: string;
 }
 
 function ChatMedia({
@@ -818,6 +822,8 @@ function ChatMedia({
               <video src={item.url} controls preload="metadata" />
             ) : item.mimeType.startsWith("audio/") ? (
               <audio src={item.url} controls preload="metadata" />
+            ) : item.mimeType.startsWith("model/") && item.assetId ? (
+              <MeshAssetPreview assetId={item.assetId} />
             ) : null}
             <div className="agent-media-actions">
               {item.downloadUrl && (
@@ -1303,7 +1309,7 @@ export function ChatView({
                     caption={e.caption}
                     onQuote={quoteMedia}
                     items={[{
-                      id: e.asset_id, name: e.name, mimeType: e.mime_type,
+                      id: e.asset_id, assetId: e.asset_id, name: e.name, mimeType: e.mime_type,
                       url: agentChatsApi.assetMediaUrl(e.asset_id),
                       previewUrl: e.mime_type.startsWith("image/") ? agentChatsApi.assetMediaUrl(e.asset_id, "fit") : undefined,
                       downloadUrl: agentChatsApi.assetMediaUrl(e.asset_id, "file", true),

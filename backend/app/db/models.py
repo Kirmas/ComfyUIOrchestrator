@@ -656,7 +656,12 @@ class BoardItemKind(str, enum.Enum):
     text = "text"  # markdown body, optionally tagged for prompt macros
     image = "image"
     audio = "audio"
-    video = "video"  # no 3D on purpose: a model-viewer per sticker would sink the board
+    video = "video"
+    # A 3D model. Long kept off the board on purpose -- a live model-viewer per
+    # sticker would sink it -- until the grid's MeshThumb started rendering each
+    # model once to a cached still: a mesh sticker is now just that picture,
+    # and the live viewer only exists while its fullscreen modal is open.
+    mesh = "mesh"
     frame = "frame"  # the lasso drawn around a group; rect or ellipse, see BoardItem.shape
     ink = "ink"  # freehand stroke, no semantics at all
     connector = "connector"  # source_item -> target_item, anchored to the items themselves

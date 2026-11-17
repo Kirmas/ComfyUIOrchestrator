@@ -673,7 +673,7 @@ class BoardItemRead(ORMModel):
     source: AnnotationSource
     created_at: datetime
     updated_at: datetime
-    # Populated for image/audio/video stickers so the client can render without
+    # Populated for image/audio/video/mesh stickers so the client can render without
     # a second round-trip per sticker. asset_tags is what the grid's reference
     # picker filters on -- the labels are set here, on the board that owns the
     # asset, and read over there.

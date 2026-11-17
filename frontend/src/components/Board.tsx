@@ -162,11 +162,15 @@ export function Board({ projectId }: Props) {
     for (const file of Array.from(files)) {
       try {
         const asset = await boardApi.uploadAsset(projectId, file);
-        const kind: BoardItemKind = file.type.startsWith("audio/")
-          ? "audio"
-          : file.type.startsWith("video/")
-            ? "video"
-            : "image";
+        // A .glb usually arrives with an empty or generic file.type, so a model
+        // is recognised by what the server sniffed from its bytes instead.
+        const kind: BoardItemKind = asset.kind === "mesh"
+          ? "mesh"
+          : file.type.startsWith("audio/")
+            ? "audio"
+            : file.type.startsWith("video/")
+              ? "video"
+              : "image";
         const w = kind === "audio" ? 260 : 240;
         const spot = at ?? freeSpot(w, kind === "audio" ? 90 : 200);
         await create({
@@ -366,7 +370,7 @@ export function Board({ projectId }: Props) {
           ref={fileInputRef}
           type="file"
           multiple
-          accept="image/*,audio/*,video/*"
+          accept="image/*,audio/*,video/*,.glb,model/gltf-binary"
           style={{ display: "none" }}
           onChange={(e) => {
             if (e.target.files) void uploadFiles(e.target.files);

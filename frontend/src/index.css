@@ -4269,3 +4269,32 @@ th, td {
   padding: 0 4px;
   line-height: 1;
 }
+
+/* A 3D model outside the grid (board sticker, chat message): the same
+   MeshThumb as a cell, so its still and its corner buttons behave the same. */
+.mesh-preview {
+  position: relative;
+  width: 100%;
+  max-width: 320px;
+}
+
+.mesh-preview .mesh-thumb img,
+.mesh-preview model-viewer,
+.mesh-preview .model-thumb-loading {
+  display: block;
+  width: 100%;
+  max-width: none;
+  max-height: none;
+  aspect-ratio: 1;
+  object-fit: contain;
+}
+
+.mesh-preview-missing {
+  padding: 12px;
+  text-align: center;
+  opacity: 0.6;
+}
+
+.agent-media-item .mesh-preview {
+  width: min(100%, 320px);
+}

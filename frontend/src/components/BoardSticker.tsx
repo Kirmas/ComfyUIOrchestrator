@@ -6,6 +6,7 @@ import { renderMarkdown } from "../markdown";
 import type { BoardItem } from "../types";
 import { cx } from "../utils";
 import { STICKER_COLORS } from "./Board";
+import { MeshAssetPreview } from "./MeshAssetPreview";
 
 // Floors for the resize handle. A card can't go below the size of its own
 // action bar and handle; a drawn mark has neither, and a small doodle would be
@@ -169,7 +170,7 @@ export function BoardSticker({
   // An SVG is drawn from its server-side raster: the browser re-rasterises a
   // vector on every zoom step, and a 45k-shape map made the whole board crawl.
   const imageUrl = item.asset_id && item.asset_mime_type?.includes("svg") ? assetsApi.fitUrl(item.asset_id) : url;
-  const isMedia = item.kind === "image" || item.kind === "audio" || item.kind === "video";
+  const isMedia = item.kind === "image" || item.kind === "audio" || item.kind === "video" || item.kind === "mesh";
 
   if (isMark) {
     // A drawn mark, not a card: the shape itself -- circle or freehand stroke
@@ -307,6 +308,7 @@ export function BoardSticker({
       {item.kind === "image" && url && <img src={imageUrl} alt="" draggable={false} />}
       {item.kind === "audio" && url && <audio src={url} controls />}
       {item.kind === "video" && url && <video src={url} controls />}
+      {item.kind === "mesh" && item.asset_id && <MeshAssetPreview assetId={item.asset_id} />}
 
       {resizeHandle}
 

@@ -345,7 +345,7 @@ export interface Asset {
 // content-type discriminator. Unlike a grid node, whose position is derived
 // from track_id/step_index, a sticker's x/y IS its only truth -- that freedom
 // is the point of the board.
-export type BoardItemKind = "text" | "image" | "audio" | "video" | "frame" | "ink" | "connector" | "comment";
+export type BoardItemKind = "text" | "image" | "audio" | "video" | "mesh" | "frame" | "ink" | "connector" | "comment";
 
 export interface Board {
   id: string;

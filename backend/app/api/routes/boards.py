@@ -1,4 +1,4 @@
-"""The idea board: stickers (text / image / audio / video / frame / ink /
+"""The idea board: stickers (text / image / audio / video / mesh / frame / ink /
 connector / comment) at free coordinates, plus the project-scoped asset library
 they draw their media from.
 
@@ -113,7 +113,7 @@ async def create_board_item(board_id: uuid.UUID, payload: BoardItemCreate, db: A
     board = await _get_board(db, board_id)
 
     asset: Asset | None = None
-    if payload.kind in (BoardItemKind.image, BoardItemKind.audio, BoardItemKind.video):
+    if payload.kind in (BoardItemKind.image, BoardItemKind.audio, BoardItemKind.video, BoardItemKind.mesh):
         if not payload.asset_id:
             raise HTTPException(400, f"A '{payload.kind.value}' sticker needs an asset_id")
         asset = await db.get(Asset, payload.asset_id)
@@ -174,7 +174,7 @@ async def delete_board_item(item_id: uuid.UUID, db: AsyncSession = Depends(get_d
     """Connectors and comments attached to this sticker go with it (both self-FKs
     cascade) rather than being left pointing at coordinates that mean nothing.
 
-    An image/audio/video sticker OWNS its asset -- one sticker, one dedicated
+    An image/audio/video/mesh sticker OWNS its asset -- one sticker, one dedicated
     Asset row, never shared (Board.tsx's uploadFiles always creates a fresh
     Asset and exactly one sticker together in the same call; nothing ever
     attaches a second sticker to an already-existing asset_id). So deleting

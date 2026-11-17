@@ -112,7 +112,9 @@ export function MeshThumb({
 }: {
   asset: Asset;
   onOpen: () => void;
-  onCompare: () => void;
+  // Omitted where there is nothing to compare against (a board sticker, a chat
+  // message) -- the ⇄ button is then not drawn at all.
+  onCompare?: () => void;
   downloadName?: string;
 }) {
   const t = useT();
@@ -217,17 +219,19 @@ export function MeshThumb({
       >
         🔍
       </button>
-      <button
-        type="button"
-        className="zoom-button compare-button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onCompare();
-        }}
-        title={t("cell.compareWith")}
-      >
-        ⇄
-      </button>
+      {onCompare && (
+        <button
+          type="button"
+          className="zoom-button compare-button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onCompare();
+          }}
+          title={t("cell.compareWith")}
+        >
+          ⇄
+        </button>
+      )}
       <a
         className="zoom-button download-button"
         href={url}
