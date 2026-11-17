@@ -14,20 +14,22 @@ export function VideoTrimPreview({
   startFrame,
   endFrame,
   onCommit,
-  fps = 30,
+  fps = 24,
 }: VideoTrimPreviewProps) {
   const t = useT();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [duration, setDuration] = useState<number>(0);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [isPlayingRange, setIsPlayingRange] = useState<boolean>(false);
-  const [customFps, setCustomFps] = useState<number>(fps);
+  const [customFps, setCustomFps] = useState<number>(fps && fps > 0 ? fps : 24);
 
-  const currentFrame = Math.floor(currentTime * customFps);
-  const totalFrames = duration > 0 ? Math.floor(duration * customFps) : null;
+  const currentFrame = Math.floor(currentTime * customFps + 0.0001);
+  const totalFrames = duration > 0 ? Math.floor(duration * customFps + 0.0001) : null;
 
   useEffect(() => {
-    setCustomFps(fps);
+    if (fps && fps > 0) {
+      setCustomFps(fps);
+    }
   }, [fps]);
 
   useEffect(() => {
@@ -46,6 +48,10 @@ export function VideoTrimPreview({
         if (video.currentTime >= stopTime) {
           video.pause();
           setIsPlayingRange(false);
+          // Snap playhead to the exact center of endFrame
+          const finalTime = Math.max(0, Math.min(video.duration || 0, (endFrame + 0.5) / customFps));
+          video.currentTime = finalTime;
+          setCurrentTime(finalTime);
         }
       }
     };
@@ -70,9 +76,20 @@ export function VideoTrimPreview({
     if (!video) return;
     video.pause();
     setIsPlayingRange(false);
-    const newTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + delta / customFps));
+    const targetFrame = Math.max(0, currentFrame + delta);
+    const newTime = Math.max(0, Math.min(video.duration || 0, (targetFrame + 0.5) / customFps));
     video.currentTime = newTime;
     setCurrentTime(newTime);
+  };
+
+  const jumpToFrame = (frame: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.pause();
+    setIsPlayingRange(false);
+    const targetTime = Math.max(0, Math.min(video.duration || 0, (frame + 0.5) / customFps));
+    video.currentTime = targetTime;
+    setCurrentTime(targetTime);
   };
 
   const handleSetStart = () => {
@@ -97,7 +114,7 @@ export function VideoTrimPreview({
       return;
     }
 
-    const startTime = startFrame / customFps;
+    const startTime = (startFrame + 0.05) / customFps;
     video.currentTime = startTime;
     setIsPlayingRange(true);
     video.play().catch(() => setIsPlayingRange(false));
@@ -123,6 +140,12 @@ export function VideoTrimPreview({
   }
 
   const frameCount = endFrame > 0 ? Math.max(1, endFrame - startFrame + 1) : 0;
+  const rangeDurationSec =
+    endFrame > 0
+      ? (frameCount / customFps).toFixed(2)
+      : duration > 0
+        ? Math.max(0, duration - startFrame / customFps).toFixed(2)
+        : null;
 
   return (
     <div
@@ -177,11 +200,16 @@ export function VideoTrimPreview({
             onChange={(e) => setCustomFps(Number(e.target.value))}
             style={{ fontSize: "11px", padding: "2px 4px", borderRadius: "4px" }}
           >
-            <option value={24}>24</option>
-            <option value={25}>25</option>
-            <option value={30}>30</option>
-            <option value={50}>50</option>
-            <option value={60}>60</option>
+            {![12, 16, 24, 25, 30, 50, 60].includes(customFps) && (
+              <option value={customFps}>{customFps} (auto)</option>
+            )}
+            <option value={12}>12</option>
+            <option value={16}>16</option>
+            <option value={24}>24{fps === 24 ? " (auto)" : ""}</option>
+            <option value={25}>25{fps === 25 ? " (auto)" : ""}</option>
+            <option value={30}>30{fps === 30 ? " (auto)" : ""}</option>
+            <option value={50}>50{fps === 50 ? " (auto)" : ""}</option>
+            <option value={60}>60{fps === 60 ? " (auto)" : ""}</option>
           </select>
         </div>
       </div>
@@ -266,6 +294,10 @@ export function VideoTrimPreview({
 
       <div
         style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "8px",
           fontSize: "11px",
           padding: "6px 10px",
           borderRadius: "4px",
@@ -274,9 +306,37 @@ export function VideoTrimPreview({
           color: "var(--text)",
         }}
       >
-        {endFrame > 0
-          ? t("videoTrim.range", { start: startFrame, end: endFrame, count: frameCount })
-          : t("videoTrim.rangeToEnd", { start: startFrame })}
+        <span>
+          {endFrame > 0
+            ? t("videoTrim.rangeWithDuration", {
+                start: startFrame,
+                end: endFrame,
+                count: frameCount,
+                duration: rangeDurationSec ?? "?",
+              })
+            : t("videoTrim.rangeToEnd", { start: startFrame })}
+        </span>
+
+        <div style={{ display: "inline-flex", gap: "4px" }}>
+          <button
+            type="button"
+            onClick={() => jumpToFrame(startFrame)}
+            style={{ fontSize: "10px", padding: "2px 6px" }}
+            title={t("videoTrim.jumpStart")}
+          >
+            🔍 {startFrame}
+          </button>
+          {endFrame > 0 && (
+            <button
+              type="button"
+              onClick={() => jumpToFrame(endFrame)}
+              style={{ fontSize: "10px", padding: "2px 6px" }}
+              title={t("videoTrim.jumpEnd")}
+            >
+              🔍 {endFrame}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

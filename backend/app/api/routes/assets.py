@@ -37,6 +37,26 @@ def to_asset_read(asset: Asset) -> AssetRead:
         counts = get_storage().mesh_counts(asset.storage_key)
         if counts:
             item.vertex_count, item.triangle_count = counts
+    elif asset.kind == AssetKind.video:
+        vmeta = get_storage().video_meta(asset.storage_key)
+        if vmeta:
+            item.duration_ms = vmeta.get("duration_ms")
+            fps = vmeta.get("fps")
+            if fps and fps > 0:
+                item.fps = round(float(fps), 3)
+        if not item.fps and asset.meta:
+            meta_dict = asset.meta.get("metadata") if isinstance(asset.meta.get("metadata"), dict) else asset.meta
+            meta_fps = meta_dict.get("fps") or meta_dict.get("frame_rate")
+            if meta_fps:
+                try:
+                    item.fps = round(float(meta_fps), 3)
+                except (ValueError, TypeError):
+                    pass
+            if not item.duration_ms and meta_dict.get("duration"):
+                try:
+                    item.duration_ms = int(round(float(meta_dict["duration"]) * 1000))
+                except (ValueError, TypeError):
+                    pass
     return item
 
 

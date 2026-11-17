@@ -786,9 +786,20 @@ export const en = {
   "videoTrim.playRange": "▶ Play selected range",
   "videoTrim.pause": "⏸ Pause",
   "videoTrim.range": "Selected: frame {start} → {end} ({count} frames)",
+  "videoTrim.rangeWithDuration": "Selected: frame {start} → {end} ({count} frames, ~{duration}s)",
   "videoTrim.rangeToEnd": "Selected: frame {start} → end of video",
   "videoTrim.stepBackward": "-1 frame",
   "videoTrim.stepForward": "+1 frame",
+  "videoTrim.jumpStart": "Jump to start",
+  "videoTrim.jumpEnd": "Jump to end",
+
+  // --- Extract Frame (native.video_extract_frame) -----------------------
+  "videoFrame.noSource": "No source video connected yet -- connect a video to slot to preview and pick a frame",
+  "videoFrame.current": "Current: frame ~{frame} ({time}s)",
+  "videoFrame.total": "of ~{total} frames",
+  "videoFrame.pickCurrent": "Pick this frame ({frame})",
+  "videoFrame.jumpToPicked": "Show picked frame",
+  "videoFrame.picked": "Selected frame for image output: {frame} ({time}s)",
 
   // --- Comment thread (annotation) -------------------------------------
   "annotation.empty": "(empty comment)",

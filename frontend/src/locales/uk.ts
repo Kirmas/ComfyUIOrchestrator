@@ -788,9 +788,20 @@ export const uk: Record<TKey, string> = {
   "videoTrim.playRange": "▶ Програти відрізок",
   "videoTrim.pause": "⏸ Пауза",
   "videoTrim.range": "Вибрано: кадр {start} → {end} ({count} кадр.)",
+  "videoTrim.rangeWithDuration": "Вибрано: кадр {start} → {end} ({count} кадр., ~{duration}с)",
   "videoTrim.rangeToEnd": "Вибрано: кадр {start} → кінець відео",
   "videoTrim.stepBackward": "-1 кадр",
   "videoTrim.stepForward": "+1 кадр",
+  "videoTrim.jumpStart": "До початку",
+  "videoTrim.jumpEnd": "До кінця",
+
+  // --- Extract Frame (native.video_extract_frame) -----------------------
+  "videoFrame.noSource": "Вихідного відео ще немає — підключіть відео у слот, щоб бачити прев'ю та обрати кадр",
+  "videoFrame.current": "Поточний: кадр ~{frame} ({time}с)",
+  "videoFrame.total": "з ~{total} кадрів",
+  "videoFrame.pickCurrent": "Вибрати цей кадр ({frame})",
+  "videoFrame.jumpToPicked": "Показати вибраний кадр",
+  "videoFrame.picked": "Вибраний кадр для зображення: {frame} ({time}с)",
 
   // --- Comment thread (annotation) -------------------------------------
   "annotation.empty": "(порожній коментар)",

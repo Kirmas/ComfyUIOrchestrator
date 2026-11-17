@@ -512,6 +512,9 @@ class AssetRead(ORMModel):
     # isn't a GLB.
     vertex_count: int | None = None
     triangle_count: int | None = None
+    # Video/audio timing properties from prefix block or metadata
+    duration_ms: int | None = None
+    fps: float | None = None
 
 
 class AssetTagsUpdate(BaseModel):

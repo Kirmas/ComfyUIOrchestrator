@@ -618,3 +618,39 @@ class VideoTrimBackend(NativeBackend):
 
         trimmed = trim_video_frames(video_data, start_frame, end_frame)
         return [AssetRef(data=trimmed, mime_type="video/mp4", kind="video")]
+
+
+def extract_video_frame(video_data: bytes, frame_index: int = 0) -> bytes:
+    """Extract a single frame from video at frame_index (0-based) and return as lossless PNG."""
+    import av
+
+    frame_index = max(0, int(frame_index))
+    in_buf = BytesIO(video_data)
+    with av.open(in_buf) as in_c:
+        if not in_c.streams.video:
+            raise ValueError("No video stream found in input")
+
+        picked_frame = None
+        for idx, frame in enumerate(in_c.decode(video=0)):
+            picked_frame = frame
+            if idx == frame_index:
+                break
+
+        if picked_frame is None:
+            raise ValueError("No frames could be decoded from video")
+
+        img = picked_frame.to_image()
+        out_buf = BytesIO()
+        img.save(out_buf, format="PNG")
+        return out_buf.getvalue()
+
+
+class VideoExtractFrameBackend(NativeBackend):
+    async def _run(self, execution_config: dict, inputs: dict[str, Any]) -> list[AssetRef]:
+        video_data = inputs.get("video")
+        if not video_data or not isinstance(video_data, (bytes, bytearray)):
+            raise ValueError("video input is required and must be non-empty bytes")
+
+        frame_index = max(0, int(inputs.get("frame_index", 0)))
+        png_bytes = extract_video_frame(video_data, frame_index)
+        return [AssetRef(data=png_bytes, mime_type="image/png", kind="image")]

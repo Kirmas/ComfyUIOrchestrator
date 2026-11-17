@@ -21,6 +21,7 @@ import { CropPreview, type CropBox } from "./CropPreview";
 import { MaskPreview } from "./MaskPreview";
 import { TransplantPreview } from "./TransplantPreview";
 import { VideoTrimPreview } from "./VideoTrimPreview";
+import { VideoExtractFramePreview } from "./VideoExtractFramePreview";
 import { IdeaTextPicker, MacroPreview } from "./IdeaTextPicker";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
 import { MeshThumb, MeshViewer, meshDownloadName } from "./Mesh3D";
@@ -1422,23 +1423,36 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   }, [paramsOpen, template, node.inputs, layerGroups]);
 
   const isVideoTrim = template?.node_type_slug === "video_trim" || template?.node_type === "native.video_trim";
-  const [videoTrimSourceUrl, setVideoTrimSourceUrl] = useState<string | null>(null);
+  const isVideoExtractFrame = template?.node_type_slug === "video_extract_frame" || template?.node_type === "native.video_extract_frame";
+  const isVideoNode = isVideoTrim || isVideoExtractFrame;
+  const [slotVideoUrl, setSlotVideoUrl] = useState<string | null>(null);
+  const [slotVideoAsset, setSlotVideoAsset] = useState<Asset | null>(null);
 
   useEffect(() => {
-    if (!paramsOpen || !isVideoTrim) {
-      setVideoTrimSourceUrl(null);
+    if (!paramsOpen || !isVideoNode) {
+      setSlotVideoUrl(null);
+      setSlotVideoAsset(null);
       return;
     }
     let cancelled = false;
     (async () => {
-      const url = await slotImageUrl("video");
-      if (!cancelled) setVideoTrimSourceUrl(url);
+      if (!template) return;
+      const slotIndex = slotFields(template.param_schema).findIndex((f) => f.name === "video");
+      if (slotIndex < 0) return;
+      const asset = await resolveSlotAsset(node, slotIndex, tracks, nodesById);
+      if (!cancelled) {
+        setSlotVideoAsset(asset ?? null);
+        setSlotVideoUrl(asset ? resolveAssetUrl(asset.url) : null);
+      }
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paramsOpen, isVideoTrim, node.inputs]);
+  }, [paramsOpen, isVideoNode, node.inputs]);
+
+  const metaFps = (slotVideoAsset?.meta?.metadata as { fps?: number } | undefined)?.fps ?? (slotVideoAsset?.meta?.fps as number | undefined);
+  const slotVideoFps = slotVideoAsset?.fps ?? metaFps ?? null;
 
   // Always available, not just for the last cell in a track -- unlike an
   // asset cell, a workflow node's own output(s) aren't guaranteed to still
@@ -2230,7 +2244,8 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
               {isVideoTrim && (
                 <div className="field-row">
                   <VideoTrimPreview
-                    videoUrl={videoTrimSourceUrl}
+                    videoUrl={slotVideoUrl}
+                    fps={slotVideoFps ?? undefined}
                     startFrame={Number(node.params.start_frame ?? 0)}
                     endFrame={Number(node.params.end_frame ?? 0)}
                     onCommit={(start, end) => {
@@ -2239,6 +2254,17 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                         end_frame: end,
                       });
                     }}
+                  />
+                </div>
+              )}
+
+              {isVideoExtractFrame && (
+                <div className="field-row">
+                  <VideoExtractFramePreview
+                    videoUrl={slotVideoUrl}
+                    fps={slotVideoFps ?? undefined}
+                    frameIndex={Number(node.params.frame_index ?? 0)}
+                    onCommit={(frameIndex) => updateParam("frame_index", frameIndex)}
                   />
                 </div>
               )}

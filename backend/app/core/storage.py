@@ -112,6 +112,13 @@ class Storage:
             # build_prefix. The file itself still has the counts, so count those.
         return glb_stats.counts_from_file(self._safe_path(key), self.payload_offset(key))
 
+    def video_meta(self, key: str) -> dict | None:
+        """Video timing and dimensions ({width, height, duration_ms, fps}) from prefix block."""
+        header = self.read_header(key)
+        if header is not None and header.kind == AssetKind.video:
+            return header.descriptor
+        return None
+
     def read_preview(self, key: str) -> bytes | None:
         return asset_prefix.read_preview(self._safe_path(key))
 
