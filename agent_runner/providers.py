@@ -159,6 +159,14 @@ class Provider:
     efforts: list[str] = []
     supports_fast = False
     supports_compact = False
+    # Self-update (cli_updates.py): the CLI's own update subcommand, and the
+    # same place the CLI itself asks for its newest release.
+    update_args: list[str] = ["update"]
+    latest_version_url: str | None = None
+
+    def parse_latest_version(self, body: str) -> str | None:
+        """The newest version out of latest_version_url's response."""
+        return json.loads(body).get("version")
 
     def context_window(self, model: str) -> int:
         return 200_000
@@ -376,6 +384,20 @@ class ClaudeProvider(Provider):
     label = "Claude"
     binary_env = "CLAUDE_BIN"
     binary_name = "claude"
+
+    @property
+    def latest_version_url(self) -> str:
+        """The native installer's own source, on the channel `claude update`
+        follows (autoUpdatesChannel in settings; "latest" unless set)."""
+        channel = "latest"
+        try:
+            channel = json.loads((Path.home() / ".claude/settings.json").read_text()).get("autoUpdatesChannel") or channel
+        except (OSError, ValueError, AttributeError):
+            pass
+        return f"https://downloads.claude.ai/claude-code-releases/{channel}"
+
+    def parse_latest_version(self, body: str) -> str | None:
+        return body.strip() or None
     # The picker's list is the CLI's own catalog (`fetch_models`): the
     # family aliases (opus/sonnet/fable/haiku, which the CLI resolves to the
     # newest model of that family, so a chat on an alias follows upgrades)
@@ -780,6 +802,11 @@ class CodexProvider(Provider):
     label = "Codex"
     binary_env = "CODEX_BIN"
     binary_name = "codex"
+    # What the CLI itself checks (cached in ~/.codex/version.json); tags are "rust-v0.170.0".
+    latest_version_url = "https://api.github.com/repos/openai/codex/releases/latest"
+
+    def parse_latest_version(self, body: str) -> str | None:
+        return (json.loads(body).get("tag_name") or "").removeprefix("rust-v") or None
     models = [
         {"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]},
         {"id": "gpt-6-astra", "label": "GPT-6 Astra", "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]},
@@ -1314,6 +1341,8 @@ class AgyProvider(Provider):
     label = "Antigravity"
     binary_env = "AGY_BIN"
     binary_name = "agy"
+    # The manifest agy's own auto-updater reads (URL from the binary itself).
+    latest_version_url = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json"
     models = [
         {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash", "efforts": ["low", "medium", "high"], "group": "Gemini Models"},
         {"id": "gemini-4-argon", "label": "Gemini 4 Argon", "efforts": ["low", "medium", "high"], "orchestrator": "gemini-pro-orchestrator-g1-pro", "group": "Gemini 4 Argon"},

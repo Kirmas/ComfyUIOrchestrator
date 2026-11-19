@@ -765,6 +765,25 @@ export interface AgentLimits {
   windows: AgentLimitWindow[];
 }
 
+// agent_runner/cli_updates.py: installed vs newest version of an agent CLI.
+export interface AgentCliUpdateResult {
+  at: number;
+  ok: boolean;
+  exit_code: number;
+  before: string | null;
+  after: string | null;
+  output: string;
+}
+export interface AgentCliVersion {
+  provider: AgentProviderId;
+  installed: string | null;
+  latest: string | null;
+  outdated: boolean;
+  updating: boolean;
+  last_update: AgentCliUpdateResult | null;
+  busy_chats: number;
+}
+
 // Night mode (agent_runner/night.py): one session per night, decided as a
 // whole in the morning.
 export interface NightReportSummary {

@@ -4,6 +4,8 @@ import type {
   AgentChatKind,
   AgentImageUpload,
   AgentLimits,
+  AgentCliUpdateResult,
+  AgentCliVersion,
   AgentProviderId,
   AgentProviderInfo,
   NightStatus,
@@ -395,6 +397,10 @@ export const agentChatsApi = {
   kinds: () => api.get<{ kinds: AgentChatKind[] }>("/api/agent-chats/kinds"),
   limits: () => api.get<Record<string, AgentLimits>>("/api/agent-chats/limits"),
   refreshLimits: (provider: AgentProviderId) => api.post<Record<string, AgentLimits>>(`/api/agent-chats/limits/${provider}`),
+  cliVersions: (refresh = false) =>
+    api.get<{ providers: AgentCliVersion[] }>(`/api/agent-chats/cli-versions${refresh ? "?refresh=true" : ""}`),
+  updateCli: (provider: AgentProviderId) =>
+    api.post<AgentCliVersion & AgentCliUpdateResult>(`/api/agent-chats/cli-versions/${provider}/update`),
   setEffort: (id: string, effort: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { effort }),
   setFastMode: (id: string, fastMode: boolean) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { fast_mode: fastMode }),
   setOrchestratorMode: (id: string, orchestratorMode: boolean) =>

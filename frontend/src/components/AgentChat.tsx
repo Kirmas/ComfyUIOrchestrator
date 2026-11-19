@@ -7,6 +7,7 @@ import { AgentProviderIcon } from "./AgentProviderIcon";
 import { NightPanel } from "./NightPanel";
 import type {
   AgentChat as Chat,
+  AgentCliVersion,
   AgentLimits,
   AgentLimitWindow,
   AgentModel,
@@ -37,6 +38,9 @@ const lastEffortKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAge
 const lastFastKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentFast:${provider}`;
 const lastOrchestratorKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentOrchestrator:${provider}`;
 const LIMITS_POLL_MS = 30000;
+// Each read runs `<cli> --version` for every CLI; the newest version is cached
+// an hour in the runner anyway.
+const CLI_VERSIONS_POLL_MS = 10 * 60 * 1000;
 // The CLI's own picker calls xhigh "Extra"; ids stay what --effort takes.
 // Family + version of a model, for showing only the newest of each family.
 // Claude aliases carry the exact model they resolve to; a date suffix
@@ -389,6 +393,7 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
           </>
         )}
         <LimitsPanel providers={providers} />
+        <CliVersionsPanel providers={providers} />
         <div className={cx("agent-chat-item", handoffRulesSelected && "active")} onClick={() => select(HANDOFF_RULES_ID)}>
           <span className="agent-chat-title">⚙️ {t("agent.handoff.rules")}</span>
         </div>
@@ -548,6 +553,83 @@ function LimitsPanel({ providers }: { providers: AgentProviderInfo[] }) {
               </div>
             ))}
             {reading && <div className="node-cell-hint">{t("agent.limits.asOf", { ago: agoText(t, reading.updated_at) })}</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Installed vs newest version of each agent CLI, with a button running the
+ * CLI's own `update` (agent_runner/cli_updates.py). */
+function CliVersionsPanel({ providers }: { providers: AgentProviderInfo[] }) {
+  const t = useT();
+  const [versions, setVersions] = useState<AgentCliVersion[]>([]);
+  const [checking, setChecking] = useState(false);
+  const [updating, setUpdating] = useState<string | null>(null);
+
+  const load = (refresh = false) => agentChatsApi.cliVersions(refresh).then((r) => setVersions(r.providers), () => {});
+
+  useEffect(() => {
+    load();
+    const id = setInterval(() => load(), CLI_VERSIONS_POLL_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  const check = async () => {
+    setChecking(true);
+    await load(true);
+    setChecking(false);
+  };
+
+  const update = async (v: AgentCliVersion, label: string) => {
+    const busyNote = v.busy_chats > 0 ? `\n\n${t("agent.cli.busyWarning", { count: v.busy_chats })}` : "";
+    if (!confirm(t("agent.cli.confirm", { provider: label, from: v.installed ?? "?", to: v.latest ?? "?" }) + busyNote)) return;
+    setUpdating(v.provider);
+    try {
+      const res = await agentChatsApi.updateCli(v.provider);
+      setVersions((prev) => prev.map((p) => (p.provider === v.provider ? res : p)));
+      if (!res.ok) alert(t("agent.cli.failed", { code: res.exit_code }) + "\n\n" + res.output.slice(-1500));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUpdating(null);
+    }
+  };
+
+  if (versions.length === 0) return null;
+  return (
+    <div className="agent-limits">
+      <div className="agent-limits-head">
+        <span>{t("agent.cli.title")}</span>
+        <button className="agent-chat-delete" title={t("agent.cli.check")} disabled={checking} onClick={check}>
+          {checking ? "…" : "↻"}
+        </button>
+      </div>
+      {versions.map((v) => {
+        const label = providers.find((p) => p.id === v.provider)?.label ?? v.provider;
+        const busy = updating === v.provider || v.updating;
+        return (
+          <div key={v.provider} className="agent-cli-row">
+            <AgentProviderIcon provider={v.provider} size={13} />
+            <span className={cx("agent-cli-version", v.outdated && "outdated")}>
+              {v.installed ?? "?"}
+              {v.outdated && ` → ${v.latest}`}
+            </span>
+            {v.outdated || busy ? (
+              <button className="agent-cli-update" disabled={busy} onClick={() => update(v, label)}>
+                {busy ? t("agent.cli.updating") : t("agent.cli.update")}
+              </button>
+            ) : (
+              <span className="node-cell-hint" title={v.latest ? undefined : t("agent.cli.unknownLatest")}>
+                {v.latest ? "✓" : "?"}
+              </span>
+            )}
+            {v.last_update && !v.last_update.ok && !busy && (
+              <span className="agent-cli-failed" title={v.last_update.output.slice(-1500)}>
+                {t("agent.cli.failed", { code: v.last_update.exit_code })}
+              </span>
+            )}
           </div>
         );
       })}

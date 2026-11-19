@@ -57,6 +57,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import cli_updates
 import night as night_ops
 from night import NightState
 from providers import DATA_DIR, DEFAULT_PROVIDER, IMAGE_TYPES, PROVIDERS, SetupError, TurnSpec, limits, provider_of, snippet
@@ -1052,6 +1053,35 @@ async def refresh_limits(request: Request):
     return JSONResponse(limits.data)
 
 
+async def cli_versions(request: Request):
+    """Installed vs newest version of every installed CLI (cli_updates.py),
+    plus which chats are mid-turn on each -- an update doesn't reach them
+    until their next process, which the page says before updating."""
+    refresh = request.query_params.get("refresh") == "1"
+    installed = [p for p in PROVIDERS.values() if p.available]
+    out = await asyncio.gather(*(cli_updates.status(p, refresh) for p in installed))
+    for item in out:
+        item["busy_chats"] = sum(1 for c in chats.values() if provider_of(c).id == item["provider"] and c.meta.get("status") in BUSY)
+    return JSONResponse({"providers": out})
+
+
+async def update_cli(request: Request):
+    provider = PROVIDERS.get(request.path_params["provider"])
+    if not provider or not provider.available:
+        return JSONResponse({"detail": "Unknown or not installed provider"}, status_code=404)
+    try:
+        result = await cli_updates.run_update(provider)
+    except RuntimeError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=409)
+    # The model catalog may have changed with the version; skip the throttle.
+    provider._models_refresh_after = 0
+    try:
+        await provider.refresh_models()
+    except Exception as exc:  # noqa: BLE001 -- the update itself already happened
+        print(f"refresh_models after update ({provider.id}): {exc!r}", flush=True)
+    return JSONResponse({**result, **await cli_updates.status(provider)})
+
+
 async def delete_chat(request: Request):
     chat = get_chat(request)
     if not chat:
@@ -1972,6 +2002,8 @@ routes = [
     Route("/kinds", list_kinds, methods=["GET"]),
     Route("/limits", get_limits, methods=["GET"]),
     Route("/limits/{provider}", refresh_limits, methods=["POST"]),
+    Route("/cli-versions", cli_versions, methods=["GET"]),
+    Route("/cli-versions/{provider}/update", update_cli, methods=["POST"]),
     Route("/reports", create_report, methods=["POST"]),
     Route("/reports/{report_id}", read_report, methods=["GET"]),
     Route("/handoff/rules", get_handoff_rules_route, methods=["GET"]),

@@ -3440,6 +3440,35 @@ th, td {
   cursor: pointer;
 }
 
+.agent-cli-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.agent-cli-version.outdated {
+  color: var(--warning, #e0a030);
+}
+
+.agent-cli-update {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 1px 8px;
+}
+
+.agent-cli-row > .node-cell-hint {
+  margin-left: auto;
+}
+
+.agent-cli-failed {
+  flex-basis: 100%;
+  color: var(--danger, #e05050);
+  font-size: 11px;
+  cursor: help;
+}
+
 .agent-limit-group {
   margin-top: 8px;
   padding-top: 6px;

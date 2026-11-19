@@ -160,6 +160,18 @@ async def refresh_limits(provider: str):
     return await _call("POST", f"/limits/{provider}", timeout=httpx.Timeout(120.0))
 
 
+@router.get("/cli-versions")
+async def cli_versions(refresh: bool = False):
+    """Installed vs newest version of each agent CLI (agent_runner/cli_updates.py)."""
+    return await _call("GET", "/cli-versions", params={"refresh": "1"} if refresh else None)
+
+
+@router.post("/cli-versions/{provider}/update")
+async def update_cli(provider: str):
+    """Run that CLI's own `update` command; can take minutes (a download)."""
+    return await _call("POST", f"/cli-versions/{provider}/update", timeout=httpx.Timeout(660.0))
+
+
 @router.get("/handoff-rules")
 async def get_handoff_rules():
     return await _call("GET", "/handoff/rules")
