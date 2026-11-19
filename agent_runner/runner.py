@@ -400,6 +400,7 @@ def public_meta(chat: Chat) -> dict:
             chat.meta["context_tokens"] = ctx
     m["context_tokens"] = ctx
     m["context_window"] = provider.get_context_window(chat)
+    m["deletes_at"] = done_chat_deadline(chat)
     return m
 
 
@@ -1109,20 +1110,23 @@ async def delete_chat(request: Request):
 DONE_CHAT_TTL = 30 * 24 * 3600
 
 
-def done_chat_expired(chat: Chat, at: float) -> bool:
+def done_chat_deadline(chat: Chat) -> float | None:
+    """When the sweeper will delete this chat, or None if it is not due at all."""
     meta = chat.meta
     if not meta.get("done") or meta.get("status") in BUSY or meta.get("pending_handoff"):
-        return False
+        return None
     if meta.get("origin") == "agent" and meta.get("stage") not in (None, "done"):
-        return False
+        return None
     if night.session is not None and chat.id in night.session["reports"]:
-        return False
-    if "done_at" not in meta:
-        # Archived before done_at existed: date it by its last message.
-        meta["done_at"] = meta.get("updated_at", at)
-        chat.save_meta()
-    last = max(meta.get("done_at", 0), meta.get("viewed_at", 0), meta.get("updated_at", 0))
-    return at - last > DONE_CHAT_TTL
+        return None
+    # Archived before done_at existed: dated by its last message.
+    done_at = meta.get("done_at", meta.get("updated_at", 0))
+    return max(done_at, meta.get("viewed_at", 0), meta.get("updated_at", 0)) + DONE_CHAT_TTL
+
+
+def done_chat_expired(chat: Chat, at: float) -> bool:
+    deadline = done_chat_deadline(chat)
+    return deadline is not None and at > deadline
 
 
 async def done_chat_sweeper() -> None:

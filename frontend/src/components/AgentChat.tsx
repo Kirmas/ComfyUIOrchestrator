@@ -328,6 +328,11 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
         <AgentProviderIcon provider={c.provider} size={13} />{" "}
         {c.title || t("agent.untitled")}
       </span>
+      {c.done && c.deletes_at != null && (
+        <span className="agent-chat-ttl" title={t("agent.doneTtlHint")}>
+          🗑 {t("agent.daysLeft", { count: Math.max(0, Math.ceil((c.deletes_at * 1000 - Date.now()) / 86_400_000)) })}
+        </span>
+      )}
       <button
         className="agent-chat-delete"
         title={c.done ? t("agent.undone") : t("agent.markDone")}

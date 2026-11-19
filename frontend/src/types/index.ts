@@ -598,6 +598,8 @@ export interface AgentChat {
   context_window?: number | null;
   // Filed away by the person: hidden from the list unless "show done" is on.
   done?: boolean;
+  // When the runner's sweeper will delete it (unix seconds); null if never.
+  deletes_at?: number | null;
   // Handoff state (docs/agent-handoff/stage1-brief.md)
   handed_off_to?: {
     chat_id: string;

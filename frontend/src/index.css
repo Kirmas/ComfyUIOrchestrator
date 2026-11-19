@@ -2890,6 +2890,13 @@ th, td {
   opacity: 0.55;
 }
 
+.agent-chat-ttl {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
 .agent-show-done {
   display: flex;
   align-items: center;
