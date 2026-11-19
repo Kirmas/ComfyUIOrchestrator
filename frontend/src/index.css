@@ -3274,6 +3274,35 @@ th, td {
     display: inline-block;
   }
 
+  /* Row 1: back, title, status. Row 2: the per-chat controls, wrapping as needed. */
+  .agent-header {
+    flex-wrap: wrap;
+    row-gap: 6px;
+    padding: 6px 10px;
+  }
+
+  .agent-header-title {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .agent-header > .node-cell-hint {
+    white-space: nowrap;
+  }
+
+  .agent-header-controls {
+    margin-left: 0;
+    width: 100%;
+    flex-wrap: wrap;
+    flex-shrink: 1;
+    align-items: center;
+  }
+
+  .agent-header-controls .agent-model {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
   .agent-msg,
   .agent-tool {
     max-width: 100%;
