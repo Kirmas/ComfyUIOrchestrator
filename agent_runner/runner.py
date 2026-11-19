@@ -982,6 +982,11 @@ async def update_chat(request: Request):
     done = body.get("done")
     if done is not None and bool(done) != bool(chat.meta.get("done")):
         chat.meta["done"] = bool(done)
+        if done:
+            chat.meta["done_at"] = now()
+        else:
+            chat.meta.pop("done_at", None)
+            chat.meta.pop("viewed_at", None)
         chat.save_meta()
     provider = provider_of(chat)
     model = body.get("model")
@@ -1082,16 +1087,54 @@ async def update_cli(request: Request):
     return JSONResponse({**result, **await cli_updates.status(provider)})
 
 
-async def delete_chat(request: Request):
-    chat = get_chat(request)
-    if not chat:
-        return JSONResponse({"detail": "Chat not found"}, status_code=404)
+async def remove_chat(chat: Chat) -> None:
     await stop_chat(chat)
     if chat.task:
         await asyncio.gather(chat.task, return_exceptions=True)
     chats.pop(chat.id, None)
     shutil.rmtree(chat.dir, ignore_errors=True)
+
+
+async def delete_chat(request: Request):
+    chat = get_chat(request)
+    if not chat:
+        return JSONResponse({"detail": "Chat not found"}, status_code=404)
+    await remove_chat(chat)
     return Response(status_code=204)
+
+
+# A done (archived) chat nobody has opened or written to for this long is
+# deleted for good. Opening it counts (events() stamps viewed_at); a new
+# message takes it out of "done" altogether.
+DONE_CHAT_TTL = 30 * 24 * 3600
+
+
+def done_chat_expired(chat: Chat, at: float) -> bool:
+    meta = chat.meta
+    if not meta.get("done") or meta.get("status") in BUSY or meta.get("pending_handoff"):
+        return False
+    if meta.get("origin") == "agent" and meta.get("stage") not in (None, "done"):
+        return False
+    if night.session is not None and chat.id in night.session["reports"]:
+        return False
+    if "done_at" not in meta:
+        # Archived before done_at existed: date it by its last message.
+        meta["done_at"] = meta.get("updated_at", at)
+        chat.save_meta()
+    last = max(meta.get("done_at", 0), meta.get("viewed_at", 0), meta.get("updated_at", 0))
+    return at - last > DONE_CHAT_TTL
+
+
+async def done_chat_sweeper() -> None:
+    while True:
+        try:
+            at = now()
+            for chat in [c for c in chats.values() if done_chat_expired(c, at)]:
+                print(f"Deleting archived chat {chat.id} (untouched for 30 days)", flush=True)
+                await remove_chat(chat)
+        except Exception as exc:  # noqa: BLE001 -- retry next hour
+            print(f"done_chat_sweeper: {exc!r}", flush=True)
+        await asyncio.sleep(3600)
 
 
 # The API's own per-image cap is 5 MB; the page downscales long before that.
@@ -1932,6 +1975,9 @@ async def events(request: Request):
     chat = get_chat(request)
     if not chat:
         return JSONResponse({"detail": "Chat not found"}, status_code=404)
+    if chat.meta.get("done"):
+        chat.meta["viewed_at"] = now()
+        chat.save_meta()
     raw_after = request.headers.get("last-event-id") or request.query_params.get("after") or "0"
     try:
         after = int(raw_after)
@@ -1986,9 +2032,11 @@ async def lifespan(app):
             print(f"recover_outputs ({chat.id}): {exc!r}", flush=True)
     scheduler = asyncio.create_task(report_scheduler())
     limits_poller = asyncio.create_task(limits_scheduler())
+    sweeper = asyncio.create_task(done_chat_sweeper())
     yield
     scheduler.cancel()
     limits_poller.cancel()
+    sweeper.cancel()
 
 
 routes = [

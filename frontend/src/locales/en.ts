@@ -133,6 +133,7 @@ export const en = {
   "agent.markDone": "Mark done: hide from the list (a new message brings it back)",
   "agent.undone": "Not done: back into the list",
   "agent.showDone": "Show done chats ({count})",
+  "agent.doneTtlHint": "A done chat left unopened for 30 days is deleted automatically",
   "agent.notify.enable": "🔕 Enable notifications",
   "agent.notify.enabled": "🔔 Notifications on",
   "agent.notify.unsupported": "This browser doesn't support push notifications.",

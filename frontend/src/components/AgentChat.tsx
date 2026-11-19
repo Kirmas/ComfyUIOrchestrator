@@ -398,7 +398,7 @@ export function AgentChat({ projectId }: { projectId: string | null }) {
           <span className="agent-chat-title">⚙️ {t("agent.handoff.rules")}</span>
         </div>
         {doneCount > 0 && (
-          <label className="agent-show-done">
+          <label className="agent-show-done" title={t("agent.doneTtlHint")}>
             <input type="checkbox" checked={showDone} onChange={(e) => toggleShowDone(e.target.checked)} />
             {t("agent.showDone", { count: doneCount })}
           </label>

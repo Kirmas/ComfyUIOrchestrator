@@ -130,6 +130,7 @@ export const uk: Record<TKey, string> = {
   "agent.markDone": "Позначити завершеним: сховати зі списку (нове повідомлення поверне його)",
   "agent.undone": "Не завершено: повернути у список",
   "agent.showDone": "Показувати завершені ({count})",
+  "agent.doneTtlHint": "Завершений чат, який не відкривали 30 днів, видаляється автоматично",
   "agent.notify.enable": "🔕 Увімкнути сповіщення",
   "agent.notify.enabled": "🔔 Сповіщення увімкнено",
   "agent.notify.unsupported": "Цей браузер не підтримує push-сповіщення.",
