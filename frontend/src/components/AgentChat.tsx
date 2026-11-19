@@ -36,6 +36,38 @@ const lastEffortKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAge
 const lastFastKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentFast:${provider}`;
 const LIMITS_POLL_MS = 30000;
 // The CLI's own picker calls xhigh "Extra"; ids stay what --effort takes.
+function codexModelRank(id: string) {
+  const match = /^gpt-(\d+(?:\.\d+)*)-(.+)$/.exec(id);
+  return match && { family: match[2], version: match[1] };
+}
+
+// Family strengths and relative Standard credit rates for the current lineup:
+// https://learn.chatgpt.com/docs/models and https://learn.chatgpt.com/docs/pricing
+function codexFamilyHint(id: string) {
+  switch (codexModelRank(id)?.family) {
+    case "astra": return "agent.codexFamily.astra";
+    case "sol": return "agent.codexFamily.sol";
+    case "terra": return "agent.codexFamily.terra";
+    case "luna": return "agent.codexFamily.luna";
+  }
+}
+
+function latestCodexModels(models: AgentProviderInfo["models"]) {
+  const latest = new Map<string, string>();
+  for (const model of models) {
+    const rank = codexModelRank(model.id);
+    if (!rank) continue;
+    const previous = latest.get(rank.family);
+    if (!previous || rank.version.localeCompare(previous, undefined, { numeric: true }) > 0) {
+      latest.set(rank.family, rank.version);
+    }
+  }
+  return models.filter((model) => {
+    const rank = codexModelRank(model.id);
+    return !rank || latest.get(rank.family) === rank.version;
+  });
+}
+
 const EFFORT_LABELS: Record<string, string> = { xhigh: "xhigh (Extra)", ultracode: "ultracode ✦" };
 const LIMIT_LABELS: Record<string, TKey> = {
   five_hour: "agent.limits.fiveHour",
@@ -930,6 +962,7 @@ export function ChatView({
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [sending, setSending] = useState(false);
+  const [legacyModelsChatId, setLegacyModelsChatId] = useState<string | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1175,11 +1208,53 @@ export function ChatView({
           </select>
         )}
         {provider && (() => {
-          const effectiveRequestedModel = provider.models.some((m) => m.id === chat.requested_model)
+          const effectiveRequestedModel = provider.id === "codex" || provider.models.some((m) => m.id === chat.requested_model)
             ? chat.requested_model
             : (provider.models.find((m) => chat.requested_model?.startsWith(m.id))?.id ?? chat.requested_model);
           const selectedModel = provider.models.find((m) => m.id === effectiveRequestedModel);
           const modelEfforts = selectedModel?.efforts ?? provider.efforts;
+          const latestIds = provider.id === "codex"
+            ? new Set(latestCodexModels(provider.models).map((m) => m.id))
+            : null;
+          const visibleModels = provider.models.filter((m) =>
+            !latestIds || latestIds.has(m.id) || m.id === effectiveRequestedModel,
+          );
+          const visibleIds = new Set(visibleModels.map((m) => m.id));
+          const legacyModels = provider.models.filter((m) => !visibleIds.has(m.id));
+          const showLegacyModels = legacyModelsChatId === chat.id;
+          const modelTitle = chat.model ? t("agent.lastRanOn", { model: chat.model }) : t("agent.modelHint");
+          const selectModel = async (model: string) => {
+            localStorage.setItem(lastModelKey(chat.provider ?? "claude"), model);
+            await agentChatsApi.setModel(chat.id, model);
+            const targetModel = provider.models.find((m) => m.id === model);
+            const targetEfforts = targetModel?.efforts ?? provider.efforts;
+            if (chat.effort && targetEfforts.length > 0 && !targetEfforts.includes(chat.effort)) {
+              const newEffort = targetEfforts.includes("medium") ? "medium" : targetEfforts[0];
+              localStorage.setItem(lastEffortKey(chat.provider ?? "claude"), newEffort);
+              await agentChatsApi.setEffort(chat.id, newEffort);
+            }
+            onChanged();
+          };
+          const codexOption = (id: string, label: string) => {
+            const hint = codexFamilyHint(id);
+            return (
+              <button
+                key={id}
+                type="button"
+                className="agent-codex-option"
+                aria-pressed={id === effectiveRequestedModel}
+                onClick={(event) => {
+                  const picker = event.currentTarget.closest("details");
+                  picker?.querySelector("summary")?.focus();
+                  if (picker) picker.open = false;
+                  if (id !== effectiveRequestedModel) void selectModel(id);
+                }}
+              >
+                <span>{label}</span>
+                {hint && <small>{t(hint)}</small>}
+              </button>
+            );
+          };
           return (
             <>
               {modelEfforts.length > 0 && (
@@ -1217,32 +1292,48 @@ export function ChatView({
                   ⚡ {t("agent.fast")}
                 </button>
               )}
-              {provider.models.length > 0 && (
+              {provider.models.length > 0 && (provider.id === "codex" ? (
+                <details
+                  key={chat.id}
+                  className="agent-model agent-codex-picker"
+                  onBlur={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape" && event.currentTarget.open) {
+                      event.stopPropagation();
+                      event.currentTarget.querySelector("summary")?.focus();
+                      event.currentTarget.open = false;
+                    }
+                  }}
+                >
+                  <summary title={modelTitle}>{selectedModel?.label ?? effectiveRequestedModel ?? provider.default}</summary>
+                  <div className="agent-codex-options">
+                    {!selectedModel && effectiveRequestedModel && codexOption(effectiveRequestedModel, effectiveRequestedModel)}
+                    {visibleModels.map((m) => codexOption(m.id, m.label))}
+                    {legacyModels.length > 0 && (
+                      <button
+                        type="button"
+                        className="agent-codex-option"
+                        aria-expanded={showLegacyModels}
+                        onClick={() => setLegacyModelsChatId(showLegacyModels ? null : chat.id)}
+                      >
+                        {t(showLegacyModels ? "agent.hideLegacyModels" : "agent.showLegacyModels")}
+                      </button>
+                    )}
+                    {showLegacyModels && legacyModels.map((m) => codexOption(m.id, m.label))}
+                  </div>
+                </details>
+              ) : (
                 <select
                   className="agent-model"
                   value={effectiveRequestedModel}
-                  title={chat.model ? t("agent.lastRanOn", { model: chat.model }) : t("agent.modelHint")}
-                  onChange={async (e) => {
-                    const model = e.target.value;
-                    localStorage.setItem(lastModelKey(chat.provider ?? "claude"), model);
-                    await agentChatsApi.setModel(chat.id, model);
-                    const targetModel = provider.models.find((m) => m.id === model);
-                    const targetEfforts = targetModel?.efforts ?? provider.efforts;
-                    if (chat.effort && targetEfforts.length > 0 && !targetEfforts.includes(chat.effort)) {
-                      const newEffort = targetEfforts.includes("medium") ? "medium" : targetEfforts[0];
-                      localStorage.setItem(lastEffortKey(chat.provider ?? "claude"), newEffort);
-                      await agentChatsApi.setEffort(chat.id, newEffort);
-                    }
-                    onChanged();
-                  }}
+                  title={modelTitle}
+                  onChange={(event) => void selectModel(event.target.value)}
                 >
-                  {provider.models.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label}
-                    </option>
-                  ))}
+                  {provider.models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
                 </select>
-              )}
+              ))}
             </>
           );
         })()}

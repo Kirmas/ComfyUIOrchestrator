@@ -1100,8 +1100,8 @@ class CodexProvider(Provider):
         limits.update(self.id, status, windows)
         return True
 
-    async def probe_limits(self):
-        """app-server can read account limits without a model turn or tokens."""
+    async def _catalog_request(self, method, params=None):
+        """Read app-server metadata without starting a model turn."""
         proc = await asyncio.create_subprocess_exec(
             self.binary, "app-server", "--stdio", "-c", 'sandbox_mode="read-only"',
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -1109,23 +1109,35 @@ class CodexProvider(Provider):
         )
         try:
             send_line(proc, {"id": "init", "method": "initialize", "params": {
-                "clientInfo": {"name": "comfy_orchestrator_limits", "version": "1"},
+                "clientInfo": {"name": "comfy_orchestrator_catalog", "version": "1"},
             }})
             await proc.stdin.drain()
-            async with asyncio.timeout(30):
+            pages = []
+            cursors = set()
+            async with asyncio.timeout(10):
                 async for line in proc.stdout:
                     event = json.loads(line)
+                    if event.get("id") not in ("init", "metadata"):
+                        continue
                     if event.get("error"):
-                        raise RuntimeError(event["error"].get("message", "Codex limits request failed"))
+                        raise RuntimeError(event["error"].get("message", "Codex metadata request failed"))
                     if event.get("id") == "init":
                         send_line(proc, {"method": "initialized"})
-                        send_line(proc, {"id": "limits", "method": "account/rateLimits/read"})
-                        await proc.stdin.drain()
-                    elif event.get("id") == "limits":
-                        if self.record_limits((event.get("result") or {}).get("rateLimits") or {}):
-                            return
-                        break
-            raise RuntimeError("Codex returned no plan limits; previous reading retained.")
+                    else:
+                        result = event["result"]
+                        if method != "model/list":
+                            return result
+                        pages.extend(result["data"])
+                        cursor = result.get("nextCursor")
+                        if not cursor:
+                            return {"data": pages}
+                        if cursor in cursors:
+                            raise RuntimeError("Codex repeated a model catalog cursor")
+                        cursors.add(cursor)
+                        params = {**(params or {}), "cursor": cursor}
+                    send_line(proc, {"id": "metadata", "method": method, "params": params or {}})
+                    await proc.stdin.drain()
+            raise RuntimeError("Codex returned no metadata")
         finally:
             proc.stdin.close()
             try:
@@ -1133,6 +1145,44 @@ class CodexProvider(Provider):
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
+
+    async def refresh_models(self):
+        if not hasattr(self, "_models_lock"):
+            self._models_lock = asyncio.Lock()
+        async with self._models_lock:
+            if time.monotonic() < getattr(self, "_models_refresh_after", 0):
+                return
+            try:
+                if not self.available:
+                    return
+                result = await self._catalog_request("model/list", {"includeHidden": False})
+                catalog = []
+                for model in sorted(result["data"], key=lambda m: not m.get("isDefault", False)):
+                    if model.get("hidden"):
+                        continue
+                    model_id = model["model"]
+                    if model_id in {m["id"] for m in catalog}:
+                        continue
+                    catalog.append({
+                        "id": model_id, "label": model["displayName"],
+                        "efforts": [e["reasoningEffort"] for e in model["supportedReasoningEfforts"]],
+                    })
+                if not catalog:
+                    raise ValueError("empty model catalog")
+                self.models = catalog
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError, asyncio.TimeoutError) as exc:
+                print(f"Codex model catalog unavailable; retaining previous list: {exc}", flush=True)
+            finally:
+                self._models_refresh_after = time.monotonic() + 60
+
+    def model_for(self, meta):
+        # Catalog changes must never silently switch an existing chat's model.
+        return meta.get("requested_model") or self.default_model
+
+    async def probe_limits(self):
+        result = await self._catalog_request("account/rateLimits/read")
+        if not self.record_limits(result.get("rateLimits") or {}):
+            raise RuntimeError("Codex returned no plan limits; previous reading retained.")
 
     @staticmethod
     def _tool_call(item: dict) -> dict:

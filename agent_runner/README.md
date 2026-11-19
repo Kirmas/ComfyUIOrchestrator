@@ -131,8 +131,14 @@ Antigravity:
   (429 / RESOURCE_EXHAUSTED / `Resets in ...`), `record_quota_error` records that
   model window with utilization 1.0 and the parsed reset time.
 
-Codex (verified with CLI 0.163.0):
+Codex (catalog discovery verified with CLI 0.170.0):
 
+- The model picker reads `model/list` from the installed CLI when `/models`
+  is requested, cached for 60 seconds (including failed attempts). Pagination,
+  visible models, display names, reasoning levels and the catalog default are
+  respected. Failed/empty responses retain the previous list, initially the
+  bundled fallback. Existing chats keep their explicitly selected model even
+  if it disappears from the picker. No model turn is started.
 - Effort is passed as `config.model_reasoning_effort` on thread start/resume.
   Each model advertises its own `efforts`: Sol/Astra offer `low`, `medium`,
   `high`, `xhigh`, `max`, `ultra`; Luna ends at `max`. These are the exact

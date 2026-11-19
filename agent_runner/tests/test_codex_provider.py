@@ -24,6 +24,46 @@ class CodexProtocolTests(unittest.IsolatedAsyncioTestCase):
             turn_state={}, save_meta=Mock(), emit=AsyncMock(),
         )
 
+    async def test_catalog_refresh_default_efforts_and_existing_chat(self):
+        self.provider._catalog_request = AsyncMock(return_value={"data": [
+            {"model": "gpt-6.1-sol", "displayName": "Old Sol", "supportedReasoningEfforts": []},
+            {"model": "hidden", "hidden": True},
+            {"model": "gpt-6.2-sol", "displayName": "GPT-6.2 Sol", "isDefault": True,
+             "supportedReasoningEfforts": [{"reasoningEffort": "high"}, {"reasoningEffort": "ultra"}]},
+        ]})
+        await self.provider.refresh_models()
+        self.assertEqual(self.provider.default_model, "gpt-6.2-sol")
+        self.assertEqual(self.provider.efforts_for("gpt-6.2-sol"), ["high", "ultra"])
+        self.assertNotIn("hidden", self.provider.model_ids)
+        self.assertEqual(self.provider.model_for({"requested_model": "retired-model"}), "retired-model")
+        await self.provider.refresh_models()
+        self.provider._catalog_request.assert_awaited_once()
+
+    async def test_catalog_failure_retains_previous_models(self):
+        before = self.provider.models
+        self.provider._catalog_request = AsyncMock(side_effect=RuntimeError("offline"))
+        await self.provider.refresh_models()
+        self.assertEqual(self.provider.models, before)
+
+    async def test_catalog_protocol_pagination_and_cleanup(self):
+        proc = SimpleNamespace(stdin=Mock(), stdout=asyncio.StreamReader(), wait=AsyncMock())
+        proc.stdin.drain = AsyncMock()
+        for event in [
+            {"method": "notification"},
+            {"id": "init", "result": {}},
+            {"id": "metadata", "result": {"data": [{"model": "first"}], "nextCursor": "next"}},
+            {"id": "metadata", "result": {"data": [{"model": "second"}], "nextCursor": None}},
+        ]:
+            proc.stdout.feed_data((json.dumps(event) + "\n").encode())
+        proc.stdout.feed_eof()
+        with patch.object(providers.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)):
+            result = await self.provider._catalog_request("model/list", {"includeHidden": False})
+        self.assertEqual([m["model"] for m in result["data"]], ["first", "second"])
+        sent = [json.loads(c.args[0]) for c in proc.stdin.write.call_args_list]
+        self.assertEqual(sent[-1]["params"]["cursor"], "next")
+        proc.stdin.close.assert_called_once()
+        proc.wait.assert_awaited_once()
+
     def messages(self):
         return [json.loads(c.args[0]) for c in self.proc.stdin.write.call_args_list]
 
@@ -318,7 +358,7 @@ class CodexProtocolTests(unittest.IsolatedAsyncioTestCase):
         proc = SimpleNamespace(stdin=Mock(), stdout=asyncio.StreamReader(), wait=AsyncMock(return_value=0))
         proc.stdin.drain = AsyncMock()
         proc.stdout.feed_data((json.dumps({'id': 'init', 'result': {}}) + '\n').encode())
-        proc.stdout.feed_data((json.dumps({'id': 'limits', 'result': {'rateLimits': {
+        proc.stdout.feed_data((json.dumps({'id': 'metadata', 'result': {'rateLimits': {
             'primary': {'usedPercent': 20, 'windowDurationMins': 300, 'resetsAt': 123},
         }}}) + '\n').encode())
         proc.stdout.feed_eof()

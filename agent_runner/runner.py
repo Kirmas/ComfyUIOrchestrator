@@ -1018,6 +1018,7 @@ async def update_chat(request: Request):
 
 
 async def list_models(request: Request):
+    await PROVIDERS["codex"].refresh_models()
     claude = PROVIDERS[DEFAULT_PROVIDER]
     # models/default/permission_modes: the shape before providers existed
     # (a page that hasn't reloaded yet still reads them).
