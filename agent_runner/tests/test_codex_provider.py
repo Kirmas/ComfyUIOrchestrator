@@ -33,6 +33,7 @@ class CodexProtocolTests(unittest.IsolatedAsyncioTestCase):
         ]})
         await self.provider.refresh_models()
         self.assertEqual(self.provider.default_model, "gpt-6.2-sol")
+        self.assertEqual(self.provider.context_window("gpt-6.2-sol"), 258_400)  # unknown to the table
         self.assertEqual(self.provider.efforts_for("gpt-6.2-sol"), ["high", "ultra"])
         self.assertNotIn("hidden", self.provider.model_ids)
         self.assertEqual(self.provider.model_for({"requested_model": "retired-model"}), "retired-model")

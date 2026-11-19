@@ -9,6 +9,7 @@ import type {
   AgentChat as Chat,
   AgentLimits,
   AgentLimitWindow,
+  AgentModel,
   AgentChatKind,
   AgentEvent,
   AgentImageUpload,
@@ -36,26 +37,35 @@ const lastEffortKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAge
 const lastFastKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentFast:${provider}`;
 const LIMITS_POLL_MS = 30000;
 // The CLI's own picker calls xhigh "Extra"; ids stay what --effort takes.
-function codexModelRank(id: string) {
-  const match = /^gpt-(\d+(?:\.\d+)*)-(.+)$/.exec(id);
-  return match && { family: match[2], version: match[1] };
+// Family + version of a model, for showing only the newest of each family.
+// Claude aliases carry the exact model they resolve to; a date suffix
+// (claude-haiku-4-5-20251001) is a snapshot, not a version.
+function modelRank(model: AgentModel) {
+  const codex = /^gpt-(\d+(?:\.\d+)*)-(.+)$/.exec(model.id);
+  if (codex) return { family: codex[2], version: codex[1] };
+  const claude = /^claude-([a-z]+)-(\d+(?:-\d+)?)(?:-\d{8})?$/.exec(model.resolved ?? model.id);
+  return claude && { family: claude[1], version: claude[2].replace("-", ".") };
 }
 
-// Family strengths and relative Standard credit rates for the current lineup:
-// https://learn.chatgpt.com/docs/models and https://learn.chatgpt.com/docs/pricing
-function codexFamilyHint(id: string) {
-  switch (codexModelRank(id)?.family) {
-    case "astra": return "agent.codexFamily.astra";
-    case "sol": return "agent.codexFamily.sol";
-    case "terra": return "agent.codexFamily.terra";
-    case "luna": return "agent.codexFamily.luna";
-  }
-}
+// Family strengths. Codex: relative Standard credit rates for the current
+// lineup, https://learn.chatgpt.com/docs/models and .../docs/pricing
+const FAMILY_HINTS: Record<string, TKey> = {
+  astra: "agent.modelFamily.astra",
+  sol: "agent.modelFamily.sol",
+  terra: "agent.modelFamily.terra",
+  luna: "agent.modelFamily.luna",
+  fable: "agent.modelFamily.fable",
+  opus: "agent.modelFamily.opus",
+  sonnet: "agent.modelFamily.sonnet",
+  haiku: "agent.modelFamily.haiku",
+};
 
-function latestCodexModels(models: AgentProviderInfo["models"]) {
+// Newest of each family; several entries of one version (an alias and its
+// pinned id) all stay -- the runner already keeps only the alias.
+function latestModels(models: AgentModel[]) {
   const latest = new Map<string, string>();
   for (const model of models) {
-    const rank = codexModelRank(model.id);
+    const rank = modelRank(model);
     if (!rank) continue;
     const previous = latest.get(rank.family);
     if (!previous || rank.version.localeCompare(previous, undefined, { numeric: true }) > 0) {
@@ -63,7 +73,7 @@ function latestCodexModels(models: AgentProviderInfo["models"]) {
     }
   }
   return models.filter((model) => {
-    const rank = codexModelRank(model.id);
+    const rank = modelRank(model);
     return !rank || latest.get(rank.family) === rank.version;
   });
 }
@@ -1208,16 +1218,13 @@ export function ChatView({
           </select>
         )}
         {provider && (() => {
-          const effectiveRequestedModel = provider.id === "codex" || provider.models.some((m) => m.id === chat.requested_model)
-            ? chat.requested_model
-            : (provider.models.find((m) => chat.requested_model?.startsWith(m.id))?.id ?? chat.requested_model);
+          // The runner already maps a legacy id to what the chat runs on.
+          const effectiveRequestedModel = chat.requested_model;
           const selectedModel = provider.models.find((m) => m.id === effectiveRequestedModel);
           const modelEfforts = selectedModel?.efforts ?? provider.efforts;
-          const latestIds = provider.id === "codex"
-            ? new Set(latestCodexModels(provider.models).map((m) => m.id))
-            : null;
+          const latestIds = new Set(latestModels(provider.models).map((m) => m.id));
           const visibleModels = provider.models.filter((m) =>
-            !latestIds || latestIds.has(m.id) || m.id === effectiveRequestedModel,
+            latestIds.has(m.id) || m.id === effectiveRequestedModel,
           );
           const visibleIds = new Set(visibleModels.map((m) => m.id));
           const legacyModels = provider.models.filter((m) => !visibleIds.has(m.id));
@@ -1235,13 +1242,15 @@ export function ChatView({
             }
             onChanged();
           };
-          const codexOption = (id: string, label: string) => {
-            const hint = codexFamilyHint(id);
+          const modelOption = (model: AgentModel) => {
+            const { id, label } = model;
+            const family = modelRank(model)?.family;
+            const hint = family ? FAMILY_HINTS[family] : undefined;
             return (
               <button
                 key={id}
                 type="button"
-                className="agent-codex-option"
+                className="agent-model-option"
                 aria-pressed={id === effectiveRequestedModel}
                 onClick={(event) => {
                   const picker = event.currentTarget.closest("details");
@@ -1281,7 +1290,7 @@ export function ChatView({
                 <button
                   className={cx("agent-done-toggle", chat.fast_mode && "active")}
                   disabled={!provider.fast_models.includes(chat.requested_model)}
-                  title={provider.fast_models.includes(chat.requested_model) ? t(provider.id === "codex" ? "agent.fastHintCodex" : "agent.fastHint") : t("agent.fastOnlyOn", { models: provider.fast_models.join(", ") })}
+                  title={provider.fast_models.includes(chat.requested_model) ? t(provider.id === "codex" ? "agent.fastHintCodex" : "agent.fastHint") : t("agent.fastOnlyOn", { models: provider.fast_models.map((id) => provider.models.find((m) => m.id === id)?.label ?? id).join(", ") })}
                   onClick={async () => {
                     const on = !chat.fast_mode;
                     localStorage.setItem(lastFastKey(chat.provider ?? "claude"), on ? "1" : "0");
@@ -1292,10 +1301,10 @@ export function ChatView({
                   ⚡ {t("agent.fast")}
                 </button>
               )}
-              {provider.models.length > 0 && (provider.id === "codex" ? (
+              {provider.models.length > 0 && (
                 <details
                   key={chat.id}
-                  className="agent-model agent-codex-picker"
+                  className="agent-model agent-model-picker"
                   onBlur={(event) => {
                     if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
                   }}
@@ -1308,32 +1317,23 @@ export function ChatView({
                   }}
                 >
                   <summary title={modelTitle}>{selectedModel?.label ?? effectiveRequestedModel ?? provider.default}</summary>
-                  <div className="agent-codex-options">
-                    {!selectedModel && effectiveRequestedModel && codexOption(effectiveRequestedModel, effectiveRequestedModel)}
-                    {visibleModels.map((m) => codexOption(m.id, m.label))}
+                  <div className="agent-model-options">
+                    {!selectedModel && effectiveRequestedModel && modelOption({ id: effectiveRequestedModel, label: effectiveRequestedModel })}
+                    {visibleModels.map(modelOption)}
                     {legacyModels.length > 0 && (
                       <button
                         type="button"
-                        className="agent-codex-option"
+                        className="agent-model-option"
                         aria-expanded={showLegacyModels}
                         onClick={() => setLegacyModelsChatId(showLegacyModels ? null : chat.id)}
                       >
                         {t(showLegacyModels ? "agent.hideLegacyModels" : "agent.showLegacyModels")}
                       </button>
                     )}
-                    {showLegacyModels && legacyModels.map((m) => codexOption(m.id, m.label))}
+                    {showLegacyModels && legacyModels.map(modelOption)}
                   </div>
                 </details>
-              ) : (
-                <select
-                  className="agent-model"
-                  value={effectiveRequestedModel}
-                  title={modelTitle}
-                  onChange={(event) => void selectModel(event.target.value)}
-                >
-                  {provider.models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-                </select>
-              ))}
+              )}
             </>
           );
         })()}

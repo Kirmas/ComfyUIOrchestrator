@@ -250,6 +250,43 @@ class Provider:
         """Take a usage-limit reading now (into `limits`); CLIs that can't
         report one leave it be."""
 
+    # -- model catalog ---------------------------------------------------------
+
+    MODELS_TTL = 60
+
+    async def fetch_models(self) -> list[dict] | None:
+        """The installed CLI's own model list, read without a model turn;
+        None = this CLI has no catalog and `models` stays as declared."""
+        return None
+
+    async def refresh_models(self) -> None:
+        """Re-read the catalog at most once a minute (failed attempts count
+        too). A failed/empty read keeps the previous list -- initially the
+        bundled one -- so a broken CLI never empties the picker."""
+        if not hasattr(self, "_models_lock"):
+            self._models_lock = asyncio.Lock()
+        async with self._models_lock:
+            if time.monotonic() < getattr(self, "_models_refresh_after", 0):
+                return
+            try:
+                if not self.available:
+                    return
+                catalog = await self.fetch_models()
+                if catalog is None:
+                    return
+                if not catalog:
+                    raise ValueError("empty model catalog")
+                self.models = catalog
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError, asyncio.TimeoutError) as exc:
+                print(f"{self.label} model catalog unavailable; retaining previous list: {exc}", flush=True)
+            finally:
+                self._models_refresh_after = time.monotonic() + self.MODELS_TTL
+
+    @property
+    def handoff_models(self) -> list[dict]:
+        """The models a handoff may target (the picker can offer more)."""
+        return self.models
+
     def describe(self) -> dict:
         return {
             "id": self.id,
@@ -330,17 +367,15 @@ class ClaudeProvider(Provider):
     label = "Claude"
     binary_env = "CLAUDE_BIN"
     binary_name = "claude"
-    # What a chat can run on: model *families*, as the CLI's own aliases, which
-    # it resolves to the newest model of that family. A CLI update therefore
-    # brings a new Sonnet/Opus/Haiku with no change here -- deliberately, the
-    # user wants "low/mid/high", not to track version numbers. What actually
-    # answered is still visible: the CLI reports the resolved id on every turn.
-    # Every current family takes every level (probed against CLI 2.1.304:
-    # opus/sonnet/haiku all think at xhigh and max); the CLI itself quietly
-    # drops a level a model lacks to "high", so a future family with fewer
-    # only needs its own shorter `efforts` here.
+    # The picker's list is the CLI's own catalog (`fetch_models`): the
+    # family aliases (opus/sonnet/fable/haiku, which the CLI resolves to the
+    # newest model of that family, so a chat on an alias follows upgrades)
+    # plus every pinned older id. This is only the fallback until the first
+    # read. "ultracode" is not a level the catalog lists but a session mode
+    # the same --effort flag turns on, so every model with efforts gets it.
     models = [
-        {"id": "opus", "label": "Opus", "efforts": CLAUDE_EFFORTS},
+        {"id": "opus", "label": "Opus", "efforts": CLAUDE_EFFORTS, "fast": True},
+        {"id": "fable", "label": "Fable", "efforts": CLAUDE_EFFORTS},
         {"id": "sonnet", "label": "Sonnet", "efforts": CLAUDE_EFFORTS},
         {"id": "haiku", "label": "Haiku", "efforts": CLAUDE_EFFORTS},
     ]
@@ -360,7 +395,67 @@ class ClaudeProvider(Provider):
     supports_compact = True
 
     def fast_allowed(self, model):
-        return model == "opus"
+        return bool(next((m for m in self.models if m["id"] == model), {}).get("fast"))
+
+    @property
+    def handoff_models(self):
+        # Handoff rules are keyed by target; aliases keep them stable across
+        # model upgrades, and a pinned old model is never worth handing to.
+        return [m for m in self.models if not m["id"].startswith("claude-")]
+
+    async def fetch_models(self):
+        """`initialize` answers with the CLI's model catalog before any turn:
+        no tokens spent, no session written, none of the user's settings."""
+        proc = await asyncio.create_subprocess_exec(
+            self.binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+            "--setting-sources", "", "--tools", "", "--no-session-persistence",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            send_line(proc, {"type": "control_request", "request_id": "catalog", "request": {"subtype": "initialize", "hooks": None}})
+            await proc.stdin.drain()
+            async with asyncio.timeout(20):
+                async for line in proc.stdout:
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    response = event.get("response") or {}
+                    if event.get("type") == "control_response" and response.get("request_id") == "catalog":
+                        if response.get("subtype") == "error":
+                            raise RuntimeError(response.get("error") or "initialize failed")
+                        return self.catalog_from(response["response"]["models"])
+            raise RuntimeError("Claude CLI returned no model catalog")
+        finally:
+            proc.stdin.close()
+            try:
+                await asyncio.wait_for(proc.wait(), 5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+
+    @staticmethod
+    def catalog_from(entries: list[dict]) -> list[dict]:
+        """Aliases plus pinned ids, minus a pinned id an alias already
+        resolves to (the alias wins: it follows upgrades), the CLI's own
+        default first. "default" itself is dropped -- it is one of the rest."""
+        default = next((e["resolvedModel"] for e in entries if e["value"] == "default"), None)
+        aliased = {e.get("resolvedModel") for e in entries if e["value"] != "default" and not e["value"].startswith("claude-")}
+        catalog = []
+        for e in entries:
+            value = e["value"]
+            if value == "default" or (value.startswith("claude-") and value in aliased):
+                continue
+            efforts = list(e.get("supportedEffortLevels") or []) if e.get("supportsEffort") else []
+            if efforts:
+                efforts.append("ultracode")
+            catalog.append({
+                "id": value, "label": e.get("displayName") or value,
+                "resolved": e.get("resolvedModel") or value,
+                "efforts": efforts, "fast": bool(e.get("supportsFastMode")),
+            })
+        catalog.sort(key=lambda m: m["resolved"] != default)
+        return catalog
 
     def get_context_window(self, chat):
         # The CLI reports each model's real window with every turn's result
@@ -371,12 +466,9 @@ class ClaudeProvider(Provider):
         return super().get_context_window(chat)
 
     def model_for(self, meta):
-        """Chats created before the switch to aliases stored an exact id
-        ("claude-sonnet-5"); those map to their family."""
-        requested = meta.get("requested_model") or self.default_model
-        if requested in self.model_ids:
-            return requested
-        return next((m for m in self.model_ids if m in requested), self.default_model)
+        # A catalog change must never silently switch an existing chat's
+        # model; an exact id from before the aliases is a valid --model too.
+        return meta.get("requested_model") or self.default_model
 
     def mode_for(self, meta):
         # A night report is always auto -- there is nobody to ask.
@@ -733,7 +825,10 @@ class CodexProvider(Provider):
                 await self._publish_generated_image(chat, await asyncio.to_thread(path.read_bytes))
 
     def context_window(self, model: str) -> int:
-        return self.CONTEXT_WINDOWS.get(model, self.CONTEXT_WINDOWS[self.default_model])
+        # The catalog can name a model this table doesn't know (the default
+        # itself, after a CLI update): until its first turn reports the live
+        # window, assume the smallest known one rather than crash /chats.
+        return self.CONTEXT_WINDOWS.get(model, min(self.CONTEXT_WINDOWS.values()))
 
     def get_context_window(self, chat) -> int:
         if chat.meta.get("context_model") == self.model_for(chat.meta):
@@ -1146,34 +1241,20 @@ class CodexProvider(Provider):
                 proc.kill()
                 await proc.wait()
 
-    async def refresh_models(self):
-        if not hasattr(self, "_models_lock"):
-            self._models_lock = asyncio.Lock()
-        async with self._models_lock:
-            if time.monotonic() < getattr(self, "_models_refresh_after", 0):
-                return
-            try:
-                if not self.available:
-                    return
-                result = await self._catalog_request("model/list", {"includeHidden": False})
-                catalog = []
-                for model in sorted(result["data"], key=lambda m: not m.get("isDefault", False)):
-                    if model.get("hidden"):
-                        continue
-                    model_id = model["model"]
-                    if model_id in {m["id"] for m in catalog}:
-                        continue
-                    catalog.append({
-                        "id": model_id, "label": model["displayName"],
-                        "efforts": [e["reasoningEffort"] for e in model["supportedReasoningEfforts"]],
-                    })
-                if not catalog:
-                    raise ValueError("empty model catalog")
-                self.models = catalog
-            except (OSError, ValueError, KeyError, TypeError, RuntimeError, asyncio.TimeoutError) as exc:
-                print(f"Codex model catalog unavailable; retaining previous list: {exc}", flush=True)
-            finally:
-                self._models_refresh_after = time.monotonic() + 60
+    async def fetch_models(self):
+        result = await self._catalog_request("model/list", {"includeHidden": False})
+        catalog = []
+        for model in sorted(result["data"], key=lambda m: not m.get("isDefault", False)):
+            if model.get("hidden"):
+                continue
+            model_id = model["model"]
+            if model_id in {m["id"] for m in catalog}:
+                continue
+            catalog.append({
+                "id": model_id, "label": model["displayName"],
+                "efforts": [e["reasoningEffort"] for e in model["supportedReasoningEfforts"]],
+            })
+        return catalog
 
     def model_for(self, meta):
         # Catalog changes must never silently switch an existing chat's model.

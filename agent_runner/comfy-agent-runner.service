@@ -8,7 +8,11 @@ Description=Comfy Orchestrator agent runner (Claude Code chat sessions)
 Type=simple
 WorkingDirectory=%h/comfy-orchestrator/agent_runner
 EnvironmentFile=%h/.config/comfy-agent-runner/env
-ExecStart=%h/comfy-orchestrator/agent_runner/.venv/bin/uvicorn runner:app --host 127.0.0.1 --port 8765
+# A chat's SSE stream never ends on its own, so a plain graceful shutdown
+# waits ("Waiting for connections to close") until every open page drops its
+# stream -- minutes, unless someone reloads the page. Cut that wait short: the
+# page resumes the stream from its last sequence once the runner is back.
+ExecStart=%h/comfy-orchestrator/agent_runner/.venv/bin/uvicorn runner:app --host 127.0.0.1 --port 8765 --timeout-graceful-shutdown 3
 Restart=on-failure
 RestartSec=3
 

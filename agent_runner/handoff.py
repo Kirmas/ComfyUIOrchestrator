@@ -437,7 +437,7 @@ def get_handoff_targets(
     for prov in PROVIDERS.values():
         if not prov.available or not prov.supports_project:
             continue
-        for m in prov.models:
+        for m in prov.handoff_models:
             model_id = m["id"]
             target = f"{prov.id}:{model_id}"
             if target == from_target:

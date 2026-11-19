@@ -110,12 +110,24 @@ flags. A new CLI is one new class + a line in `PROVIDERS`.
 
 Per-chat knobs and limits are part of the same interface, opt-in per class:
 `efforts` (the CLI's reasoning levels; Claude `--effort`), `supports_fast` +
-`fast_allowed(model)` (Claude: `--settings '{"fastMode":true}'`, Opus only),
+`fast_allowed(model)` (Claude: `--settings '{"fastMode":true}'`, models whose
+catalog entry says `supportsFastMode`),
 and `record_limits` / `probe_limits` feeding `LimitsStore`
 (`<data dir>/limits.json`, `GET /limits`, `POST /limits/<provider>`). Claude
 reports plan usage in its stream (`rate_limit_event.unifiedWindows`:
 `five_hour` / `seven_day`, utilization 0..1), so every turn refreshes it and
 `probe_limits` is a 1-token Haiku turn.
+
+Model catalogs: `Provider.fetch_models` / `refresh_models` (shared 60 s cache,
+failed reads count too and keep the previous list). Claude (verified with CLI
+2.1.328) reads the `models` of an `initialize` control_response from a
+throwaway `claude -p --setting-sources "" --tools "" --no-session-persistence`
+-- no turn, no tokens, ~1 s. Aliases (`opus`, `fable`...) are kept and a pinned
+id an alias already resolves to is dropped, so chats on an alias follow
+upgrades; `resolved` tells the page which version an alias is for its "newest
+per family" filter. `--effort` levels come from the entry (+ `ultracode`);
+models without `supportsEffort` (Haiku 4.5) get none. `handoff_models` is
+aliases only. A chat's requested model is passed through as is.
 
 Antigravity:
 

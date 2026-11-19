@@ -44,6 +44,7 @@ class HandoffTests(unittest.TestCase):
             available=True,
             supports_project=True,
             models=[{"id": "opus", "label": "Opus 4.6"}, {"id": "sonnet", "label": "Sonnet 4.5"}],
+            handoff_models=[{"id": "opus", "label": "Opus 4.6"}, {"id": "sonnet", "label": "Sonnet 4.5"}],
             model_ids={"opus", "sonnet"},
             efforts_for=lambda m: ["low", "high"],
         )
@@ -53,6 +54,7 @@ class HandoffTests(unittest.TestCase):
             available=True,
             supports_project=True,
             models=[{"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash"}, {"id": "claude-opus-5-5", "label": "Claude Opus 5.5"}],
+            handoff_models=[{"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash"}, {"id": "claude-opus-5-5", "label": "Claude Opus 5.5"}],
             model_ids={"gemini-3.8-flash", "claude-opus-5-5"},
             efforts_for=lambda m: ["low", "medium", "high"],
         )
@@ -62,6 +64,7 @@ class HandoffTests(unittest.TestCase):
             available=True,
             supports_project=True,
             models=[{"id": "gpt-6-astra", "label": "Astra"}],
+            handoff_models=[{"id": "gpt-6-astra", "label": "Astra"}],
             model_ids={"gpt-6-astra"},
             efforts_for=lambda m: ["low", "high"],
         )

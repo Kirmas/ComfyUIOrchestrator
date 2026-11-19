@@ -4,6 +4,7 @@ The event shapes are real ones, captured from CLI 2.1.304 (haiku, no tools)."""
 import asyncio
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -124,3 +125,44 @@ class ClaudeProviderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaudeCatalogTests(unittest.IsolatedAsyncioTestCase):
+    ENTRIES = [  # trimmed from CLI 2.1.328's initialize response
+        {"value": "default", "resolvedModel": "claude-opus-5-5", "displayName": "Default (recommended)"},
+        {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", "displayName": "Sonnet 5.5",
+         "supportsEffort": True, "supportedEffortLevels": ["low", "high"]},
+        {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5",
+         "supportsEffort": True, "supportedEffortLevels": ["low", "max"], "supportsFastMode": True},
+        {"value": "claude-opus-5-5", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5"},
+        {"value": "claude-haiku-4-5-20251001", "resolvedModel": "claude-haiku-4-5-20251001", "displayName": "Haiku 4.5"},
+    ]
+
+    def setUp(self):
+        self.provider = providers.ClaudeProvider()
+
+    def test_catalog_shape(self):
+        catalog = self.provider.catalog_from(self.ENTRIES)
+        self.assertEqual([m["id"] for m in catalog], ["opus", "sonnet", "claude-haiku-4-5-20251001"])
+        self.assertEqual(catalog[0]["efforts"], ["low", "max", "ultracode"])
+        self.assertEqual(catalog[2]["efforts"], [])
+
+    async def test_refresh_fast_handoff_and_existing_chat(self):
+        self.provider.fetch_models = AsyncMock(return_value=self.provider.catalog_from(self.ENTRIES))
+        with unittest.mock.patch.object(providers.ClaudeProvider, "available", True):
+            await self.provider.refresh_models()
+            await self.provider.refresh_models()
+        self.provider.fetch_models.assert_awaited_once()
+        self.assertEqual(self.provider.default_model, "opus")
+        self.assertTrue(self.provider.fast_allowed("opus"))
+        self.assertFalse(self.provider.fast_allowed("sonnet"))
+        self.assertEqual([m["id"] for m in self.provider.handoff_models], ["opus", "sonnet"])
+        self.assertEqual(self.provider.model_for({"requested_model": "claude-sonnet-5"}), "claude-sonnet-5")
+        self.assertIsNone(self.provider.effort_for({"requested_model": "claude-haiku-4-5-20251001", "effort": "high"}))
+
+    async def test_failure_keeps_previous_list(self):
+        before = self.provider.models
+        self.provider.fetch_models = AsyncMock(side_effect=RuntimeError("offline"))
+        with unittest.mock.patch.object(providers.ClaudeProvider, "available", True):
+            await self.provider.refresh_models()
+        self.assertEqual(self.provider.models, before)

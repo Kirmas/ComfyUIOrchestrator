@@ -3334,12 +3334,12 @@ th, td {
   font-size: 12px;
 }
 
-.agent-codex-picker {
+.agent-model-picker {
   position: relative;
   min-width: 0;
 }
 
-.agent-codex-picker summary {
+.agent-model-picker summary {
   cursor: pointer;
   padding: 3px 6px;
   border: 1px solid var(--border);
@@ -3350,7 +3350,7 @@ th, td {
   white-space: nowrap;
 }
 
-.agent-codex-options {
+.agent-model-options {
   position: absolute;
   z-index: 5;
   top: calc(100% + 4px);
@@ -3365,7 +3365,7 @@ th, td {
   box-shadow: 0 4px 12px #0002;
 }
 
-.agent-codex-option {
+.agent-model-option {
   display: block;
   width: 100%;
   padding: 5px 8px;
@@ -3378,28 +3378,28 @@ th, td {
   cursor: pointer;
 }
 
-.agent-codex-option small {
+.agent-model-option small {
   display: block;
   margin-top: 2px;
   font-size: 10px;
   color: var(--text-dim);
 }
 
-.agent-codex-option:hover,
-.agent-codex-option[aria-pressed="true"] {
+.agent-model-option:hover,
+.agent-model-option[aria-pressed="true"] {
   background: var(--accent-dim);
 }
 
 @media (max-width: 640px) {
-  .agent-header:has(.agent-codex-picker) {
+  .agent-header:has(.agent-model-picker) {
     position: relative;
   }
 
-  .agent-codex-picker {
+  .agent-model-picker {
     position: static;
   }
 
-  .agent-codex-options {
+  .agent-model-options {
     right: 10px;
   }
 }

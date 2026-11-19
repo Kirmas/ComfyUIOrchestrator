@@ -718,6 +718,8 @@ export interface AgentModel {
   id: string;
   label: string;
   efforts?: string[];
+  // Claude: the exact model an alias ("opus") currently resolves to.
+  resolved?: string;
 }
 
 // Which agent CLI answers a chat. The runner owns the list (providers.py):

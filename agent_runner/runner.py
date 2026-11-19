@@ -1018,7 +1018,7 @@ async def update_chat(request: Request):
 
 
 async def list_models(request: Request):
-    await PROVIDERS["codex"].refresh_models()
+    await asyncio.gather(*(p.refresh_models() for p in PROVIDERS.values()))
     claude = PROVIDERS[DEFAULT_PROVIDER]
     # models/default/permission_modes: the shape before providers existed
     # (a page that hasn't reloaded yet still reads them).
@@ -1482,7 +1482,7 @@ async def get_handoff_profiles_route(request: Request):
     targets = [
         {"target": f"{prov.id}:{m['id']}", "label": target_label(f"{prov.id}:{m['id']}")}
         for prov in PROVIDERS.values() if prov.supports_project
-        for m in prov.models
+        for m in prov.handoff_models
     ]
     return JSONResponse({"profiles": handoff_config.profiles, "targets": targets})
 
