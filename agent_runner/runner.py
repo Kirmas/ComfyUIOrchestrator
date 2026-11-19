@@ -389,6 +389,7 @@ def public_meta(chat: Chat) -> dict:
         m["permission_mode"] = provider.mode_for(chat.meta)
     m["effort"] = provider.effort_for(chat.meta)
     m["fast_mode"] = provider.fast_for(chat.meta)
+    m["orchestrator_mode"] = provider.orchestrator_for(chat.meta)
     m["accepts_images"] = PROFILES[m["kind"]].accepts_images and provider.accepts_images
     m["supports_compact"] = provider.supports_compact
     ctx = chat.meta.get("context_tokens")
@@ -935,6 +936,7 @@ def do_create_chat(body: dict) -> tuple[Chat | None, str | None, int]:
         "requested_model": model,
         **({"effort": effort} if effort else {}),
         **({"fast_mode": True} if body.get("fast_mode") and provider.supports_fast else {}),
+        **({"orchestrator_mode": True} if body.get("orchestrator_mode") and provider.orchestrator_model(model) else {}),
         **({"permission_mode": body["permission_mode"]} if profile.kind == "dev" and body.get("permission_mode") in provider.permission_modes else {}),
         # This orchestrator instance's own base URL/token, so a finished turn
         # can POST itself to /api/push/notify (fire_push_notification above).
@@ -999,6 +1001,9 @@ async def update_chat(request: Request):
         if body["fast_mode"] and not provider.supports_fast:
             return JSONResponse({"detail": f"{provider.label} has no fast mode"}, status_code=400)
         chat.meta["fast_mode"] = bool(body["fast_mode"])
+        chat.save_meta()
+    if "orchestrator_mode" in body:
+        chat.meta["orchestrator_mode"] = bool(body["orchestrator_mode"])
         chat.save_meta()
     mode = body.get("permission_mode")
     if mode is not None and chat.meta.get("kind") == "dev" and mode != provider.mode_for(chat.meta):

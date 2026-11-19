@@ -35,6 +35,7 @@ const lastModelKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgen
 const lastModeKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentPermissionMode:${provider}`;
 const lastEffortKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentEffort:${provider}`;
 const lastFastKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentFast:${provider}`;
+const lastOrchestratorKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentOrchestrator:${provider}`;
 const LIMITS_POLL_MS = 30000;
 // The CLI's own picker calls xhigh "Extra"; ids stay what --effort takes.
 // Family + version of a model, for showing only the newest of each family.
@@ -44,7 +45,15 @@ function modelRank(model: AgentModel) {
   const codex = /^gpt-(\d+(?:\.\d+)*)-(.+)$/.exec(model.id);
   if (codex) return { family: codex[2], version: codex[1] };
   const claude = /^claude-([a-z]+)-(\d+(?:-\d+)?)(?:-\d{8})?$/.exec(model.resolved ?? model.id);
-  return claude && { family: claude[1], version: claude[2].replace("-", ".") };
+  if (claude) return { family: claude[1], version: claude[2].replace("-", ".") };
+  const gemini = /^gemini-(\d+(?:\.\d+)*)-([a-z]+)$/.exec(model.id);
+  if (gemini) {
+    // Gemini 4 Hydrogen superseded Gemini 3.8 Flash as the fast/light tier.
+    const family = gemini[2] === "flash" ? "hydrogen" : gemini[2];
+    return { family, version: gemini[1] };
+  }
+  if (model.id.startsWith("gpt-oss-")) return { family: "oss", version: model.id.slice("gpt-oss-".length) };
+  return null;
 }
 
 // Family strengths. Codex: relative Standard credit rates for the current
@@ -58,6 +67,10 @@ const FAMILY_HINTS: Record<string, TKey> = {
   opus: "agent.modelFamily.opus",
   sonnet: "agent.modelFamily.sonnet",
   haiku: "agent.modelFamily.haiku",
+  neon: "agent.modelFamily.neon",
+  argon: "agent.modelFamily.argon",
+  hydrogen: "agent.modelFamily.hydrogen",
+  oss: "agent.modelFamily.oss",
 };
 
 // Newest of each family; several entries of one version (an alias and its
@@ -76,6 +89,14 @@ function latestModels(models: AgentModel[]) {
     const rank = modelRank(model);
     return !rank || latest.get(rank.family) === rank.version;
   });
+}
+
+function modelLimitGroup(providerId: AgentProviderId | undefined, model: AgentModel): string | undefined {
+  if (model.group) return model.group;
+  if (providerId !== "agy") return undefined;
+  if (model.id === "gemini-4-argon" || model.id.endsWith("-argon")) return "Gemini 4 Argon";
+  if (model.id.startsWith("gemini-")) return "Gemini Models";
+  return "Claude and GPT models";
 }
 
 const EFFORT_LABELS: Record<string, string> = { xhigh: "xhigh (Extra)", ultracode: "ultracode ✦" };
@@ -189,12 +210,16 @@ export async function createAgentChat(kind: AgentChatKind, projectId: string | n
   const lastEffort = localStorage.getItem(lastEffortKey(provider.id));
   const effort = lastEffort && modelEfforts.includes(lastEffort) ? lastEffort : undefined;
   const fastMode = provider.fast_models.length > 0 && localStorage.getItem(lastFastKey(provider.id)) === "1";
+  const orchestratorMode =
+    (provider.orchestrator_models?.includes(effectiveModelId) ?? Boolean(modelInfo?.orchestrator)) &&
+    localStorage.getItem(lastOrchestratorKey(provider.id)) === "1";
   return agentChatsApi.create(kind, kind === "project" ? projectId : null, {
     provider: provider.id,
     model,
     permissionMode,
     effort,
     fastMode,
+    orchestratorMode,
   });
 }
 
@@ -1221,6 +1246,9 @@ export function ChatView({
           // The runner already maps a legacy id to what the chat runs on.
           const effectiveRequestedModel = chat.requested_model;
           const selectedModel = provider.models.find((m) => m.id === effectiveRequestedModel);
+          const hasOrchestrator =
+            Boolean(selectedModel?.orchestrator) ||
+            Boolean(provider.orchestrator_models?.includes(effectiveRequestedModel));
           const modelEfforts = selectedModel?.efforts ?? provider.efforts;
           const latestIds = new Set(latestModels(provider.models).map((m) => m.id));
           const visibleModels = provider.models.filter((m) =>
@@ -1264,9 +1292,31 @@ export function ChatView({
               </button>
             );
           };
+          const renderModelList = (list: AgentModel[]) => {
+            if (!list.some((m) => modelLimitGroup(provider.id, m))) {
+              return list.map(modelOption);
+            }
+            const grouped = new Map<string, AgentModel[]>();
+            for (const m of list) {
+              const g = modelLimitGroup(provider.id, m) ?? "";
+              const bucket = grouped.get(g);
+              if (bucket) bucket.push(m);
+              else grouped.set(g, [m]);
+            }
+            return Array.from(grouped.entries()).map(([groupName, items]) => (
+              <div key={groupName} className="agent-model-group">
+                {groupName && (
+                  <div className="agent-model-group-header">
+                    {LIMIT_GROUP_LABELS[groupName] ? t(LIMIT_GROUP_LABELS[groupName]) : groupName}
+                  </div>
+                )}
+                {items.map(modelOption)}
+              </div>
+            ));
+          };
           return (
             <>
-              {modelEfforts.length > 0 && (
+              {modelEfforts.length > 0 && !(hasOrchestrator && chat.orchestrator_mode) && (
                 <select
                   className="agent-model"
                   value={chat.effort ?? ""}
@@ -1285,6 +1335,20 @@ export function ChatView({
                     </option>
                   ))}
                 </select>
+              )}
+              {hasOrchestrator && (
+                <button
+                  className={cx("agent-done-toggle", chat.orchestrator_mode && "active")}
+                  title={t("agent.orchestratorHint")}
+                  onClick={async () => {
+                    const on = !chat.orchestrator_mode;
+                    localStorage.setItem(lastOrchestratorKey(chat.provider ?? "agy"), on ? "1" : "0");
+                    await agentChatsApi.setOrchestratorMode(chat.id, on);
+                    onChanged();
+                  }}
+                >
+                  🧭 {t("agent.orchestrator")}
+                </button>
               )}
               {provider.fast_models.length > 0 && (
                 <button
@@ -1319,7 +1383,7 @@ export function ChatView({
                   <summary title={modelTitle}>{selectedModel?.label ?? effectiveRequestedModel ?? provider.default}</summary>
                   <div className="agent-model-options">
                     {!selectedModel && effectiveRequestedModel && modelOption({ id: effectiveRequestedModel, label: effectiveRequestedModel })}
-                    {visibleModels.map(modelOption)}
+                    {renderModelList(visibleModels)}
                     {legacyModels.length > 0 && (
                       <button
                         type="button"
@@ -1330,7 +1394,7 @@ export function ChatView({
                         {t(showLegacyModels ? "agent.hideLegacyModels" : "agent.showLegacyModels")}
                       </button>
                     )}
-                    {showLegacyModels && legacyModels.map(modelOption)}
+                    {showLegacyModels && renderModelList(legacyModels)}
                   </div>
                 </details>
               )}

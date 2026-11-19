@@ -50,6 +50,7 @@ class AgentChatCreate(BaseModel):
     provider: str | None = None
     effort: str | None = None  # the runner validates against the provider's list
     fast_mode: bool | None = None
+    orchestrator_mode: bool | None = None
 
 
 class AgentChatUpdate(BaseModel):
@@ -57,6 +58,7 @@ class AgentChatUpdate(BaseModel):
     permission_mode: str | None = None
     effort: str | None = None  # "" = the CLI's own default
     fast_mode: bool | None = None
+    orchestrator_mode: bool | None = None
     done: bool | None = None  # hidden from the list unless "show done" is on
 
 
@@ -189,6 +191,7 @@ async def create_chat(payload: AgentChatCreate, db: AsyncSession = Depends(get_d
         "model": payload.model,
         "effort": payload.effort,
         "fast_mode": payload.fast_mode,
+        "orchestrator_mode": payload.orchestrator_mode,
         "permission_mode": payload.permission_mode,
         **_self_check(),
     }

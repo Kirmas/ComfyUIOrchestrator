@@ -587,6 +587,7 @@ export interface AgentChat {
   // CLI's own default) and the faster-output mode.
   effort?: string | null;
   fast_mode?: boolean;
+  orchestrator_mode?: boolean;
   // Dev chats: how tool calls get approved -- auto (classifier), default
   // (ask for everything not allowlisted) or acceptEdits.
   permission_mode?: string;
@@ -720,6 +721,10 @@ export interface AgentModel {
   efforts?: string[];
   // Claude: the exact model an alias ("opus") currently resolves to.
   resolved?: string;
+  // Antigravity: the Orchestrator model id paired with this planner model.
+  orchestrator?: string;
+  // Antigravity: the usage-limit pool this model draws from.
+  group?: string;
 }
 
 // Which agent CLI answers a chat. The runner owns the list (providers.py):
@@ -741,6 +746,7 @@ export interface AgentProviderInfo {
   // models that have its faster-output mode (empty = no fast mode).
   efforts: string[];
   fast_models: string[];
+  orchestrator_models?: string[];
 }
 
 // Usage limits per provider, as the runner last read them (providers.py

@@ -29,8 +29,12 @@ DEFAULT_LIMITS = {
     "ignore_windows": ["cloud_credits"],
     "durations": {},
     "pools": {
+        "agy:gemini-4-neon": "Gemini Models",
+        "agy:gemini-4-hydrogen": "Gemini Models",
+        "agy:gemini-pro-orchestrator-neon": "Gemini Models",
         "agy:gemini-3.8-flash": "Gemini Models",
         "agy:gemini-4-argon": "Gemini 4 Argon",
+        "agy:gemini-pro-orchestrator-g1-pro": "Gemini 4 Argon",
         "agy:claude-sonnet-5-5": "Claude and GPT models",
         "agy:claude-opus-5-5": "Claude and GPT models",
         "agy:gpt-oss-120b": "Claude and GPT models",

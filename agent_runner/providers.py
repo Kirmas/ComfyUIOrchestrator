@@ -210,6 +210,14 @@ class Provider:
     def fast_for(self, meta: dict) -> bool:
         return bool(self.supports_fast and meta.get("fast_mode") and self.fast_allowed(self.model_for(meta)))
 
+    def orchestrator_model(self, model: str) -> str | None:
+        """The Orchestrator variant id for this planner model, if any."""
+        info = next((m for m in self.models if m["id"] == model), {})
+        return info.get("orchestrator")
+
+    def orchestrator_for(self, meta: dict) -> bool:
+        return bool(meta.get("orchestrator_mode") and self.orchestrator_model(self.model_for(meta)))
+
     async def recover_outputs(self, chat) -> None:
         """Recover provider-generated attachments after a runner restart."""
 
@@ -301,6 +309,7 @@ class Provider:
             "efforts": self.efforts,
             "supports_fast": self.supports_fast,
             "fast_models": [m["id"] for m in self.models if self.fast_allowed(m["id"])],
+            "orchestrator_models": [m["id"] for m in self.models if self.orchestrator_model(m["id"])],
         }
 
     # -- sessions ------------------------------------------------------------
@@ -1306,11 +1315,11 @@ class AgyProvider(Provider):
     binary_env = "AGY_BIN"
     binary_name = "agy"
     models = [
-        {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash", "efforts": ["low", "medium", "high"]},
-        {"id": "gemini-4-argon", "label": "Gemini 4 Argon", "efforts": ["low", "medium", "high"]},
-        {"id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5", "efforts": ["low", "medium", "high"]},
-        {"id": "claude-opus-5-5", "label": "Claude Opus 5.5", "efforts": ["low", "medium", "high"]},
-        {"id": "gpt-oss-120b", "label": "GPT-OSS 120B", "efforts": ["medium"]},
+        {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash", "efforts": ["low", "medium", "high"], "group": "Gemini Models"},
+        {"id": "gemini-4-argon", "label": "Gemini 4 Argon", "efforts": ["low", "medium", "high"], "orchestrator": "gemini-pro-orchestrator-g1-pro", "group": "Gemini 4 Argon"},
+        {"id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5", "efforts": ["low", "medium", "high"], "group": "Claude and GPT models"},
+        {"id": "claude-opus-5-5", "label": "Claude Opus 5.5", "efforts": ["low", "medium", "high"], "group": "Claude and GPT models"},
+        {"id": "gpt-oss-120b", "label": "GPT-OSS 120B", "efforts": ["medium"], "group": "Claude and GPT models"},
     ]
     permission_modes = ["edits", "auto", "full", "plan"]
     interactive = True
@@ -1321,7 +1330,7 @@ class AgyProvider(Provider):
     # folders are theirs to grant): the workspace must be trusted, and MCP
     # calls allowed -- _check_project_setup says exactly what to add.
     supports_project = True
-    efforts = ["low", "medium", "high"]
+    efforts = ["low", "medium", "high", "xhigh", "max"]
     supports_fast = False
     supports_compact = True
     SETTINGS = Path.home() / ".gemini/antigravity-cli/settings.json"
@@ -1329,6 +1338,88 @@ class AgyProvider(Provider):
     # One fixed folder for every project chat (they share the same MCP
     # server), so there is a single path to trust instead of one per chat.
     PROJECT_DIR = DATA_DIR / "agy-project"
+    EFFORT_ORDER = {e: i for i, e in enumerate(("low", "medium", "high", "xhigh", "max"))}
+    EFFORT_SUFFIX_RE = re.compile(r"-(low|medium|high|xhigh|max)$")
+    LABEL_EFFORT_RE = re.compile(r"\s+\((?:Low|Medium|High|XHigh|Max)\)$", re.IGNORECASE)
+    ORCHESTRATOR_PLANNER_RE = re.compile(r"^Orchestrator\s+\((.+)\)$", re.IGNORECASE)
+
+    @staticmethod
+    def limit_group(model_id: str) -> str:
+        """Which usage-limit pool an Antigravity model draws from."""
+        if model_id == "gemini-4-argon" or model_id.endswith("-argon"):
+            return "Gemini 4 Argon"
+        if model_id.startswith("gemini-"):
+            return "Gemini Models"
+        return "Claude and GPT models"
+
+    @staticmethod
+    def catalog_from(text: str) -> list[dict]:
+        """Collapse `agy models` rows (`<id>-<effort>  <Label> (<Effort>)`) into
+        one entry per base model with its supported efforts, and pair
+        `Orchestrator (<Planner>)` rows onto their matching planner model as
+        `orchestrator: <id>` rather than listing them as separate models."""
+        by_id: dict[str, dict] = {}
+        orchestrators: list[tuple[str, str]] = []
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+            raw_id, raw_label = parts[0], parts[1].strip()
+            orch_m = AgyProvider.ORCHESTRATOR_PLANNER_RE.match(raw_label)
+            if orch_m or raw_id.startswith("gemini-pro-orchestrator-"):
+                planner = (orch_m.group(1).strip().lower() if orch_m else raw_id.rsplit("-", 1)[-1].lower())
+                orchestrators.append((raw_id, planner))
+                continue
+            m = AgyProvider.EFFORT_SUFFIX_RE.search(raw_id)
+            if m:
+                effort = m.group(1)
+                base_id = raw_id[:m.start()]
+                base_label = AgyProvider.LABEL_EFFORT_RE.sub("", raw_label)
+            else:
+                effort = None
+                base_id = raw_id
+                base_label = raw_label
+            entry = by_id.get(base_id)
+            if not entry:
+                entry = {
+                    "id": base_id,
+                    "label": base_label,
+                    "efforts": [],
+                    "group": AgyProvider.limit_group(base_id),
+                }
+                by_id[base_id] = entry
+            if effort and effort not in entry["efforts"]:
+                entry["efforts"].append(effort)
+        catalog = list(by_id.values())
+        for entry in catalog:
+            entry["efforts"].sort(key=lambda e: AgyProvider.EFFORT_ORDER.get(e, 99))
+        for orch_id, planner in orchestrators:
+            target = next(
+                (e for e in catalog if e["id"].endswith(f"-{planner}") or e["label"].lower().endswith(f" {planner}")),
+                None,
+            )
+            if target:
+                target["orchestrator"] = orch_id
+        return catalog
+
+    async def fetch_models(self) -> list[dict]:
+        proc = await asyncio.create_subprocess_exec(
+            self.binary, "models",
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            async with asyncio.timeout(20):
+                out, _ = await proc.communicate()
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
+        if proc.returncode != 0:
+            raise RuntimeError(f"agy models exited with code {proc.returncode}")
+        return self.catalog_from(out.decode("utf-8", errors="replace"))
 
     @staticmethod
     def context_window(model: str) -> int:
@@ -1417,13 +1508,23 @@ class AgyProvider(Provider):
 
     def model_for(self, meta: dict) -> str:
         requested = meta.get("requested_model")
+        if not requested:
+            return self.default_model
+        # A chat that had an Orchestrator variant stored directly as its model
+        # maps to the underlying planner model (with orchestrator_for true).
+        for m in self.models:
+            if m.get("orchestrator") == requested:
+                return m["id"]
         if requested in self.model_ids:
             return requested
-        if requested:
-            base = re.sub(r"-(low|medium|high|xhigh|max)$", "", requested)
-            if base in self.model_ids:
-                return base
-        return self.default_model
+        base = self.EFFORT_SUFFIX_RE.sub("", requested)
+        return base or self.default_model
+
+    def orchestrator_for(self, meta: dict) -> bool:
+        requested = meta.get("requested_model")
+        if requested and any(m.get("orchestrator") == requested for m in self.models):
+            return True
+        return super().orchestrator_for(meta)
 
     def cwd(self, chat, spec, default):
         return self.PROJECT_DIR if spec.isolated else default
@@ -1503,8 +1604,11 @@ class AgyProvider(Provider):
         # ("project"), where a dev chat's "edits" would ask the person.
         mode = "project" if spec.isolated else self.mode_for(chat.meta)
         model = self.model_for(chat.meta)
-        effort = self.effort_for(chat.meta)
-        if effort:
+        orch_model = self.orchestrator_model(model) if self.orchestrator_for(chat.meta) else None
+        effort = None if orch_model else self.effort_for(chat.meta)
+        if orch_model:
+            args = [self.binary, "--output-format", "stream-json", "--model", orch_model, "--dangerously-skip-permissions"]
+        elif effort:
             # Strip model suffix (-low/-medium/-high/-xhigh/-max) so it doesn't conflict with --effort
             base_model = re.sub(r"-(low|medium|high|xhigh|max)$", "", model)
             args = [self.binary, "--output-format", "stream-json", "--model", base_model, "--effort", effort, "--dangerously-skip-permissions"]

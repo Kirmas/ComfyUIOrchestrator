@@ -3390,6 +3390,21 @@ th, td {
   background: var(--accent-dim);
 }
 
+.agent-model-group + .agent-model-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+}
+
+.agent-model-group-header {
+  padding: 3px 8px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
 @media (max-width: 640px) {
   .agent-header:has(.agent-model-picker) {
     position: relative;

@@ -131,6 +131,13 @@ aliases only. A chat's requested model is passed through as is.
 
 Antigravity:
 
+- The model catalog is discovered from `agy models` (`fetch_models`), collapsing
+  per-effort variants (`<id>-low`/`-medium`/`-high`/`-xhigh`/`-max`) into one
+  entry per base model with its supported `efforts` list, and attaching
+  `Orchestrator (<Planner>)` entries onto their matching planner model as
+  `orchestrator: <id>` (exposed in the chat header as a separate `🧭 Orchestrator`
+  toggle when that planner model is selected, rather than as separate models in
+  the picker).
 - Effort is passed as `--effort <level>` (`low`, `medium`, `high`, `xhigh`, `max`).
   When an effort level is chosen, the model id's built-in suffix (`-low`/`-medium`/`-high`)
   is stripped for `--model` so `agy` does not reject it as conflicting.

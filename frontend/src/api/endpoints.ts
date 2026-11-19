@@ -397,10 +397,19 @@ export const agentChatsApi = {
   refreshLimits: (provider: AgentProviderId) => api.post<Record<string, AgentLimits>>(`/api/agent-chats/limits/${provider}`),
   setEffort: (id: string, effort: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { effort }),
   setFastMode: (id: string, fastMode: boolean) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { fast_mode: fastMode }),
+  setOrchestratorMode: (id: string, orchestratorMode: boolean) =>
+    api.patch<AgentChat>(`/api/agent-chats/${id}`, { orchestrator_mode: orchestratorMode }),
   create: (
     kind: AgentChatKind,
     projectId: string | null,
-    opts: { provider?: AgentProviderId; model?: string; permissionMode?: string; effort?: string; fastMode?: boolean } = {},
+    opts: {
+      provider?: AgentProviderId;
+      model?: string;
+      permissionMode?: string;
+      effort?: string;
+      fastMode?: boolean;
+      orchestratorMode?: boolean;
+    } = {},
   ) =>
     api.post<AgentChat>("/api/agent-chats", {
       kind,
@@ -410,6 +419,7 @@ export const agentChatsApi = {
       permission_mode: opts.permissionMode,
       effort: opts.effort,
       fast_mode: opts.fastMode,
+      orchestrator_mode: opts.orchestratorMode,
     }),
   setPermissionMode: (id: string, mode: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { permission_mode: mode }),
   decide: (id: string, requestId: string, decision: PermissionDecision) =>

@@ -23,7 +23,7 @@ class AgyProviderTests(unittest.TestCase):
 
     def test_describe_knobs(self):
         d = self.provider.describe()
-        self.assertEqual(d["efforts"], ["low", "medium", "high"])
+        self.assertEqual(d["efforts"], ["low", "medium", "high", "xhigh", "max"])
         self.assertFalse(d["supports_fast"])
         self.assertEqual(d["fast_models"], [])
         self.assertTrue(d["supports_compact"])
@@ -33,6 +33,56 @@ class AgyProviderTests(unittest.TestCase):
         self.assertEqual(self.provider.context_window("gemini-3.8-flash"), 1_048_576)
         self.assertEqual(self.provider.context_window("claude-sonnet-5-5"), 200_000)
         self.assertEqual(self.provider.context_window("gpt-oss-120b"), 128_000)
+
+    def test_catalog_from_collapses_effort_variants(self):
+        sample = """
+gemini-4-neon-high              Gemini 4 Neon (High)
+gemini-4-neon-xhigh             Gemini 4 Neon (XHigh)
+gemini-4-neon-medium            Gemini 4 Neon (Medium)
+gemini-4-neon-low               Gemini 4 Neon (Low)
+gemini-4-argon-medium           Gemini 4 Argon (Medium)
+gemini-4-argon-high             Gemini 4 Argon (High)
+gemini-4-argon-low              Gemini 4 Argon (Low)
+gemini-pro-orchestrator-neon    Orchestrator (Neon)
+gemini-pro-orchestrator-g1-pro  Orchestrator (Argon)
+gemini-3.8-flash-high           Gemini 3.8 Flash (High)
+gemini-3.8-flash-low            Gemini 3.8 Flash (Low)
+claude-opus-5-5-low             Claude Opus 5.5 (Low)
+claude-opus-5-5-high            Claude Opus 5.5 (High)
+gpt-oss-120b-medium             GPT-OSS 120B (Medium)
+"""
+        catalog = self.provider.catalog_from(sample)
+        self.assertEqual(
+            [m["id"] for m in catalog],
+            [
+                "gemini-4-neon",
+                "gemini-4-argon",
+                "gemini-3.8-flash",
+                "claude-opus-5-5",
+                "gpt-oss-120b",
+            ],
+        )
+        by_id = {m["id"]: m for m in catalog}
+        self.assertEqual(by_id["gemini-4-neon"]["label"], "Gemini 4 Neon")
+        self.assertEqual(by_id["gemini-4-neon"]["efforts"], ["low", "medium", "high", "xhigh"])
+        self.assertEqual(by_id["gemini-4-neon"]["orchestrator"], "gemini-pro-orchestrator-neon")
+        self.assertEqual(by_id["gemini-4-neon"]["group"], "Gemini Models")
+        self.assertEqual(by_id["gemini-4-argon"]["orchestrator"], "gemini-pro-orchestrator-g1-pro")
+        self.assertEqual(by_id["gemini-4-argon"]["group"], "Gemini 4 Argon")
+        self.assertEqual(by_id["claude-opus-5-5"]["group"], "Claude and GPT models")
+        self.assertEqual(by_id["gpt-oss-120b"]["group"], "Claude and GPT models")
+        self.assertNotIn("orchestrator", by_id["gemini-3.8-flash"])
+        self.assertEqual(by_id["gpt-oss-120b"]["efforts"], ["medium"])
+        self.assertEqual(self.provider.model_for({"requested_model": "retired-model-low"}), "retired-model")
+
+    def test_launch_with_orchestrator_mode_uses_orchestrator_model_and_skips_effort(self):
+        self.chat.meta["requested_model"] = "gemini-4-argon"
+        self.chat.meta["orchestrator_mode"] = True
+        self.chat.meta["effort"] = "high"
+        launch = self.provider.launch(self.chat, providers.TurnSpec("system"), "hello", [])
+        model_idx = launch.args.index("--model")
+        self.assertEqual(launch.args[model_idx + 1], "gemini-pro-orchestrator-g1-pro")
+        self.assertNotIn("--effort", launch.args)
 
     def test_launch_with_effort_strips_suffix(self):
         self.chat.meta["effort"] = "high"
