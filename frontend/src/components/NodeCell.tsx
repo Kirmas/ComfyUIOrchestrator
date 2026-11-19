@@ -564,7 +564,7 @@ export function FullSizeModal({
             autoPlay
             playsInline
             loop
-            style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+            className="fullsize-video"
           />
         ) : asset?.kind === "audio" ? (
           <div

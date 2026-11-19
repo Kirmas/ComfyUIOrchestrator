@@ -747,6 +747,19 @@ input, select, textarea {
   user-select: none;
 }
 
+/* Same fit-to-viewport box as .zoomable-image img: a percentage max-height
+   resolves against .image-modal-content, which has no definite height, so it
+   never constrained anything and a tall video spilled out of the frame. */
+.fullsize-video {
+  display: block;
+  max-width: calc(95vw - 24px);
+  max-height: calc(95vh - 24px);
+  width: auto;
+  height: auto;
+  border-radius: 10px;
+  background: #000;
+}
+
 .zoom-controls {
   position: absolute;
   bottom: 8px;
@@ -1173,6 +1186,7 @@ th, td {
      that var inline on .zoomable-image, which -- being a closer ancestor of
      the img -- would shadow anything we set higher up. This descendant
      selector still cleanly beats the base .zoomable-image img rule. */
+  .image-modal-fullscreen .fullsize-video,
   .image-modal-fullscreen .zoomable-image img {
     max-width: 100vw;
     max-height: 100vh;
