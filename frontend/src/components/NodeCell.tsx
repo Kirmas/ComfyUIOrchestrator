@@ -11,6 +11,7 @@ import { assetFace, getDashboardFaceCached, invalidateDashboardFace } from "../a
 import { resolveSlotAsset } from "../slotResolution";
 import { useProjectStore } from "../state/projectStore";
 import { defaultInputsForSchema, groupTemplatesByCategory, slotFields } from "../templateUtils";
+import { openAgentChat } from "../agentNav";
 import type { Asset, AssetKind, Backend, Capability, Dashboard, InputRef, Job, NodeItem, NodeStatus, NodeTemplate } from "../types";
 import { useT, type TFunc } from "../i18n";
 import { backendColors, cx, extensionForMimeType, formatDuration } from "../utils";
@@ -1489,19 +1490,25 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   };
 
   useEffect(() => {
-    if (node.status !== "running" && node.status !== "queued") return;
+    const live = node.status === "running" || node.status === "queued";
+    // An agent task's job outlives the run: it is where the chat link and the
+    // agent's own failure reason live, and both must survive a page reload.
+    // Read once for a finished one -- nothing is left to poll.
+    const finishedAgentTask = node.node_type === "native.agent_task" && (node.status === "done" || node.status === "error");
+    if (!live && !finishedAgentTask) return;
     let cancelled = false;
     const tick = async () => {
       const list = await nodesApi.jobs(node.id).catch(() => []);
       if (!cancelled) setJobs(list);
     };
     tick();
+    if (!live) return () => { cancelled = true; };
     const id = setInterval(tick, 2500);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [node.id, node.status]);
+  }, [node.id, node.status, node.node_type]);
 
   const chooseTemplate = async (templateId: string) => {
     const chosen = templates.find((t) => t.id === templateId);
@@ -1599,6 +1606,10 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
   // picking-source is reused as-is (a solid accent outline) -- an armed copy is
   // the same "this cell is the source, now click a target" state a compare or a
   // ref is in, and it reads better as one visual language than a third one.
+  // native.agent_task: its job's external id is the agent's chat id (backend core/agent_task.py).
+  const isAgentTask = node.node_type === "native.agent_task";
+  const agentChatId = isAgentTask ? (jobs.find((j) => j.external_job_id)?.external_job_id ?? null) : null;
+  const agentJobError = isAgentTask && node.status === "error" ? (jobs.find((j) => j.error)?.error ?? null) : null;
   const cls = cx("node-cell", `status-${node.status}`, isNative && "node-cell-native", isCopySource && "picking-source");
 
   // Row-span paradigm: a slot's source is purely positional now (which row,
@@ -1677,6 +1688,14 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                 </option>
               ))}
             </select>
+          ) : field.type === "code" ? (
+            <textarea
+              className="code-field"
+              rows={10}
+              spellCheck={false}
+              value={(node.params[field.name] as string) ?? ""}
+              onChange={(e) => updateParam(field.name, e.target.value)}
+            />
           ) : field.type === "text" ? (
             <>
               {resolvedSlotRefs.length > 0 && (
@@ -2075,6 +2094,17 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
       )}
 
       {node.error && <div className="error-text">{node.error}</div>}
+      {/* An agent task fails for a reason only the job carries (the agent's own
+          words: "the mesh has no head"); the node's own message is the generic
+          "all variants failed". */}
+      {agentJobError && <div className="error-text">{agentJobError}</div>}
+      {agentChatId && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <button onClick={() => openAgentChat(agentChatId)} title={t("cell.agentChatTitle")}>
+            💬 {t("cell.agentChat")}
+          </button>
+        </div>
+      )}
 
       {isCopySource && <div style={{ fontSize: 10, color: "var(--accent)" }}>{t("cell.clickToPlaceCopy")}</div>}
 

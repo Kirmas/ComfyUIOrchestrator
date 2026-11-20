@@ -1196,6 +1196,166 @@ async def place_reference_asset(track_id: str, step_index: int, asset_id: str) -
     )
 
 
+# ---------- agent tasks (core/agent_task.py) ----------
+@mcp_server.tool()
+async def view_asset(asset_id: str, max_px: int = _VIEW_MAX_PX, region: list[float] | None = None) -> list:
+    """Look at a library image (or mask) by its asset id -- for an asset you were
+    handed that isn't in one of your nodes (get_candidates takes a node id).
+    Scaled to fit max_px; region=[left, top, right, bottom] as fractions of the
+    image crops a detail first, exactly as in get_candidates. Meshes, video and
+    audio can't be shown this way (open a mesh with scene_create)."""
+    from mcp.server.fastmcp import Image
+
+    if region is not None and (len(region) != 4 or not (0 <= region[0] < region[2] <= 1 and 0 <= region[1] < region[3] <= 1)):
+        raise ValueError("region must be [left, top, right, bottom], fractions of the image with left < right and top < bottom")
+    try:
+        key = uuid.UUID(asset_id)
+    except ValueError:
+        raise ValueError(f"{asset_id!r} is not an asset id") from None
+    async with async_session_maker() as db:
+        asset = await db.get(Asset, key)
+    if asset is None:
+        raise ValueError(f"no asset {asset_id}")
+    kind = getattr(asset.kind, "value", asset.kind)
+    if kind not in ("image", "mask"):
+        return [f"asset {asset_id} is a {kind} ({asset.mime_type}), which can't be shown as a picture"
+                + ("; open it with scene_create to work on and render it" if kind == "mesh" else "")]
+    data = await asyncio.to_thread(get_storage().get_object, asset.storage_key)
+    view, fmt, size = await asyncio.to_thread(_agent_view, data, max_px, region)
+    return [f"asset {asset_id} ({kind}, sent at {size[0]}x{size[1]})", Image(data=view, format=fmt)]
+
+
+@mcp_server.tool()
+async def finish_task(task_id: str, asset_ids: list[str], message: str = "") -> dict:
+    """Hand in the result of a TASK you were given (your first message names the
+    task_id). The assets you pass become the task node's output -- one asset per
+    distinct result; several means the person chooses between them. With
+    asset_ids=[] it reports that you could not complete the task: put the reason
+    in `message`. Call it exactly once, as the last thing you do."""
+    return await _post(f"/api/agent-tasks/{task_id}/result", {"asset_ids": asset_ids, "message": message})
+
+
+# ---------- live Blender scenes (core/blender_scene.py) ----------
+# A scene is a workshop, not a deliverable: open one over some assets, work in
+# it as long as needed, take a result out as an ordinary asset, destroy it.
+@mcp_server.tool()
+async def scene_help() -> str:
+    """The reference for working in a Blender scene: the predefined helpers
+    (render_to, set_view, verts_under_mask, grow, falloff, ...), the rules that
+    matter (render resolution before framing, a mask only reaches the
+    camera-facing surface, look at a render after every real change) and a
+    worked example. Read it once before the first scene_run."""
+    return (await _get("/api/scenes/guide"))["guide"]
+
+
+@mcp_server.tool()
+async def scene_create(asset_ids: list[str], name: str = "", max_tris: int | None = None) -> dict:
+    """Open a live Blender scene over existing assets (a mesh to work on, plus
+    optionally reference images or a painted mask -- every asset is written to a
+    file listed in INPUTS inside the scene). Meshes (GLB/FBX/OBJ) are imported
+    automatically. Returns the scene's id and a summary; call scene_help for how to
+    work in it.
+
+    A model denser than ~1M triangles is simplified to ~300k first so it fits
+    the server's memory -- the input's `note` in the reply says when that
+    happened, and the original asset is never changed (what you export is
+    therefore the working-detail version). max_tris=0 turns simplification off;
+    N simplifies anything over N triangles.
+
+    Only a couple of scenes can be open at once; scene_destroy yours when done.
+    An abandoned scene closes itself after ~15 minutes (its checkpoint is kept
+    for a week and any call reopens it)."""
+    return await _post("/api/scenes", {"asset_ids": asset_ids, "name": name or None, "max_tris": max_tris})
+
+
+@mcp_server.tool()
+async def scene_run(scene_id: str, code: str, timeout_s: float = 120) -> dict:
+    """Run Python (bpy) in the scene, in a namespace that persists between
+    calls. Returns {ok, output, ms}; on an error `output` is the traceback and
+    the scene keeps whatever changed before it. A call longer than timeout_s
+    (max 900) is killed and the scene returns to its previous checkpoint.
+
+    The reply may carry `recycled`: the scene process had grown large and was
+    restarted from its checkpoint -- the scene is intact but python variables
+    from earlier calls are gone. See scene_help."""
+    return await _post(f"/api/scenes/{scene_id}/run", {"code": code, "timeout_s": timeout_s})
+
+
+@mcp_server.tool()
+async def scene_render(
+    scene_id: str,
+    views: list[str] | None = None,
+    frames: list[int] | None = None,
+    engine: str = "workbench",
+    size: int = 512,
+    max_px: int = _VIEW_MAX_PX,
+) -> list:
+    """LOOK at the scene: renders it and returns the picture so you can judge
+    your work instead of trusting numbers. Do this after every real change.
+
+    views: front back left right top bottom three_quarter three_quarter_back
+    (default ["front"]); give several for a contact sheet, each tile labelled.
+    frames: animation frames to render (a row per frame) -- for checking an
+    animation. engine: workbench (instant, default) | eevee (nicer) | cycles
+    (slow). size: pixels per tile."""
+    from mcp.server.fastmcp import Image
+
+    meta = await _post(f"/api/scenes/{scene_id}/render", {"views": views or ["front"], "frames": frames, "engine": engine, "size": size})
+    async with get_client() as client:
+        r = await client.get(f"/api/scenes/{scene_id}/render")
+        raise_for_api_error(r)
+        data = r.content
+    view, fmt, shown = await asyncio.to_thread(_agent_view, data, max_px, None)
+    note = (f" (engine fell back to {meta['engine']})" if meta["engine"] != engine else "")
+    return [
+        f"scene {scene_id}: {meta['width']}x{meta['height']} px, views {meta['views']}"
+        f"{', frames ' + str(meta['frames']) if meta['frames'] else ''}, {meta['ms']} ms{note}",
+        Image(data=view, format=fmt),
+    ]
+
+
+@mcp_server.tool()
+async def scene_info(scene_id: str) -> dict:
+    """What is in the scene right now: every object (type, dimensions, vertices,
+    faces, modifiers, materials, vertex groups), armatures with their bone names,
+    animation actions, frame range, overall bounds -- plus the scene's own state
+    (open/closed, memory, inputs and their notes)."""
+    return await _get(f"/api/scenes/{scene_id}/info")
+
+
+@mcp_server.tool()
+async def scene_export(scene_id: str, format: str = "glb", name: str = "") -> dict:
+    """Take the result out: exports everything in the scene (not the helper
+    camera/lights; modifiers applied; animation included) as glb, fbx or obj
+    and stores it as a new library asset. Returns the asset (its `id` is the
+    asset_id). Put it in the grid with place_reference_asset(track_id,
+    step_index, asset_id) -- GLB shows in the 3D viewer, FBX/OBJ are files to
+    download. The scene stays open; destroy it when you're done."""
+    return await _post(f"/api/scenes/{scene_id}/export", {"format": format, "name": name or None})
+
+
+@mcp_server.tool()
+async def list_scenes() -> dict:
+    """The open and closed scenes, with state, memory, disk size and age, and
+    how many may be open at once. Check this before scene_create, and destroy
+    scenes you are finished with."""
+    return await _get("/api/scenes")
+
+
+@mcp_server.tool()
+async def scene_close(scene_id: str) -> dict:
+    """Stop the scene's Blender (frees its memory) but keep its checkpoint, so a
+    later call can reopen it where it was."""
+    return await _post(f"/api/scenes/{scene_id}/close")
+
+
+@mcp_server.tool()
+async def scene_destroy(scene_id: str) -> str:
+    """Delete the scene and all its files. Export what you want to keep first."""
+    await _delete(f"/api/scenes/{scene_id}")
+    return f"scene {scene_id} destroyed"
+
+
 # ---------- bug reports (night mode, agent_runner/night.py) ----------
 @mcp_server.tool()
 async def report_bug(summary: str, details: str) -> dict:

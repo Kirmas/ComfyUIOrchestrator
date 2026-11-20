@@ -18,6 +18,7 @@ from app.core.asset_types import (
     resolve_asset_node,
 )
 from app.core.comfyui_backend import ComfyUIBackend, wait_with_timeout
+from app.core.job_backend import AssetInput
 from app.core.job_backend import JobStatus as BackendJobStatus
 from app.core.node_types import reserved_slot_target, resolve_effective_template, slot_fields
 from app.core.queue import job_queue
@@ -424,7 +425,7 @@ async def _get_or_create_output_asset_node(db, workflow_node: Node, is_native: b
 
 
 async def resolve_node_inputs(
-    db, node: Node, param_schema: dict[str, Any] | None, defaults: dict[str, Any] | None = None
+    db, node: Node, param_schema: dict[str, Any] | None, defaults: dict[str, Any] | None = None, by_reference: bool = False
 ) -> dict[str, Any]:
     """Merge Node.inputs (InputRef list, matched positionally to image/file
     slot fields in param_schema) with Node.params (direct values for the
@@ -440,7 +441,10 @@ async def resolve_node_inputs(
 
     param_schema/defaults come from resolve_effective_template's
     EffectiveTemplate -- works the same whether it's native (code registry)
-    or template (DB) backed."""
+    or template (DB) backed.
+
+    by_reference: a slot's asset comes back as an AssetInput (id, kind, mime)
+    instead of its bytes -- for a backend that passes it on by id."""
     fields = (param_schema or {}).get("fields", [])
     slot_field_names = [f["name"] for f in slot_fields(param_schema)]
     optional_slot_names = {f["name"] for f in slot_fields(param_schema) if not f.get("required", True)}
@@ -525,7 +529,9 @@ async def resolve_node_inputs(
             logger.warning("node %s slot '%s': unknown input ref type %r -- no image resolved", node.id, field_name, ref_type)
             asset = None
 
-        if asset is not None:
+        if asset is not None and by_reference:
+            resolved[field_name] = AssetInput(asset_id=str(asset.id), kind=str(getattr(asset.kind, "value", asset.kind)), mime_type=asset.mime_type)
+        elif asset is not None:
             resolved[field_name] = storage.get_object(asset.storage_key)
         elif field_name in optional_slot_names:
             # Deliberately empty, not just unconnected -- tell build_workflow
@@ -897,10 +903,19 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
         succeeded = False
 
         async def _run() -> None:
-            resolved_inputs = await resolve_node_inputs(db, node, effective.param_schema, effective.defaults)
+            # A backend may be long-lived by nature (an agent working for many
+            # minutes) and may not be safe to run twice (each run costs real
+            # tokens): `job_timeout_s` replaces the global network-call budget and
+            # `retryable = False` turns the automatic retries off.
+            budget = getattr(choice.instance, "job_timeout_s", settings.job_timeout_seconds)
+            agentic = getattr(choice.instance, "agentic", False)
+            resolved_inputs = await resolve_node_inputs(db, node, effective.param_schema, effective.defaults, by_reference=agentic)
+            if agentic:
+                # Where the work belongs, for a backend that opens a chat about it.
+                resolved_inputs["_task"] = {"node_id": str(node.id), "project_id": str(project_id), "job_id": job_id}
             external_job_id = await wait_with_timeout(
                 choice.instance.submit(choice.capability.config if choice.capability else {}, resolved_inputs),
-                settings.job_timeout_seconds,
+                budget,
             )
             job.external_job_id = external_job_id
             await db.commit()
@@ -936,9 +951,7 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
 
                 status = await _wait_with_stall_detection(choice.instance, external_job_id, on_progress)
             else:
-                status = await wait_with_timeout(
-                    _poll_until_terminal(choice.instance, external_job_id), settings.job_timeout_seconds
-                )
+                status = await wait_with_timeout(_poll_until_terminal(choice.instance, external_job_id), budget)
 
             if status == BackendJobStatus.error:
                 detail = await choice.instance.error_detail(external_job_id)
@@ -1029,7 +1042,7 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                 return
             job.retries += 1
             job.error = str(exc)
-            if job.retries <= settings.max_retries:
+            if job.retries <= settings.max_retries and getattr(choice.instance, "retryable", True):
                 job.status = JobStatusEnum.pending
                 await db.commit()
                 # A stall/timeout means this backend was slow, not necessarily
@@ -1353,5 +1366,16 @@ async def cancel_job(job_id: str) -> None:
                     await ComfyUIBackend(base_url=backend.base_url).cancel(job.external_job_id)
                 except Exception:
                     logger.warning("cancel failed for job %s on backend %s", job_id, backend.id, exc_info=True)
+        elif job.external_job_id:
+            # No backend row: a native node. Most finish inside submit() and have
+            # nothing to stop, but one with work in flight (an agent task, whose
+            # agent would otherwise keep running -- and spending -- after the node
+            # reads "cancelled") has to be told.
+            effective = await resolve_effective_template(db, node)
+            if effective is not None and effective.is_native:
+                try:
+                    await effective.native.backend_cls().cancel(job.external_job_id)
+                except Exception:
+                    logger.warning("cancel failed for native job %s", job_id, exc_info=True)
 
         await _finalize_node_if_done(db, node.id, str(track.project_id))

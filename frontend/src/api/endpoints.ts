@@ -46,6 +46,9 @@ import type {
   Track,
   UnownedAssetScanResult,
   WorkflowAnalysis,
+  SceneInfo,
+  SceneListing,
+  SceneSummary,
 } from "../types";
 
 export const backendsApi = {
@@ -472,4 +475,11 @@ export const pushApi = {
   vapidPublicKey: () => api.get<{ key: string }>("/api/push/vapid-public-key"),
   subscribe: (subscription: PushSubscriptionJSON) => api.post<void>("/api/push/subscribe", subscription),
   unsubscribe: (endpoint: string) => api.post<void>("/api/push/unsubscribe", { endpoint }),
+};
+
+export const scenesApi = {
+  list: () => api.get<SceneListing>("/api/scenes"),
+  info: (id: string) => api.get<SceneInfo>(`/api/scenes/${id}/info`),
+  close: (id: string) => api.post<SceneSummary>(`/api/scenes/${id}/close`),
+  remove: (id: string) => api.delete(`/api/scenes/${id}`),
 };

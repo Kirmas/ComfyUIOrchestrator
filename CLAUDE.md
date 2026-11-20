@@ -114,6 +114,134 @@ grid. This is *organisational decomposition*, not a performance trick.
   past several million characters. The route now reports only whether such a
   field is set, never its bytes.
 
+## Live Blender scenes (`backend/app/core/blender_scene.py`, `api/routes/scenes.py`, MCP `scene_*`)
+
+A **scene** is a workshop an agent opens over some assets, works in for as long
+as it needs, takes a result out of, and closes. One background Blender per scene
+(`blender_scene_server.py` runs *inside* it, listening on a unix socket and
+`exec`ing code in one persistent namespace), so 100 small edits cost ~8 ms
+total instead of a Blender start-up each. This is what replaced the idea of
+stacking many `native.blender_script` nodes for one animation.
+
+- **State is files, not DB rows.** `<cache_dir>/scenes/<id>/` (`meta.json`,
+  `scene.blend` checkpoint, `in/`, `renders/`, `blender.log`). No migration,
+  nothing in the media dir (backup/GC treat every file there as an asset). A
+  scene is disposable by design; what is worth keeping leaves through
+  `export`, which makes an ordinary library `Asset` (`node_id` None, like an
+  upload) -- the grid then references it (`place_reference_asset`).
+- **Lifecycle is enforced by the manager, never trusted to the agent**: a
+  checkpoint `.blend` is saved after every successful call; idle close after
+  `blender_scene_idle_s` (checkpoint kept, deleted after
+  `blender_closed_keep_days`); any call on a closed scene reopens it; at most
+  `blender_max_scenes` open at once. A deploy restarts the API unit and systemd
+  takes the Blender children with it, so a scene is "closed, checkpoint intact"
+  afterwards (`recover()` at startup).
+- **Memory is the real constraint** (measured, 10 GB box): a 6M-triangle mesh
+  costs 2.1 GB to import and 5.7 GB to decimate inside Blender, which **never
+  gives memory back**. Hence: inputs over `blender_simplify_over_tris` (1M) are
+  simplified to ~300k *before* import, in a subprocess
+  (`core/mesh_simplify.py`, numpy GLB parser + `fast-simplification`; 6M->300k
+  in 5 s; single plain mesh only -- anything rigged/animated/multi-part is left
+  alone and the input's `note` says why); a scene above `blender_scene_soft_mb`
+  is restarted from its checkpoint after a call (the reply says `recycled`;
+  python variables are lost, the scene is not); above `blender_scene_hard_mb`
+  it is killed *mid-call* by the 2 s sweeper; and below
+  `blender_emergency_free_mb` of system memory the largest scene is killed to
+  protect the API. Render defaults to **Workbench** (full 6M mesh in 0.8 s /
+  1.2 GB; EEVEE needed 5 s and was what killed the old 5.8 GB VM).
+- **The agent's code runs as the service user.** The child env is stripped
+  (no `API_TOKEN`/DB URL) and `HOME` is the scene dir, but it can still read
+  files the service can -- the person accepted this knowingly, same as
+  `native.blender_script`. Don't treat `scene_run` as sandboxed.
+- **Hard-won correctness details** (each found by a test, don't undo):
+  * Setting a camera's `location`/`rotation` does **not** update
+    `matrix_world` until the depsgraph re-evaluates -- `set_view` calls
+    `view_layer.update()`, otherwise `verts_under_mask` projects through the
+    *previous* camera pose and selects the wrong vertices (looked like a
+    working edit that moved a nose instead of an ear).
+  * `verts_under_mask` only reaches the **camera-facing** surface (z-buffer
+    visibility, vectorised -- a per-vertex ray cast is far too slow on
+    millions of vertices). A mask is a "where" hint; the agent must `grow()` +
+    `falloff()` before deforming or the back of a part is left behind.
+  * Set render resolution *before* `set_view`/`render_to` (framing depends on
+    aspect) and run `verts_under_mask` with the same camera/size the mask was
+    painted on.
+  * The checkpoint save happens *outside* the stdout capture so Blender's
+    "Saved copy as ..." doesn't pollute what the agent reads; tracebacks drop
+    the server's own frames and quote the agent's lines via `linecache`.
+  * Never run two API processes over one `scenes` dir: each sweeper enforces
+    its own limits on *every* scene it sees (a second dev server with a
+    700 MB cap silently killed the first one's scenes -- 2026-11-20).
+- `scripts/blender_scene_smoke_test.py http://127.0.0.1:8011 dev-local-token`
+  checks the whole thing end to end (builds its own 1.2M-triangle sphere and a
+  painted mask); `--extras-only --idle --hard` against a server started with
+  `BLENDER_SCENE_IDLE_S=6 BLENDER_SCENE_HARD_MB=700` checks idle close and the
+  memory kill.
+- **The Scenes page** (`frontend/src/components/Scenes.tsx`, tab "Scenes"): every
+  scene with its picture, inputs (and the simplification note), RAM now/peak,
+  disk size, last activity, and Details / Close / Delete (+ "delete all
+  closed") -- so nothing ever needs an SSH session to clean up. The tab exists
+  only when `GET /api/scenes` says `available` (Blender found), same rule as the
+  Blender node type. Picture URLs carry `?token=` like assets (an `<img>` can't
+  send a header) and are added by the route **only for the page, not for an MCP
+  agent's calls** (`X-Actor: agent`) -- an agent has no use for a URL and
+  shouldn't get the token in its context. "Details" is disabled for a closed
+  scene because `GET /{id}/info` *reopens* it (it asks the live Blender).
+  Verified without a browser (none can run on this box: no libnss3) by
+  server-rendering the components with real API data in both languages.
+## Agent task node (`native.agent_task`, `backend/app/core/agent_task.py`)
+
+A node that hands its job to an agent instead of running a model -- "an
+alternative to chat" in the grid. All six inputs (`input_1..6`, type `file`,
+optional) take any asset; the person writes `instruction`; running it opens an
+ordinary **project chat** (visible in the Agent tab, followable and stoppable
+there), gives it the task and the input assets' **ids**, and waits. Whatever the
+agent passes to the MCP tool `finish_task` becomes the node's output (several =
+an `asset.select` picker). The node never touches Blender itself; the agent
+uses the same MCP tools any project chat has (`scene_*`, `view_asset`).
+
+- **How it plugs into the worker** (`worker/tasks.py run_variant_job`), via three
+  opt-in attributes on a backend class rather than a special case: `agentic`
+  (slots arrive as `AssetInput` ids, not bytes -- no 140 MB mesh loaded just to
+  pass its id -- plus a `_task` dict with node/project/job), `job_timeout_s`
+  (replaces the 10-minute network budget; the node's own `timeout_min` is what
+  really bounds a run) and `retryable = False`. **Automatic retries are off
+  on purpose**: a retry would start a second agent on the same job and spend
+  tokens twice.
+- `submit()` returns at once with the **chat id as the job's external id**
+  (so the page can link a running node to its chat) and a background watcher
+  polls the chat every 3 s: finished by the agent's `finish_task`; one
+  **nudge** if the turn ends without it; then error. Also errors on: chat
+  ended as error/stopped, `timeout_min` (chat is stopped), an approval nobody
+  can give (120 s, chat stopped), runner unreachable 5x in a row.
+- **The agent's reason lives on the Job, not the node**: the node's own message
+  is the generic "all variants failed", so `NodeCell.tsx` shows
+  `jobs[0].error` for agent tasks and loads jobs for a *finished* one too (they
+  are otherwise read only while running) -- the chat link and the reason must
+  survive a reload.
+- **Result copy never deletes an input.** `result()` copies each handed-in
+  asset into the node and deletes it afterwards only if it is the agent's own
+  temporary export (`meta.source == "blender_scene"`, no node); any other
+  asset -- above all an *input* the agent passed straight back ("no change
+  needed") -- is only copied. The asset delete route destroys the file
+  unconditionally, so this guard is the only thing standing between an agent
+  and the person's source asset.
+- State is in memory (`TASKS`). A deploy mid-task orphans the job (the usual
+  "manual re-roll" rule) but not the chat -- the runner is a separate service;
+  the agent's later `finish_task` answers "no running task" and says so.
+- **Cancelling works for native nodes now**: `cancel_job` used to stop the
+  worker's task and call `ComfyUIBackend.cancel` only when the job had a backend
+  row, so a cancelled agent task kept running (and spending) -- found by the
+  smoke test; it now calls the native backend's `cancel` too.
+- Tests: `scripts/agent_task_unit_test.py` (watcher logic with a scripted chat,
+  fast) and `scripts/agent_task_smoke_test.py` (starts its own dev server +
+  `scripts/fake_agent_runner.py`, which *plays the agent over the real MCP
+  protocol* against live Blender scenes: result, input-not-deleted, agent says
+  "can't", agent goes silent -> exactly one nudge, cancel -> chat stopped).
+  Stop other dev servers first (two API processes over one scenes dir fight).
+- Supersedes `native.blender_script` (still registered; remove it when the
+  person says so). Not built yet: the studio (view/angle/mask on the page).
+
 ## Idea board (`backend/app/api/routes/boards.py`, `frontend/src/components/Board.tsx`)
 
 Pre-production — the idea, the references, the divergence — lives on a separate

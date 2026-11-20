@@ -19,6 +19,7 @@ import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
 import { LANGS, tr, useLangStore, useT } from "../i18n";
 import { currentPushSubscription, disablePushNotifications, enablePushNotifications, pushSupported } from "../pushNotifications";
 import type { TKey } from "../locales/en";
+import { formatBytes } from "../utils";
 
 // Only one provider is actually wired up backend-side right now
 // (GeminiImageBackend, api_backend.py's PROVIDERS registry) -- a friendly
@@ -115,18 +116,6 @@ function NotificationsSection() {
       </div>
     </div>
   );
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let v = n / 1024;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(1)} ${units[i]}`;
 }
 
 const MIGRATION_ACTIVE: MigrationStatus["status"][] = ["copying", "verifying"];

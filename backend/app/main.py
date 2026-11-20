@@ -9,9 +9,10 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
 
-from app.api.routes import agent_chats, annotations, assets, backends, boards, capabilities, dashboards, design_docs, health, jobs, logs, node_templates, node_types, nodes, project_categories, projects, push, system, tracks, ws
+from app.api.routes import agent_chats, agent_tasks, annotations, assets, backends, boards, capabilities, dashboards, design_docs, health, jobs, logs, node_templates, node_types, nodes, project_categories, projects, push, scenes, system, tracks, ws
 from app.config import get_settings
 from app.core.auth import auth_middleware
+from app.core.blender_scene import scene_manager, scene_sweeper_loop
 from app.core.heartbeat import heartbeat_loop
 from app.core.logging_setup import configure_logging
 from app.core.queue import job_queue
@@ -55,11 +56,17 @@ async def lifespan(app: FastAPI):
     await recover_orphaned_jobs()
     await job_queue.start()
     heartbeat_task = asyncio.create_task(heartbeat_loop())
+    # Live Blender scenes: a restart leaves their directories but not their
+    # processes, so mark them closed, then keep an eye on idle/memory/TTL.
+    await scene_manager.recover()
+    scene_task = asyncio.create_task(scene_sweeper_loop())
     # The MCP session manager owns the streamable-HTTP transport's own
     # background state; it has to be entered for /mcp to answer at all.
     async with mcp_server.session_manager.run():
         yield
     heartbeat_task.cancel()
+    scene_task.cancel()
+    await scene_manager.shutdown()
     await job_queue.stop()
 
 
@@ -101,7 +108,9 @@ def create_app() -> FastAPI:
         node_types.router,
         dashboards.router,
         system.router,
+        scenes.router,
         agent_chats.router,
+        agent_tasks.router,
         agent_chats.reports_router,
         agent_chats.night_router,
         push.router,

@@ -26,6 +26,18 @@ class AssetRef:
     meta: dict[str, Any] | None = None
 
 
+@dataclass
+class AssetInput:
+    """A slot's asset by reference. Backends that hand an input on by id instead
+    of using its bytes (the agent task: the agent opens the asset itself) set
+    `agentic = True`, and resolve_node_inputs then gives them this in place of the
+    bytes -- no point loading a 140 MB mesh into the API process to pass its id."""
+
+    asset_id: str
+    kind: str
+    mime_type: str
+
+
 class JobBackend(Protocol):
     """Uniform interface every execution backend (ComfyUI instance or paid API) implements.
 

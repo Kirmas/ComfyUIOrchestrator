@@ -23,6 +23,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.agent_task import INPUT_SLOTS, AgentTaskBackend
+from app.core.blender import BLENDER_SCRIPT_INSTRUCTION, BlenderScriptBackend, find_blender_binary
 from app.core.native_backend import (
     DEFAULT_TRANSPLANT_FEATHER,
     CharacterChartBackend,
@@ -291,6 +293,58 @@ async def resolve_effective_template(db: AsyncSession, node: Node) -> EffectiveT
         )
 
     return None
+
+
+# A node that hands its job to an agent (core/agent_task.py): every input is
+# optional and of any kind, the person writes what to do, and what the agent
+# passes to finish_task is the output. Always registered -- it needs the agent
+# runner, not any particular tool; the prompt it builds mentions the Blender
+# scenes only where Blender is installed.
+NATIVE_NODE_TYPES["agent_task"] = NativeNodeType(
+    slug="agent_task",
+    name="Agent Task",
+    param_schema={
+        "fields": [
+            {"name": "instruction", "type": "text", "label": "What should the agent do?"},
+            *[{"name": name, "type": "file", "label": f"Input {i}", "required": False} for i, name in enumerate(INPUT_SLOTS, 1)],
+            {"name": "provider", "type": "enum", "label": "Agent", "options": ["claude", "codex", "agy"], "default": "claude"},
+            {"name": "model", "type": "text", "label": "Model (empty = the agent's own default)", "optional": True},
+            {"name": "timeout_min", "type": "int", "label": "Time limit (minutes)", "default": 30, "min": 2, "max": 240},
+        ]
+    },
+    defaults={"provider": "claude", "timeout_min": 30},
+    backend_cls=AgentTaskBackend,
+    prompt_instruction=(
+        "`instruction` is a complete brief for a capable agent that works UNATTENDED and cannot ask questions: say what "
+        "to produce, what each input is (Input 1..6 are the slots in order; they may be meshes, images, masks or "
+        "anything else), the constraints, and what the result should look like. One sentence is rarely enough. Running "
+        "the node opens an agent chat in this project; whatever the agent hands in becomes this node's output."
+    ),
+)
+
+
+# Blender is an optional system dependency: without it the node type doesn't
+# exist at all (absent from the picker and from list_node_types), rather than
+# existing and failing every run. Checked once, at import -- installing or
+# removing Blender takes a service restart to show up.
+if find_blender_binary() is not None:
+    NATIVE_NODE_TYPES["blender_script"] = NativeNodeType(
+        slug="blender_script",
+        name="Blender Script",
+        param_schema={
+            "fields": [
+                {"name": "mesh", "type": "file", "label": "Mesh (GLB)", "required": True},
+                # "code", not "text": a text field gets idea-board {tag}
+                # macro expansion at run time, which would rewrite Python
+                # braces (dicts, f-strings) whenever one matched a tag.
+                {"name": "script", "type": "code", "label": "Python (bpy) script"},
+                {"name": "timeout_s", "type": "int", "label": "Timeout (s)", "default": 120, "min": 5, "max": 600, "optional": True},
+            ]
+        },
+        defaults={"timeout_s": 120},
+        backend_cls=BlenderScriptBackend,
+        prompt_instruction=BLENDER_SCRIPT_INSTRUCTION,
+    )
 
 
 # Optional, gitignored extension point (see .gitignore) for native node types

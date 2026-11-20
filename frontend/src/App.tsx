@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { AgentChat } from "./components/AgentChat";
 import { AgentDock } from "./components/AgentDock";
+import { OPEN_AGENT_EVENT } from "./agentNav";
 import { ApiError, getApiToken } from "./api/client";
-import { designDocApi, projectsApi } from "./api/endpoints";
+import { designDocApi, projectsApi, scenesApi } from "./api/endpoints";
 import type { DesignDocSummary, Project } from "./types";
 import { Board } from "./components/Board";
 import { ConnectionBar } from "./components/ConnectionBar";
@@ -10,12 +11,13 @@ import { DesignDoc, type DocLanding, type DocLang } from "./components/DesignDoc
 import { Grid } from "./components/Grid";
 import { Logs } from "./components/Logs";
 import { ProjectsPage } from "./components/ProjectsPage";
+import { Scenes } from "./components/Scenes";
 import { Settings } from "./components/Settings";
 import { useT } from "./i18n";
 import { cx } from "./utils";
 
 // "gdoc": a global design doc, opened from its folder on the projects page.
-type View = "projects" | "grid" | "board" | "doc" | "gdoc" | "agent" | "settings" | "logs";
+type View = "projects" | "grid" | "board" | "doc" | "gdoc" | "agent" | "scenes" | "settings" | "logs";
 type AuthStatus = "checking" | "unauthenticated" | "authenticated";
 type DocPlace = { view: "doc"; projectId: string } | { view: "gdoc"; docId: string };
 
@@ -23,7 +25,7 @@ const LAST_PROJECT_KEY = "comfy-orchestrator:lastProjectId";
 const LAST_VIEW_KEY = "comfy-orchestrator:lastView";
 const LAST_GLOBAL_DOC_KEY = "comfy-orchestrator:lastGlobalDoc";
 
-const VIEWS: View[] = ["projects", "grid", "board", "doc", "gdoc", "agent", "settings", "logs"];
+const VIEWS: View[] = ["projects", "grid", "board", "doc", "gdoc", "agent", "scenes", "settings", "logs"];
 
 /** Reloading should put you back where you were, the same way the project
  * picker already remembers its selection -- landing back on the grid after
@@ -67,6 +69,26 @@ export default function App() {
       .list()
       .then(() => setAuthStatus("authenticated"))
       .catch(() => setAuthStatus("unauthenticated"));
+  }, []);
+
+  // The Scenes tab exists only where Blender is installed (same rule as the
+  // Blender node type): with none there is nothing to list.
+  const [scenesAvailable, setScenesAvailable] = useState(false);
+  useEffect(() => {
+    if (authStatus !== "authenticated") return;
+    scenesApi
+      .list()
+      .then((r) => setScenesAvailable(r.available))
+      .catch(() => setScenesAvailable(false));
+  }, [authStatus]);
+
+  // A grid cell asked to open an agent's chat (agentNav.ts).
+  useEffect(() => {
+    const open = () => goTo("agent");
+    window.addEventListener(OPEN_AGENT_EVENT, open);
+    return () => window.removeEventListener(OPEN_AGENT_EVENT, open);
+    // goTo only touches state setters and localStorage, so the first one is good for the app's lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const selectProject = (id: string) => {
@@ -217,6 +239,11 @@ export default function App() {
           <button onClick={() => goTo(view === "agent" ? "grid" : "agent")} className={view === "agent" ? "active" : ""}>
             {t("app.agent")}
           </button>
+          {scenesAvailable && (
+            <button onClick={() => goTo(view === "scenes" ? "grid" : "scenes")} className={view === "scenes" ? "active" : ""}>
+              {t("app.scenes")}
+            </button>
+          )}
           <button onClick={() => goTo(view === "logs" ? "grid" : "logs")} className={view === "logs" ? "active" : ""}>
             {t("app.logs")}
           </button>
@@ -251,6 +278,10 @@ export default function App() {
       ) : view === "settings" ? (
         <div className="main-area">
           <Settings />
+        </div>
+      ) : view === "scenes" && scenesAvailable ? (
+        <div className="main-area">
+          <Scenes />
         </div>
       ) : view === "logs" ? (
         <div className="main-area">

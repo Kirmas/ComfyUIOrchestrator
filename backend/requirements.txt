@@ -30,3 +30,7 @@ cryptography==50.0.2
 # Video & Audio decoding / poster frames (app/core/asset_preview.py). Bundles
 # ffmpeg 7.x libraries inside the manylinux binary wheel.
 av==19.0.2
+# Shrinks a very dense GLB before Blender sees it (app/core/mesh_simplify.py,
+# live Blender scenes). Only dependency is numpy (already pinned); 0 advisories
+# on OSV as of 2026-11-20.
+fast-simplification==0.2.0

@@ -45,6 +45,24 @@ class Settings(BaseSettings):
     # every file there as an asset. Safe to delete wholesale.
     cache_dir: str = "./cache"
 
+    # Path to the `blender` binary for native.blender_script (core/blender.py).
+    # Unset = look on PATH, then /opt/blender/blender; not found anywhere =
+    # that node type isn't registered at all.
+    blender_path: str | None = None
+
+    # Live Blender scenes (core/blender_scene.py). Sized from measurements on a
+    # 10 GB box: a 6M-triangle mesh peaks ~2 GB to import and ~5.7 GB to
+    # decimate, and Blender never returns memory it has taken.
+    blender_max_scenes: int = 2  # open at once
+    blender_scene_idle_s: int = 900  # close (checkpoint kept) after this much silence
+    blender_scene_soft_mb: int = 5000  # after a call, restart from the checkpoint above this RSS
+    blender_scene_hard_mb: int = 8000  # kill a scene above this RSS, mid-call if need be
+    blender_min_free_mb: int = 1500  # don't start/reopen a scene below this much MemAvailable
+    blender_emergency_free_mb: int = 800  # below this, the largest scene is killed to protect the API
+    blender_closed_keep_days: int = 7  # a closed scene's checkpoint is deleted after this
+    blender_simplify_over_tris: int = 1_000_000  # denser input meshes are simplified first (0 = never)
+    blender_simplify_target_tris: int = 300_000
+
     # Limits
     max_variants_per_node: int = 8
     # Bounds the *network calls* around a ComfyUI generation (submit, fetch

@@ -4462,3 +4462,49 @@ th, td {
 .agent-media-item .mesh-preview {
   width: min(100%, 320px);
 }
+
+/* native.blender_script's Python field -- whitespace matters in Python. */
+.field-row textarea.code-field {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  white-space: pre;
+  tab-size: 4;
+  overflow-x: auto;
+}
+
+/* --- Scenes page (live Blender workshops) --- */
+.scenes-summary { font-size: 12px; color: var(--text-dim); }
+.scenes-empty, .scenes-note { font-size: 12px; color: var(--text-dim); }
+.scene-list { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
+.scene-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--bg);
+}
+.scene-card.open { border-color: var(--accent); }
+.scene-card-main { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.scene-thumb {
+  width: 128px;
+  height: 128px;
+  flex: 0 0 auto;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 6px;
+  background: #1c1c1e;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.scene-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.scene-body { flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.scene-title { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.scene-state { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--text-dim); }
+.scene-state.running, .scene-state.starting { color: var(--accent); border-color: var(--accent); }
+.scene-line { font-size: 12px; overflow-wrap: anywhere; }
+.scene-line.dim, .scene-details.dim { color: var(--text-dim); }
+.scene-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.scene-details { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); overflow-x: auto; }
+button.scene-danger { color: var(--danger); border-color: var(--danger); }

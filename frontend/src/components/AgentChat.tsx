@@ -1,3 +1,4 @@
+import { LAST_AGENT_CHAT_KEY } from "../agentNav";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { agentChatsApi } from "../api/endpoints";
 import { useT } from "../i18n";
@@ -28,7 +29,7 @@ import type { AgentNodeRef } from "../state/agentDock";
 import { cx } from "../utils";
 import { MeshAssetPreview } from "./MeshAssetPreview";
 
-const LAST_CHAT_KEY = "comfy-orchestrator:lastAgentChat";
+const LAST_CHAT_KEY = LAST_AGENT_CHAT_KEY;
 // A new chat starts on whatever model was picked last, not always the default.
 // Per provider: a Claude alias means nothing to Codex.
 const lastModelKey = (provider: AgentProviderId) => `comfy-orchestrator:lastAgentModel:${provider}`;

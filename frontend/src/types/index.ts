@@ -57,7 +57,7 @@ export interface ParamField {
   // "layer_mask" is the same storage for a mask painted over two stacked
   // image slots rather than one -- see native.transplant and
   // TransplantPreview.tsx.
-  type: "image" | "video" | "audio" | "text" | "int" | "float" | "seed" | "enum" | "file" | "bool" | "mask" | "layer_mask";
+  type: "image" | "video" | "audio" | "text" | "int" | "float" | "seed" | "enum" | "file" | "bool" | "mask" | "layer_mask" | "code";
   label?: string;
   required?: boolean;
   // Not every capability for this node_type_slug has to honor this field --
@@ -845,4 +845,68 @@ export interface DesignDocSummary {
   project_id: string | null;
   category_id: string | null;
   created_at: string;
+}
+
+// --- Live Blender scenes (backend core/blender_scene.py) ---------------------
+export interface SceneInputInfo {
+  asset_id: string;
+  kind: string;
+  file: string;
+  auto_import: boolean;
+  objects: string[];
+  triangles?: number;
+  simplified_from?: number;
+  note?: string;
+}
+
+export interface SceneSummary {
+  id: string;
+  name: string;
+  state: "starting" | "running" | "closed";
+  owner: string | null;
+  created_at: number; // unix seconds
+  last_activity: number;
+  inputs: SceneInputInfo[];
+  runs: number;
+  renders: number;
+  rss_mb: number | null;
+  peak_rss_mb: number;
+  disk_bytes: number;
+  error: string | null;
+  has_preview: boolean;
+  has_checkpoint: boolean;
+  preview_url?: string;
+  render_url?: string;
+}
+
+export interface SceneListing {
+  scenes: SceneSummary[];
+  live: number;
+  max_live: number;
+  disk_bytes: number;
+  mem_available_mb: number;
+  available: boolean;
+}
+
+export interface SceneObjectInfo {
+  name: string;
+  type: string;
+  parent: string | null;
+  dimensions: number[];
+  vertices?: number;
+  faces?: number;
+  modifiers?: string[];
+  materials?: string[];
+  bone_count?: number;
+}
+
+export interface SceneInfo {
+  scene: SceneSummary;
+  blender: {
+    frame_range: [number, number];
+    fps: number;
+    objects: SceneObjectInfo[];
+    actions: { name: string; frame_range: number[] }[];
+    bounds: { min: number[]; max: number[] };
+  };
 }
