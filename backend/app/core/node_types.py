@@ -24,7 +24,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.agent_task import INPUT_SLOTS, AgentTaskBackend
-from app.core.blender import BLENDER_SCRIPT_INSTRUCTION, BlenderScriptBackend, find_blender_binary
 from app.core.native_backend import (
     DEFAULT_TRANSPLANT_FEATHER,
     CharacterChartBackend,
@@ -321,30 +320,6 @@ NATIVE_NODE_TYPES["agent_task"] = NativeNodeType(
         "the node opens an agent chat in this project; whatever the agent hands in becomes this node's output."
     ),
 )
-
-
-# Blender is an optional system dependency: without it the node type doesn't
-# exist at all (absent from the picker and from list_node_types), rather than
-# existing and failing every run. Checked once, at import -- installing or
-# removing Blender takes a service restart to show up.
-if find_blender_binary() is not None:
-    NATIVE_NODE_TYPES["blender_script"] = NativeNodeType(
-        slug="blender_script",
-        name="Blender Script",
-        param_schema={
-            "fields": [
-                {"name": "mesh", "type": "file", "label": "Mesh (GLB)", "required": True},
-                # "code", not "text": a text field gets idea-board {tag}
-                # macro expansion at run time, which would rewrite Python
-                # braces (dicts, f-strings) whenever one matched a tag.
-                {"name": "script", "type": "code", "label": "Python (bpy) script"},
-                {"name": "timeout_s", "type": "int", "label": "Timeout (s)", "default": 120, "min": 5, "max": 600, "optional": True},
-            ]
-        },
-        defaults={"timeout_s": 120},
-        backend_cls=BlenderScriptBackend,
-        prompt_instruction=BLENDER_SCRIPT_INSTRUCTION,
-    )
 
 
 # Optional, gitignored extension point (see .gitignore) for native node types

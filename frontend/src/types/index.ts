@@ -57,7 +57,7 @@ export interface ParamField {
   // "layer_mask" is the same storage for a mask painted over two stacked
   // image slots rather than one -- see native.transplant and
   // TransplantPreview.tsx.
-  type: "image" | "video" | "audio" | "text" | "int" | "float" | "seed" | "enum" | "file" | "bool" | "mask" | "layer_mask" | "code";
+  type: "image" | "video" | "audio" | "text" | "int" | "float" | "seed" | "enum" | "file" | "bool" | "mask" | "layer_mask";
   label?: string;
   required?: boolean;
   // Not every capability for this node_type_slug has to honor this field --

@@ -45,9 +45,9 @@ class Settings(BaseSettings):
     # every file there as an asset. Safe to delete wholesale.
     cache_dir: str = "./cache"
 
-    # Path to the `blender` binary for native.blender_script (core/blender.py).
+    # Path to the `blender` binary for live scenes (core/blender.py).
     # Unset = look on PATH, then /opt/blender/blender; not found anywhere =
-    # that node type isn't registered at all.
+    # the Scenes tab and API report `available: false`.
     blender_path: str | None = None
 
     # Live Blender scenes (core/blender_scene.py). Sized from measurements on a

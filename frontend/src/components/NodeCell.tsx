@@ -1688,14 +1688,6 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                 </option>
               ))}
             </select>
-          ) : field.type === "code" ? (
-            <textarea
-              className="code-field"
-              rows={10}
-              spellCheck={false}
-              value={(node.params[field.name] as string) ?? ""}
-              onChange={(e) => updateParam(field.name, e.target.value)}
-            />
           ) : field.type === "text" ? (
             <>
               {resolvedSlotRefs.length > 0 && (

@@ -120,8 +120,10 @@ A **scene** is a workshop an agent opens over some assets, works in for as long
 as it needs, takes a result out of, and closes. One background Blender per scene
 (`blender_scene_server.py` runs *inside* it, listening on a unix socket and
 `exec`ing code in one persistent namespace), so 100 small edits cost ~8 ms
-total instead of a Blender start-up each. This is what replaced the idea of
-stacking many `native.blender_script` nodes for one animation.
+total instead of a Blender start-up each. This replaced the earlier `native.blender_script` node (GLB + a Python
+script in, GLB out, one stateless Blender per run -- removed 2026-11-20): a
+10-second animation would have needed dozens of such nodes, with no way to
+look at the result between them.
 
 - **State is files, not DB rows.** `<cache_dir>/scenes/<id>/` (`meta.json`,
   `scene.blend` checkpoint, `in/`, `renders/`, `blender.log`). No migration,
@@ -151,8 +153,7 @@ stacking many `native.blender_script` nodes for one animation.
   1.2 GB; EEVEE needed 5 s and was what killed the old 5.8 GB VM).
 - **The agent's code runs as the service user.** The child env is stripped
   (no `API_TOKEN`/DB URL) and `HOME` is the scene dir, but it can still read
-  files the service can -- the person accepted this knowingly, same as
-  `native.blender_script`. Don't treat `scene_run` as sandboxed.
+  files the service can -- the person accepted this knowingly. Don't treat `scene_run` as sandboxed.
 - **Hard-won correctness details** (each found by a test, don't undo):
   * Setting a camera's `location`/`rotation` does **not** update
     `matrix_world` until the depsgraph re-evaluates -- `set_view` calls
@@ -239,8 +240,7 @@ uses the same MCP tools any project chat has (`scene_*`, `view_asset`).
   protocol* against live Blender scenes: result, input-not-deleted, agent says
   "can't", agent goes silent -> exactly one nudge, cancel -> chat stopped).
   Stop other dev servers first (two API processes over one scenes dir fight).
-- Supersedes `native.blender_script` (still registered; remove it when the
-  person says so). Not built yet: the studio (view/angle/mask on the page).
+- Not built yet: the studio (view/angle/mask on the page).
 
 ## Idea board (`backend/app/api/routes/boards.py`, `frontend/src/components/Board.tsx`)
 

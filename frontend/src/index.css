@@ -4463,15 +4463,6 @@ th, td {
   width: min(100%, 320px);
 }
 
-/* native.blender_script's Python field -- whitespace matters in Python. */
-.field-row textarea.code-field {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  white-space: pre;
-  tab-size: 4;
-  overflow-x: auto;
-}
-
 /* --- Scenes page (live Blender workshops) --- */
 .scenes-summary { font-size: 12px; color: var(--text-dim); }
 .scenes-empty, .scenes-note { font-size: 12px; color: var(--text-dim); }
