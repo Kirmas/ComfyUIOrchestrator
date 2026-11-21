@@ -765,8 +765,8 @@ class DashboardRead(BaseModel):
     # unset: an explicit "container" dashboard (several settled pieces, no
     # single chosen result -- e.g. a district holding several house/landmark
     # sub-dashboards) gets a shuffled pool of its own child asset nodes'
-    # faces instead of demanding one be picked. See _collect_preview_urls.
-    preview_asset_urls: list[str] = []
+    # faces instead of demanding one be picked. See _collect_preview_assets.
+    preview_assets: list[AssetRead] = []
     # Derived, not stored: node_count drives the "can't delete the main pointer
     # while it still holds work" rule, pointer_count tells the UI whether this
     # is the last way in.

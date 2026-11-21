@@ -301,7 +301,7 @@ export interface Dashboard {
   // Only non-empty when asset_only_view is set AND result_asset_id is null:
   // a shuffled pool of child asset nodes' faces that SubgraphNodeView rotates
   // a random few of every couple seconds, container-dashboard style.
-  preview_asset_urls: string[];
+  preview_assets: Asset[];
   node_count: number;
   pointer_count: number;
 }

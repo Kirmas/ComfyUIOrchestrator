@@ -279,7 +279,7 @@ class Dashboard(Base):
     # Same grid-display toggle as Project.asset_only_view, for this scope --
     # but for a dashboard it also doubles as "this is a gallery/container
     # scope, not a convergent one": routes/dashboards.py's collage preview
-    # (_collect_preview_urls) is gated on this being set, on top of having no
+    # (_collect_preview_assets) is gated on this being set, on top of having no
     # result_asset_id, so a workflow-heavy sub-dashboard that simply hasn't
     # picked a result yet doesn't start showing an arbitrary picture mosaic.
     asset_only_view: Mapped[bool] = mapped_column(nullable=False, default=False)

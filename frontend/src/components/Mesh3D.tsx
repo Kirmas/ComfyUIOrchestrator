@@ -129,9 +129,13 @@ export function MeshThumb({
   onOpen,
   onCompare,
   downloadName,
+  bare = false,
 }: {
   asset: Asset;
   onOpen: () => void;
+  // Just the picture, no overlay buttons or stats: a container collage's tile
+  // is a quarter of a cell, too small for them, and it's only a preview there.
+  bare?: boolean;
   // Omitted where there is nothing to compare against (a board sticker, a chat
   // message) -- the ⇄ button is then not drawn at all.
   onCompare?: () => void;
@@ -236,57 +240,61 @@ export function MeshThumb({
       ) : (
         <div className="model-thumb-loading" />
       )}
-      <button
-        type="button"
-        className="zoom-button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onOpen();
-        }}
-        title={t("cell.openFullSize")}
-      >
-        🔍
-      </button>
-      {onCompare && (
+      {!bare && (
+        <>
         <button
           type="button"
-          className="zoom-button compare-button"
+          className="zoom-button"
           onClick={(e) => {
             e.stopPropagation();
-            onCompare();
+            onOpen();
           }}
-          title={t("cell.compareWith")}
+          title={t("cell.openFullSize")}
         >
-          ⇄
+          🔍
         </button>
-      )}
-      <a
-        className="zoom-button download-button"
-        href={url}
-        download={meshDownloadName(asset, downloadName)}
-        onClick={(e) => e.stopPropagation()}
-        title={t("cell.download")}
-      >
-        ⬇
-      </a>
-      <button
-        type="button"
-        className="zoom-button refresh-button"
-        disabled={rendering}
-        onClick={async (e) => {
-          e.stopPropagation();
-          await dropStill(stillKey(asset));
-          setFailed(false);
-          setStill(null);
-        }}
-        title={t("mesh.regenerateThumb")}
-      >
-        ↻
-      </button>
-      {stats && (
-        <span className="asset-meta-tag">
-          <span className="asset-meta-line">{stats}</span>
-        </span>
+        {onCompare && (
+          <button
+            type="button"
+            className="zoom-button compare-button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onCompare();
+            }}
+            title={t("cell.compareWith")}
+          >
+            ⇄
+          </button>
+        )}
+        <a
+          className="zoom-button download-button"
+          href={url}
+          download={meshDownloadName(asset, downloadName)}
+          onClick={(e) => e.stopPropagation()}
+          title={t("cell.download")}
+        >
+          ⬇
+        </a>
+        <button
+          type="button"
+          className="zoom-button refresh-button"
+          disabled={rendering}
+          onClick={async (e) => {
+            e.stopPropagation();
+            await dropStill(stillKey(asset));
+            setFailed(false);
+            setStill(null);
+          }}
+          title={t("mesh.regenerateThumb")}
+        >
+          ↻
+        </button>
+        {stats && (
+          <span className="asset-meta-tag">
+            <span className="asset-meta-line">{stats}</span>
+          </span>
+        )}
+        </>
       )}
     </div>
   );

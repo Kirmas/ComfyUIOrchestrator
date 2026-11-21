@@ -26,10 +26,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import get_db
-from app.core.asset_types import ASSET_NODE_TYPES, SUBGRAPH_NODE_TYPE
+from app.core.asset_types import SUBGRAPH_NODE_TYPE, resolve_asset_node
 from app.core.subgraph_copy import copy_dashboard_contents
 from app.core.storage import build_asset_url
 from app.core.track_order import ordered_tracks
+from app.api.routes.assets import to_asset_read
 from app.db.models import Asset, Dashboard, Node, NodeKind, NodeStatus, Track
 from app.schemas.schemas import (
     DashboardCreate,
@@ -103,7 +104,7 @@ async def _owner_chain_reaches_root(db: AsyncSession, start_dashboard_id, *, for
     return True
 
 
-async def _collect_preview_urls(db: AsyncSession, dashboard: Dashboard, *, pool_limit: int = 40) -> list[str]:
+async def _collect_preview_assets(db: AsyncSession, dashboard: Dashboard, *, pool_limit: int = 40) -> list[Asset]:
     """A container-style sub-dashboard -- many settled pieces and no single
     "the" result (e.g. a district holding several landmarks) -- gets a
     collage preview instead of demanding one asset be chosen: the faces of
@@ -133,15 +134,15 @@ async def _collect_preview_urls(db: AsyncSession, dashboard: Dashboard, *, pool_
     """
     if dashboard.result_asset_id is not None or not dashboard.asset_only_view:
         return []
-    urls = await _walk_container(db, dashboard, pool_limit=pool_limit, visited={dashboard.id})
-    random.shuffle(urls)
-    return urls
+    assets = await _walk_container(db, dashboard, pool_limit=pool_limit, visited={dashboard.id})
+    random.shuffle(assets)
+    return assets
 
 
 async def _walk_container(
     db: AsyncSession, dashboard: Dashboard, *, pool_limit: int, visited: set[uuid.UUID], depth: int = 0
-) -> list[str]:
-    """The actual descent for _collect_preview_urls, split out so only the
+) -> list[Asset]:
+    """The actual descent for _collect_preview_assets, split out so only the
     outer call pays for the shuffle. `visited` guards a pointer loop (A -> B
     -> A is legal structure, per Dashboard's own docstring) and `depth` is a
     belt-and-suspenders cap -- cheap insurance against a very deep chain
@@ -149,7 +150,7 @@ async def _walk_container(
     """
     if depth > 8:
         return []
-    urls: list[str] = []
+    urls: list[Asset] = []
     for track in await ordered_tracks(db, dashboard.project_id, dashboard.id):
         result = await db.execute(
             select(Node)
@@ -162,12 +163,15 @@ async def _walk_container(
                 # (e.g. a landmark's own prop sub-dashboards) that's a real
                 # picture but shouldn't stand in for the container it sits in.
                 continue
-            backend = ASSET_NODE_TYPES.get(node.node_type or "")
+            # Not ASSET_NODE_TYPES.get(node_type): a hand-placed asset cell
+            # (upload, "+ asset") has node_type NULL, and that lookup skipped
+            # every one of them -- a container of uploads showed an empty collage.
+            backend = resolve_asset_node(node)
             if backend is None:
                 continue
             asset = await backend.face(db, node)
             if asset is not None:
-                urls.append(build_asset_url(asset.id))
+                urls.append(asset)
             elif (
                 node.node_type == SUBGRAPH_NODE_TYPE
                 and node.subgraph_dashboard_id is not None
@@ -192,7 +196,9 @@ async def _read(db: AsyncSession, dashboard: Dashboard, node_count: int, pointer
     if dashboard.result_asset_id is not None:
         item.result_asset_url = build_asset_url(dashboard.result_asset_id)
     else:
-        item.preview_asset_urls = await _collect_preview_urls(db, dashboard)
+        # Whole AssetReads, not bare URLs: the collage has to know each piece's
+        # kind -- a mesh drawn as an <img> is just a broken picture.
+        item.preview_assets = [to_asset_read(a) for a in await _collect_preview_assets(db, dashboard)]
     return item
 
 

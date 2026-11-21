@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { createPortal } from "react-dom";
-import { previewUrlOfFileUrl, resolveAssetPreviewUrl, resolveAssetUrl } from "../api/client";
+import { resolveAssetPreviewUrl, resolveAssetUrl } from "../api/client";
 import { assetsApi, dashboardsApi, nodesApi, nodeTemplatesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
 import { isFileDrag } from "../dragUtils";
@@ -1124,6 +1124,7 @@ function BaseAssetNodeView({
             )}
           </>
         )}
+        {!isCandidatesGrid && outputs.length >= 1 && <ExcludeFromCollageButton node={node} />}
         {/* Only inside a subgraph -- that's the only place the question "what
             does this subgraph look like from outside" even applies. */}
         {!isCandidatesGrid && outputs.length >= 1 && insideSubgraph && (
@@ -2439,7 +2440,7 @@ function RefAssetNodeView({ node, registerRef, compareActive, onCellClicked, onS
  */
 // Stable reference so useRandomSample's effect doesn't see a "new" pool (and
 // re-arm its interval) on every render while `info` is still null/has none.
-const EMPTY_PREVIEW_POOL: string[] = [];
+const EMPTY_PREVIEW_POOL: Asset[] = [];
 
 function shuffledSlice<T>(pool: T[], size: number): T[] {
   const copy = [...pool];
@@ -2507,23 +2508,18 @@ function CrossfadeImage({ url, onDoubleClick }: { url: string; onDoubleClick: ()
   );
 }
 
-function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onStartCompare, onStartRef, isRefSource }: Props) {
+/** Opts a cell out of its parent container dashboard's collage preview
+ * (routes/dashboards.py's _walk_container) -- for "service" content (a
+ * landmark's own prop sub-dashboards, a reference upload) that's a real picture
+ * but shouldn't stand in for the gallery it sits in. Shared by plain asset
+ * cells and subgraph pointers. Hidden on the main grid (no parent to bubble
+ * into) and whenever the parent couldn't show a collage anyway (not
+ * asset_only_view, or it already has its own single result) -- the same gate
+ * _collect_preview_assets uses, so the control only appears when toggling it
+ * would be visible. */
+function ExcludeFromCollageButton({ node }: { node: NodeItem }) {
   const t = useT();
-  const removeNode = useProjectStore((s) => s.removeNode);
-  const enterDashboard = useProjectStore((s) => s.enterDashboard);
   const setNode = useProjectStore((s) => s.setNode);
-  // The dashboard itself, for the name/counts/ownership row below only -- the
-  // picture comes from the kind's own face resolution, not from this payload.
-  const [info, setInfo] = useState<Dashboard | null>(null);
-  const { fullSize, openFullSize, closeFullSize } = useFullSizeState();
-  const [busy, setBusy] = useState(false);
-  // Copying only writes to localStorage, and what it enables shows up in some
-  // other cell -- often in another grid entirely. Without this the button
-  // reads as dead: you press it and nothing anywhere visibly changes.
-  const [pointerCopied, setPointerCopied] = useState(false);
-  const face = useAssetFace(node);
-  const collageSample = useRandomSample(info?.preview_asset_urls ?? EMPTY_PREVIEW_POOL, 4, 2000);
-
   // The scope THIS node lives in -- i.e. the parent container whose collage
   // the exclude toggle below would affect. Null means the main project grid,
   // which has no parent to bubble a preview into at all.
@@ -2547,6 +2543,36 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
   // regardless (not a gallery scope, or already has a single chosen result)
   // would be a control for a setting with no visible effect.
   const previewMeaningful = parentDashboardId !== null && !!parentDashboard?.asset_only_view && parentDashboard?.result_asset_id == null;
+
+  if (!previewMeaningful) return null;
+  return (
+    <button
+      className={cx(node.exclude_from_dashboard_preview && "active")}
+      onClick={async () =>
+        setNode(await nodesApi.update(node.id, { exclude_from_dashboard_preview: !node.exclude_from_dashboard_preview }))
+      }
+      title={node.exclude_from_dashboard_preview ? t("subgraph.includeInPreviewTitle") : t("subgraph.excludeFromPreviewTitle")}
+    >
+      {node.exclude_from_dashboard_preview ? t("subgraph.excludedFromPreview") : t("subgraph.excludeFromPreview")}
+    </button>
+  );
+}
+
+function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onStartCompare, onStartRef, isRefSource }: Props) {
+  const t = useT();
+  const removeNode = useProjectStore((s) => s.removeNode);
+  const enterDashboard = useProjectStore((s) => s.enterDashboard);
+  // The dashboard itself, for the name/counts/ownership row below only -- the
+  // picture comes from the kind's own face resolution, not from this payload.
+  const [info, setInfo] = useState<Dashboard | null>(null);
+  const { fullSize, openFullSize, closeFullSize } = useFullSizeState();
+  const [busy, setBusy] = useState(false);
+  // Copying only writes to localStorage, and what it enables shows up in some
+  // other cell -- often in another grid entirely. Without this the button
+  // reads as dead: you press it and nothing anywhere visibly changes.
+  const [pointerCopied, setPointerCopied] = useState(false);
+  const face = useAssetFace(node);
+  const collageSample = useRandomSample(info?.preview_assets ?? EMPTY_PREVIEW_POOL, 4, 2000);
 
   useEffect(() => {
     if (!node.subgraph_dashboard_id) return;
@@ -2597,10 +2623,6 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
     }
   };
 
-  const toggleExcludeFromPreview = async () => {
-    setNode(await nodesApi.update(node.id, { exclude_from_dashboard_preview: !node.exclude_from_dashboard_preview }));
-  };
-
   return (
     <div
       ref={(el) => registerRef(node.id, el)}
@@ -2629,9 +2651,19 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
         // stays null here on purpose) -- purely a preview, and a rotating one
         // (useRandomSample re-picks from the full pool every 2s).
         <div className="subgraph-collage">
-          {collageSample.map((url, i) => (
-            <CrossfadeImage key={i} url={previewUrlOfFileUrl(url)} onDoubleClick={() => openFullSize(url)} />
-          ))}
+          {collageSample.map((asset, i) =>
+            asset.kind === "mesh" ? (
+              // Keyed by asset too: a mesh tile can't crossfade, and a remount
+              // is what lets MeshThumb start over on its own still.
+              <MeshThumb key={`${i}-${asset.id}`} asset={asset} bare onOpen={() => openFullSize(resolveAssetUrl(asset.url), asset)} />
+            ) : (
+              <CrossfadeImage
+                key={i}
+                url={resolveAssetPreviewUrl(asset)}
+                onDoubleClick={() => openFullSize(resolveAssetUrl(asset.url), asset)}
+              />
+            ),
+          )}
         </div>
       ) : (
         <div className="subgraph-empty">{t("subgraph.noFace")}</div>
@@ -2687,24 +2719,7 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
             {pointerCopied ? t("subgraph.pointerCopied") : t("subgraph.copyPointer")}
           </button>
         )}
-        {/* Opts this node out of a parent container dashboard's collage
-            preview (routes/dashboards.py's _walk_container) -- for "service"
-            content like a landmark's own prop sub-dashboards, which are real
-            pictures but shouldn't stand in for the district they sit in.
-            Hidden on the main grid (no parent to bubble into) and whenever
-            the parent couldn't show a collage anyway (not asset_only_view,
-            or it already has its own single result) -- previewMeaningful
-            mirrors _collect_preview_urls' own gate exactly, so the control
-            only ever appears when toggling it would be visible. */}
-        {previewMeaningful && (
-          <button
-            className={cx(node.exclude_from_dashboard_preview && "active")}
-            onClick={toggleExcludeFromPreview}
-            title={node.exclude_from_dashboard_preview ? t("subgraph.includeInPreviewTitle") : t("subgraph.excludeFromPreviewTitle")}
-          >
-            {node.exclude_from_dashboard_preview ? t("subgraph.excludedFromPreview") : t("subgraph.excludeFromPreview")}
-          </button>
-        )}
+        <ExcludeFromCollageButton node={node} />
         <button onClick={deleteCell} disabled={busy} title={t("subgraph.deleteTitle")}>
           {t("common.delete")}
         </button>
