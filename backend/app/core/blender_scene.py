@@ -109,6 +109,21 @@ Predefined names:
   grow(obj, idx, hops)            widen a vertex selection by edges
   falloff(obj, idx, radius, power) per-vertex weights 1..0 around a selection
   export_to(path, fmt)            glb | fbx | obj (scene_export does this for you)
+Posing (rigs):
+  pose_report(focus=None, frame=None)  the pose in words and cm (= scene_pose tool)
+  hands()                         bone names that look like hands
+  pose_hand(hand, "fist", key=False, index=0)   preset (open flat relaxed fist grip
+                                  point pinch) + per-finger overrides: curl or (curl, spread)
+  pose_finger(hand, "index", curl=0.5, spread=0, key=False)
+                                  curl 0 straight .. 1 into the palm; spread + = toward thumb.
+                                  No bone axes involved -- prefer these to raw rotations.
+  hand_frame(hand_bone)           world axes of a hand in the current pose: origin,
+                                  along (to the knuckles), across (to the thumb),
+                                  palm (OUT of the palm), fingers {thumb: [pose bones]..}
+  palm_flip(hand_bone)            if every finger reads as bent "backwards", the palm
+                                  side was guessed wrong -- flip it (saved with the scene)
+  find_bone(name) -> (armature, pose bone)
+  set_view/render_to(..., focus=<bone>)  close-up on that bone and its children
 Blender is Z-up; imported models face -Y, so "front" looks at their face.
 
 Rules that matter:
@@ -123,6 +138,14 @@ Rules that matter:
    views to get a contact sheet.
  * Prefer bpy.data / modifiers / bmesh / numpy (obj.data.vertices.foreach_get /
    foreach_set) over bpy.ops, which depend on context and selection.
+ * HANDS: never trust a finger pose you have not looked at up close. After
+   posing, call scene_pose(focus=<hand>) and fix every warning (a finger bent
+   backwards, bent sideways, inside a prop), then
+   scene_render(focus=<hand>, views=["palm", "thumb_side"]). Set fingers with
+   pose_hand / pose_finger, not guessed local bone axes -- bone roll differs
+   between rigs. For anything they can't express, rotate about hand_frame()'s
+   axes (curl = about along x palm, so the tip moves toward the palm). For an animation, scene_pose(frames=[...]) checks every
+   key at once.
  * Modifiers are applied on export; you need not apply them first.
  * Heavy full-mesh operations (smooth/decimate on millions of faces) inflate
    Blender's memory and it never gives it back; the scene is then restarted
@@ -529,8 +552,18 @@ class SceneManager:
         data = await self.call(scene_id, "info")
         return {"scene": await self.summary(scene_id), "blender": data}
 
+    async def pose(self, scene_id: str, focus: str | None = None, frames: list[int] | None = None,
+                   contacts: bool = True) -> dict:
+        """pose_report() inside the scene, for one frame or several."""
+        if frames and len(frames) > 48:
+            raise SceneError("at most 48 frames per call")
+        if not frames:
+            return await self.call(scene_id, "pose_report", focus=focus, contacts=contacts)
+        return {"frames": [await self.call(scene_id, "pose_report", focus=focus, frame=int(f), contacts=contacts)
+                           for f in frames]}
+
     async def render(self, scene_id: str, views: list[str] | None = None, frames: list[int] | None = None,
-                     engine: str = "workbench", size: int = 512) -> dict:
+                     engine: str = "workbench", size: int = 512, focus: str | None = None) -> dict:
         views = views or ["front"]
         if engine not in ("workbench", "eevee", "cycles"):
             raise SceneError("engine must be workbench, eevee or cycles")
@@ -546,8 +579,8 @@ class SceneManager:
             for frame in frames or [None]:
                 for view in views:
                     out = self._dir(scene_id) / "renders" / f"tile{len(tiles)}.png"
-                    used = await self._render_one(meta, out, view, frame, engine, size, used)
-                    label = view if isinstance(view, str) else "custom"
+                    used = await self._render_one(meta, out, view, frame, engine, size, used, focus)
+                    label = (f"{focus} " if focus else "") + (view if isinstance(view, str) else "custom")
                     tiles.append((label + (f" f{frame}" if frame is not None else ""), out))
             sheet = await asyncio.to_thread(self._compose, tiles, len(views), self._dir(scene_id) / "renders" / "latest.png")
             for _, tile in tiles:
@@ -555,12 +588,13 @@ class SceneManager:
             meta.renders += 1
             await asyncio.to_thread(self._thumbnail, meta)
             self._save(meta)
-        return {"width": sheet[0], "height": sheet[1], "views": views, "frames": frames, "engine": used,
+        return {"width": sheet[0], "height": sheet[1], "views": views, "frames": frames, "focus": focus, "engine": used,
                 "ms": round((time.perf_counter() - started) * 1000)}
 
-    async def _render_one(self, meta: SceneMeta, out: Path, view, frame, engine: str, size: int, used: str) -> str:
+    async def _render_one(self, meta: SceneMeta, out: Path, view, frame, engine: str, size: int, used: str,
+                          focus: str | None = None) -> str:
         def code(eng: str) -> str:
-            return (f"render_to({str(out)!r}, view={view!r}, engine={eng!r}, size={size}, frame={frame!r}"
+            return (f"render_to({str(out)!r}, view={view!r}, engine={eng!r}, size={size}, frame={frame!r}, focus={focus!r}"
                     + (", samples=16" if eng == "cycles" else "") + ")")
 
         reply = await self._exec(meta, {"op": "run", "code": code(engine)}, 600)

@@ -34,7 +34,7 @@ import traceback
 
 import bpy
 import numpy as np
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 SOCK, IDLE_S, SCENE_DIR, MODE = sys.argv[sys.argv.index("--") + 1 :][:4]
 IDLE_S = float(IDLE_S)
@@ -150,20 +150,44 @@ def _tans(scene):
     return (longer, longer * h / w) if w >= h else (longer * w / h, longer)
 
 
-def set_view(view="front", margin=1.12, ortho=False, objs=None):
+def set_view(view="front", margin=1.12, ortho=False, objs=None, focus=None):
     """Aim the helper camera at all content from a named direction (VIEWS) or any
-    (x, y, z) vector, close enough to fill the frame. view="current" leaves it."""
+    (x, y, z) vector, close enough to fill the frame. view="current" leaves it.
+    focus=<bone name> frames that bone and everything under it (a hand with its
+    fingers) instead of the whole scene, re-aimed for the current pose; with a
+    hand as focus, view may also be one of HAND_VIEWS (palm, back_of_hand, thumb_side,
+    pinky_side, fingertips, wrist), which follow the hand's own orientation."""
     cam = _ensure_stage()
     if view == "current":
         return cam
     s = bpy.context.scene
-    direction = Vector(VIEWS[view] if isinstance(view, str) else view).normalized()
-    lo, hi = bbox(objs)
+    if focus is not None:
+        bpy.context.view_layer.update()
+    if isinstance(view, str) and view in HAND_VIEWS:
+        if focus is None:
+            raise ValueError(f"view {view!r} is relative to a hand: pass focus=<hand bone>")
+        direction = _focus_direction(view, focus)
+    else:
+        direction = Vector(VIEWS[view] if isinstance(view, str) else view).normalized()
+    if focus is not None:
+        corners = _focus_points(focus)
+        arr = np.array([p[:] for p in corners])
+        lo, hi = Vector(arr.min(axis=0)), Vector(arr.max(axis=0))
+    else:
+        lo, hi = bbox(objs)
+        corners = [Vector((x, y, z)) for x in (lo.x, hi.x) for y in (lo.y, hi.y) for z in (lo.z, hi.z)]
     ctr = (lo + hi) / 2
-    corners = [Vector((x, y, z)) for x in (lo.x, hi.x) for y in (lo.y, hi.y) for z in (lo.z, hi.z)]
     cam.data.lens, cam.data.sensor_width, cam.data.sensor_fit = 50, 36, "AUTO"
     cam.data.type = "ORTHO" if ortho else "PERSP"
     quat = (-direction).to_track_quat("-Z", "Y")
+    if isinstance(view, str) and view in HAND_VIEWS:
+        # Fingers up in the picture (palm up when looking along the fingers),
+        # instead of whatever roll the world axes happen to give.
+        hf = hand_frame(focus)
+        hint = hf["palm"] if view in ("fingertips", "wrist") else hf["along"]
+        cam_up = (hint - direction * hint.dot(direction)).normalized()
+        if cam_up.length > 0.5:
+            quat = Matrix((cam_up.cross(direction), cam_up, direction)).transposed().to_quaternion()
     right, up, fwd = quat @ Vector((1, 0, 0)), quat @ Vector((0, 1, 0)), quat @ Vector((0, 0, -1))
     tx, ty = _tans(s)
     need, half_w, half_h = 0.0, 0.0, 0.0
@@ -176,6 +200,11 @@ def set_view(view="front", margin=1.12, ortho=False, objs=None):
     cam.location = ctr + direction * need
     cam.rotation_euler = quat.to_euler()
     cam.data.clip_start, cam.data.clip_end = need * 0.01, need * 10 + (hi - lo).length * 2
+    if focus is not None:
+        # A close-up camera may sit inside the body (a palm resting on a thigh):
+        # start the view just in front of the focus so nothing hides it.
+        nearest = min(need + (c - ctr).dot(fwd) for c in corners)
+        cam.data.clip_start = max(need * 0.01, nearest * 0.9)
     if ortho:
         cam.data.ortho_scale = 2 * max(half_w, half_h)
     s.camera = cam
@@ -186,16 +215,18 @@ def set_view(view="front", margin=1.12, ortho=False, objs=None):
     return cam
 
 
-def render_to(path, view="front", engine="workbench", size=512, frame=None, ortho=False, margin=1.12, samples=32):
+def render_to(path, view="front", engine="workbench", size=512, frame=None, ortho=False, margin=1.12, samples=32,
+              focus=None):
     """Render the content to a PNG. engine: workbench (fast, always works, gray
-    studio look) | eevee (nicer) | cycles (slow, CPU). size: px or (w, h)."""
+    studio look) | eevee (nicer) | cycles (slow, CPU). size: px or (w, h).
+    focus: a bone to close up on (see set_view)."""
     s = bpy.context.scene
     _ensure_stage()
     if frame is not None:
         s.frame_set(int(frame))
     s.render.resolution_x, s.render.resolution_y = (size, size) if isinstance(size, int) else size
     s.render.resolution_percentage = 100
-    set_view(view, margin, ortho)
+    set_view(view, margin, ortho, focus=focus)
     s.render.engine = {"workbench": "BLENDER_WORKBENCH", "eevee": "BLENDER_EEVEE", "cycles": "CYCLES"}[engine]
     s.view_settings.view_transform = "Standard"
     if engine == "workbench":
@@ -222,7 +253,7 @@ def info():
                          modifiers=[f"{m.name}:{m.type}" for m in o.modifiers])
         elif o.type == "ARMATURE":
             bones = [b.name for b in o.data.bones]
-            entry.update(bone_count=len(bones), bones=bones[:80])
+            entry.update(bone_count=len(bones), bones=bones)
         out["objects"].append(entry)
     for a in bpy.data.actions:
         out["actions"].append({"name": a.name, "frame_range": [round(v, 2) for v in a.frame_range]})
@@ -305,6 +336,470 @@ def falloff(obj, idx, radius=None, power=2.0):
     centre = seed.mean(axis=0)
     radius = radius or float(np.linalg.norm(seed - centre, axis=1).max()) * 1.3 or 1e-6
     return np.clip(1.0 - np.linalg.norm(co - centre, axis=1) / radius, 0.0, 1.0) ** power
+
+
+# ------------------------------------------------------------- pose / hands --
+# An agent posing a rig through raw bone quaternions keeps getting fingers wrong:
+# every rig has its own bone roll, so "curl" is +X on one and -Z on another, and
+# a hand is 20 px on a full-body render. These helpers read a pose back in the
+# hand's OWN frame (along the fingers / across the knuckles / out of the palm),
+# and aim the camera at a bone instead of at the whole scene.
+FINGERS = (("thumb", ("thumb",)), ("index", ("index", "pointer")), ("middle", ("middle",)),
+           ("ring", ("ring",)), ("pinky", ("pinky", "little", "small")))
+CM = 100.0  # Blender units are metres; reports are in centimetres.
+
+
+def armatures():
+    return [o for o in objects() if o.type == "ARMATURE"]
+
+
+def find_bone(name):
+    """(armature, pose bone) for a bone name; exact match first, then case-insensitive."""
+    for exact in (True, False):
+        for arm in armatures():
+            for pb in arm.pose.bones:
+                if pb.name == name if exact else pb.name.lower() == name.lower():
+                    return arm, pb
+    known = ", ".join(pb.name for arm in armatures() for pb in arm.pose.bones)
+    raise ValueError(f"no bone {name!r}. Bones: {known[:1500]}")
+
+
+def _subtree(pb):
+    out, stack = [], [pb]
+    while stack:
+        b = stack.pop()
+        out.append(b)
+        stack.extend(b.children)
+    return out
+
+
+def _real(b):
+    """Not a zero-length / '_end' leaf some importers add."""
+    return b.bone.length > 1e-5 and not b.name.lower().endswith(("_end", ".end", "end"))
+
+
+def _chains(hand):
+    """One chain per leaf under `hand`: the bones from hand's child down to that leaf."""
+    chains = []
+    for leaf in _subtree(hand):
+        if leaf.name == hand.name or leaf.children:
+            continue
+        chain, b = [], leaf
+        while b is not None and b.name != hand.name:  # a new wrapper per access: `is` never matches
+            chain.append(b)
+            b = b.parent
+        chain = [c for c in reversed(chain) if _real(c)]
+        if chain:
+            chains.append(chain)
+    return chains
+
+
+def _classify(chains, head, along):
+    """{finger name: chain}. By bone names first. Unnamed chains: the one rooted
+    nearest the wrist is the thumb, the rest are ordered across the knuckles
+    away from it (index, middle, ring, pinky)."""
+    named, rest = {}, []
+    for ch in chains:
+        text = " ".join(b.name.lower() for b in ch)
+        hit = next((f for f, keys in FINGERS if f not in named and any(k in text for k in keys)), None)
+        if hit:
+            named[hit] = ch
+        else:
+            rest.append(ch)
+    if rest and "thumb" not in named and len(rest) + len(named) >= 4:
+        thumb = min(rest, key=lambda ch: head(ch[0]).dot(along))
+        named["thumb"] = thumb
+        rest.remove(thumb)
+    if rest:
+        side = head(named["thumb"][0]) if "thumb" in named else None
+        if side is not None:
+            rest.sort(key=lambda ch: (head(_knuckle(ch)) - side).length)
+    for f, ch in zip([f for f, _ in FINGERS if f not in named], rest):
+        named[f] = ch
+    return named
+
+
+def _knuckle(chain, thumb=False):
+    """Head of the proximal phalanx: past a metacarpal when the chain has one."""
+    if thumb or len(chain) <= 3:
+        return chain[0]
+    return chain[-3]
+
+
+def _hand_like(pb):
+    """3+ short chains (fingers: up to a metacarpal + 3 phalanges + an end bone)."""
+    chains = _chains(pb)
+    return len(chains) >= 3 and all(2 <= len(c) <= 5 for c in chains)
+
+
+def is_hand(pb):
+    """Hand-like and the deepest such bone -- a forearm also has short chains
+    under it, but its hand child does too."""
+    return _hand_like(pb) and not any(_hand_like(c) for c in pb.children)
+
+
+def hands():
+    """Every bone that looks like a hand."""
+    return [pb.name for arm in armatures() for pb in arm.pose.bones if is_hand(pb)]
+
+
+def _hand_axes(hand, rest):
+    """(along, across, palm) unit vectors in ARMATURE space. along = wrist ->
+    knuckles, across = towards the thumb side, palm = out of the palm. rest=True
+    uses the rest pose (for deciding which side is the palm), else the current pose."""
+    def head(b):
+        return Vector(b.bone.head_local) if rest else Vector(b.head)
+
+    def tail(b):
+        return Vector(b.bone.tail_local) if rest else Vector(b.tail)
+
+    chains = _chains(hand)
+    rough_along = (tail(hand) - head(hand)).normalized()
+    fingers = _classify(chains, head, rough_along)
+    knuckles = {f: head(_knuckle(ch, f == "thumb")) for f, ch in fingers.items()}
+    non_thumb = [k for f, k in knuckles.items() if f != "thumb"] or list(knuckles.values())
+    along = (sum(non_thumb, Vector()) / len(non_thumb) - head(hand)).normalized()
+    if "index" in knuckles and "pinky" in knuckles:
+        across = knuckles["index"] - knuckles["pinky"]
+    else:
+        pts = sorted(non_thumb, key=lambda p: p.dot(along.orthogonal()))
+        across = pts[-1] - pts[0]
+    across = (across - along * across.dot(along)).normalized()
+    if "thumb" in knuckles and (knuckles["thumb"] - head(hand)).dot(across) < 0:
+        across = -across  # the index side is the thumb side
+    palm = along.cross(across).normalized()
+    return along, across, palm, fingers
+
+
+def _palm_sign(arm, hand):
+    """+1/-1 so that along x across points OUT of the palm. Decided once from the
+    rest pose: the thumb and a resting curl both sit on the palm side; with no
+    such cue a T/A-pose palm faces down. Overridable with palm_flip()."""
+    key = f"orch_palm_flip:{hand.name}"
+    along, across, palm, fingers = _hand_axes(hand, rest=True)
+    score = 0.0
+    origin = Vector(hand.bone.head_local)
+    for f, ch in fingers.items():
+        tip = Vector(ch[-1].bone.tail_local)
+        score += (tip - origin).dot(palm) * (2.0 if f == "thumb" else 1.0)
+    span = max((Vector(ch[-1].bone.tail_local) - origin).length for ch in fingers.values()) or 1.0
+    if abs(score) < 0.02 * span:
+        down = arm.matrix_world.to_3x3().inverted() @ Vector((0, 0, -1))
+        score = palm.dot(down)
+    sign = 1.0 if score >= 0 else -1.0
+    return -sign if arm.get(key) else sign
+
+
+def palm_flip(hand_bone, flip=True):
+    """Tell the helpers the palm is on the other side of `hand_bone` than they
+    guessed (pose_report's finger bends all read as 'backwards' when it's wrong).
+    Saved with the scene."""
+    arm, hand = find_bone(hand_bone)
+    arm[f"orch_palm_flip:{hand.name}"] = bool(flip)
+    return _palm_sign(arm, hand)
+
+
+def hand_frame(hand_bone):
+    """World-space frame of a hand in the CURRENT pose: origin (wrist), along,
+    across (thumb side), palm (out of the palm), and its fingers."""
+    arm, hand = find_bone(hand_bone)
+    along, across, palm, fingers = _hand_axes(hand, rest=False)
+    palm = palm * _palm_sign(arm, hand)
+    rot = arm.matrix_world.to_3x3()
+    return {"arm": arm, "hand": hand, "origin": arm.matrix_world @ Vector(hand.head),
+            "along": (rot @ along).normalized(), "across": (rot @ across).normalized(),
+            "palm": (rot @ palm).normalized(), "fingers": fingers}
+
+
+def _focus_points(focus):
+    """World points to frame for a bone (and everything under it) or an object."""
+    if focus in bpy.data.objects and not bpy.data.objects[focus].get(AUX):
+        lo, hi = bbox([bpy.data.objects[focus]])
+        return [lo, hi]
+    arm, pb = find_bone(focus)
+    mw = arm.matrix_world
+    bones = _subtree(pb)
+    pts = [mw @ Vector(b.head) for b in bones] + [mw @ Vector(b.tail) for b in bones]
+    # Bones are the skeleton, not the flesh: pad by a share of the longest bone
+    # so a finger's skin isn't cut off at the frame edge.
+    pad = max(b.bone.length for b in bones) * max(mw.to_scale()) * 0.6
+    ctr = sum(pts, Vector()) / len(pts)
+    extra = [ctr + Vector(d) * pad for d in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))]
+    return pts + extra
+
+
+HAND_VIEWS = ("palm", "back_of_hand", "thumb_side", "pinky_side", "fingertips", "wrist")
+
+
+def _focus_direction(view, focus):
+    """A view name relative to the focused hand, as a world direction (target -> camera)."""
+    f = hand_frame(focus)
+    return {"palm": f["palm"], "back_of_hand": -f["palm"], "thumb_side": f["across"], "pinky_side": -f["across"],
+            "fingertips": f["along"], "wrist": -f["along"]}[view]
+
+
+def _r(v, k=1):
+    return round(float(v), k)
+
+
+def _char_axes(arm):
+    """The character's own right / forward / up (models face -Y, Z up)."""
+    rot = arm.matrix_world.to_3x3()
+    fwd, up = (rot @ Vector((0, -1, 0))).normalized(), (rot @ Vector((0, 0, 1))).normalized()
+    return fwd.cross(up).normalized(), fwd, up
+
+
+def _describe_dir(v, arm):
+    """'forward-down' style words for a world direction, in the character's frame."""
+    right, fwd, up = _char_axes(arm)
+    comps = [(v.dot(right), "character's right", "character's left"), (v.dot(fwd), "forward", "backward"),
+             (v.dot(up), "up", "down")]
+    comps.sort(key=lambda c: -abs(c[0]))
+    words = [pos if val > 0 else neg for val, pos, neg in comps if abs(val) > 0.35]
+    return " + ".join(words) or (comps[0][1] if comps[0][0] > 0 else comps[0][2])
+
+
+def _signed_angle(a, b, axis):
+    """Angle a -> b in degrees, signed by rotation about `axis`."""
+    return math.degrees(math.atan2(a.cross(b).dot(axis), a.dot(b)))
+
+
+def _props_near(arm, centre, radius):
+    """Meshes that aren't skinned to `arm` (a held sword, a table) near `centre`."""
+    out = []
+    for o in meshes():
+        if any(m.type == "ARMATURE" and m.object == arm for m in o.modifiers):
+            continue
+        lo, hi = bbox([o])
+        nearest = Vector([min(max(c, l), h) for c, l, h in zip(centre, lo, hi)])
+        if (nearest - centre).length <= radius:
+            out.append(o)
+    return out
+
+
+def _contacts(arm, points, radius):
+    """{label: {prop, distance_cm, inside}} for named world points vs nearby props."""
+    from mathutils.bvhtree import BVHTree
+
+    if not points:
+        return {}
+    centre = sum(points.values(), Vector()) / len(points)
+    props = _props_near(arm, centre, radius)
+    if not props:
+        return {}
+    dg = bpy.context.evaluated_depsgraph_get()
+    trees = [(o, BVHTree.FromObject(o, dg), o.matrix_world.inverted(), o.matrix_world) for o in props]
+    out = {}
+    for label, p in points.items():
+        best = None
+        for o, tree, inv, mw in trees:
+            loc, normal, _i, _d = tree.find_nearest(inv @ p)
+            if loc is None:
+                continue
+            wloc = mw @ loc
+            wnormal = (mw.to_3x3().inverted().transposed() @ normal).normalized()
+            dist = (p - wloc).length
+            if best is None or dist < best[1]:
+                best = (o.name, dist, (p - wloc).dot(wnormal) < 0)
+        if best:
+            out[label] = {"prop": best[0], "distance_cm": _r(best[1] * CM),
+                          "inside": best[2] and best[1] > 0.002}
+    return out
+
+
+def _curl_axis(along, across, palm, thumb=False):
+    """Rotation axis that curls a finger in (its tip toward the palm). A thumb
+    folds across the palm instead: from the thumb side toward the palm."""
+    return (across.cross(palm) if thumb else along.cross(palm)).normalized()
+
+
+# Joint bends (degrees) of a full curl, knuckle first; a thumb has fewer joints.
+FULL_CURL = (80.0, 100.0, 70.0)
+FULL_THUMB = (30.0, 50.0, 70.0)
+HAND_PRESETS = {
+    "open": {f: (0.0, 0.0) for f, _ in FINGERS} | {"index": (0.0, 8.0), "ring": (0.0, -5.0), "pinky": (0.0, -12.0)},
+    "flat": {f: (0.0, 0.0) for f, _ in FINGERS},
+    "relaxed": {"thumb": (0.2, 0.0), "index": (0.2, 0.0), "middle": (0.28, 0.0), "ring": (0.34, 0.0),
+                "pinky": (0.4, 0.0)},
+    "fist": {"thumb": (0.7, 0.0), "index": (1.0, 0.0), "middle": (1.0, 0.0), "ring": (1.0, 0.0), "pinky": (1.0, 0.0)},
+    "grip": {"thumb": (0.5, 0.0), "index": (0.7, 0.0), "middle": (0.75, 0.0), "ring": (0.8, 0.0), "pinky": (0.85, 0.0)},
+    "point": {"thumb": (0.6, 0.0), "index": (0.0, 0.0), "middle": (1.0, 0.0), "ring": (1.0, 0.0), "pinky": (1.0, 0.0)},
+    "pinch": {"thumb": (0.55, 0.0), "index": (0.5, 0.0), "middle": (0.3, 0.0), "ring": (0.35, 0.0),
+              "pinky": (0.4, 0.0)},
+}
+
+
+def pose_finger(hand_bone, finger, curl=0.0, spread=0.0, key=False):
+    """Set one finger WITHOUT touching bone axes: curl 0 = straight .. 1 = fully
+    curled into the palm (negative bends it backwards -- don't); spread in degrees
+    turns the finger in the palm plane, + toward the thumb side. Assumes the rig's
+    REST hand is flat, as almost every rig's is. key=True inserts keyframes at
+    the current frame."""
+    from mathutils import Quaternion
+
+    arm, hand = find_bone(hand_bone)
+    along, across, palm, fingers = _hand_axes(hand, rest=True)
+    palm = palm * _palm_sign(arm, hand)
+    if finger not in fingers:
+        raise ValueError(f"{hand.name} has no {finger!r}; it has {sorted(fingers)}")
+    chain = fingers[finger]
+    thumb = finger == "thumb"
+    axis = _curl_axis(along, across, palm, thumb)
+    full = FULL_THUMB if thumb else FULL_CURL
+    start = 0 if thumb else chain.index(_knuckle(chain))
+    for i, pb in enumerate(chain[start:start + len(full)]):
+        # Rotating about the curl axis keeps that axis fixed, so it reads the
+        # same in every bone's rest frame no matter how its parents are curled.
+        rest_inv = pb.bone.matrix_local.to_3x3().inverted()
+        q = Quaternion((rest_inv @ axis).normalized(), math.radians(full[i] * curl))
+        if i == 0 and spread:
+            q = Quaternion((rest_inv @ palm).normalized(), math.radians(spread)) @ q
+        pb.rotation_mode = "QUATERNION"
+        pb.rotation_quaternion = q
+        if key:
+            pb.keyframe_insert("rotation_quaternion")
+    bpy.context.view_layer.update()
+
+
+def pose_hand(hand_bone, pose="relaxed", key=False, **fingers):
+    """Whole hand at once: a preset (open flat relaxed fist grip point pinch)
+    and/or per-finger overrides, e.g. pose_hand("hand.R", "fist", index=0) or
+    pose_hand("hand.L", thumb=(0.6, 10), index=0.5). A value is curl or
+    (curl, spread). key=True keyframes it at the current frame."""
+    if pose not in HAND_PRESETS:
+        raise ValueError(f"pose must be one of {sorted(HAND_PRESETS)}")
+    plan = dict(HAND_PRESETS[pose])
+    for f, v in fingers.items():
+        plan[f] = tuple(v) if isinstance(v, (list, tuple)) else (float(v), plan.get(f, (0, 0))[1])
+    _arm, hand = find_bone(hand_bone)
+    have = _hand_axes(hand, rest=True)[3]
+    for f, (curl, spread) in plan.items():
+        if f in have:
+            pose_finger(hand_bone, f, curl, spread, key)
+    return sorted(have)
+
+
+def _hand_report(hand_bone, contacts=True):
+    f = hand_frame(hand_bone)
+    arm, hand = f["arm"], f["hand"]
+    mw = arm.matrix_world
+    along, across, palm = f["along"], f["across"], f["palm"]
+    curl_axis = _curl_axis(along, across, palm)
+    origin = f["origin"]
+    root = next(b for b in arm.pose.bones if b.parent is None)
+    right, fwd, up = _char_axes(arm)
+    rel = origin - mw @ Vector(root.head)
+    report = {
+        "hand": hand.name,
+        "wrist_world": [_r(c, 3) for c in origin],
+        "wrist_from_root_cm": {"right": _r(rel.dot(right)), "forward": _r(rel.dot(fwd)), "up": _r(rel.dot(up)),
+                               "root": root.name},
+        "palm_faces": _describe_dir(palm, arm),
+        "fingers_point": _describe_dir(along, arm),
+        "fingers": {},
+    }
+    warnings, tips = [], {}
+    for name, chain in f["fingers"].items():
+        thumb = name == "thumb"
+        dirs = [(mw @ Vector(b.tail) - mw @ Vector(b.head)).normalized() for b in chain]
+        if thumb:
+            # The thumb's base sits at its own angle; only its joints bend.
+            k, prev, axis = 1, dirs[:-1], _curl_axis(along, across, palm, thumb=True)
+        else:
+            # the knuckle bends relative to the back of the hand, later joints relative to the previous bone
+            k = chain.index(_knuckle(chain))
+            prev, axis = [along] + dirs[k:-1], curl_axis
+        bends, sideways = [], []
+        for i, (a, b) in enumerate(zip(prev, dirs[k:])):
+            bend = _signed_angle(a, b, axis)
+            bends.append(_r(bend, 0))
+            total = math.degrees(a.angle(b, 0.0))
+            if not thumb and i > 0 and total > 12:
+                off_plane = math.degrees(math.asin(min(1.0, abs(a.cross(b).normalized().dot(palm)))))
+                if off_plane > 35:
+                    sideways.append(chain[k + i].name)
+        tip = mw @ Vector(chain[-1].tail)
+        tips[name] = tip
+        local = tip - origin
+        entry = {"bones": [b.name for b in chain], "bend_deg": bends}
+        if thumb:
+            entry["tip_cm"] = {"along": _r(local.dot(along)), "across": _r(local.dot(across)),
+                               "palm_side": _r(local.dot(palm))}
+        else:
+            entry["curl"] = _r(max(0.0, sum(bends)) / 250.0, 2)
+            prox = dirs[k] - palm * dirs[k].dot(palm)
+            entry["spread_deg"] = _r(_signed_angle(along, prox.normalized(), palm), 0) if prox.length > 1e-6 else 0
+        report["fingers"][name] = entry
+        back = [b for b, deg in zip(chain[k:], bends) if deg < -15]
+        if back:
+            warnings.append(f"{name}: bends BACKWARDS at {', '.join(b.name for b in back)} "
+                            f"({', '.join(str(d) for d in bends if d < -15)} deg)")
+        if sideways:
+            warnings.append(f"{name}: bends sideways (out of its curl plane) at {', '.join(sideways)}")
+    if "thumb" in tips:
+        report["thumb_tip_to_cm"] = {n: _r((tips["thumb"] - p).length * CM) for n, p in tips.items() if n != "thumb"}
+    if contacts:
+        pts = {f"{n}_tip": p for n, p in tips.items()}
+        pts["palm"] = origin + along * ((sum(tips.values(), Vector()) / max(len(tips), 1) - origin).dot(along) * 0.45)
+        found = _contacts(arm, pts, radius=0.4)
+        if found:
+            report["contacts"] = found
+            for label, c in found.items():
+                if c["inside"]:
+                    warnings.append(f"{label} is {c['distance_cm']} cm INSIDE {c['prop']}")
+    report["warnings"] = warnings
+    return report
+
+
+def _rot_from_rest(pb):
+    """The pose bone's own rotation away from its rest orientation, in degrees."""
+    q = pb.matrix_basis.to_quaternion()
+    return _r(math.degrees(q.angle), 0), [_r(math.degrees(a), 0) for a in q.to_euler("XYZ")]
+
+
+def pose_report(focus=None, frame=None, contacts=True):
+    """Read the current pose back in words and centimetres instead of matrices.
+
+    focus=None: every armature, every bone (parent, rotation away from rest, world
+    head/tail) plus the hands found. focus=<hand bone>: that hand in its own frame
+    -- each finger's joint bends (positive = towards the palm, NEGATIVE = bent
+    backwards), curl 0..1, spread, thumb tip position and distances to the other
+    fingertips, where the palm faces, contacts with props, and warnings.
+    focus=<other bone>: that bone and everything under it. frame: evaluate at that
+    frame (the scene's current frame is restored afterwards)."""
+    s = bpy.context.scene
+    keep = s.frame_current
+    if frame is not None:
+        s.frame_set(int(frame))
+    try:
+        bpy.context.view_layer.update()
+        out = {"frame": s.frame_current, "units": "cm (1 Blender unit = 1 m)"}
+        if focus is not None:
+            arm, pb = find_bone(focus)
+            if is_hand(pb):
+                out.update(_hand_report(pb.name, contacts))
+                return out
+            bones = _subtree(pb)
+        else:
+            bones = [b for arm in armatures() for b in arm.pose.bones]
+            out["hands"] = hands()
+        rows = []
+        for b in bones:
+            arm = b.id_data
+            angle, euler = _rot_from_rest(b)
+            row = {"bone": b.name, "parent": b.parent.name if b.parent else None,
+                   "head": [_r(c, 3) for c in arm.matrix_world @ Vector(b.head)],
+                   "tail": [_r(c, 3) for c in arm.matrix_world @ Vector(b.tail)]}
+            if angle >= 1:
+                row["rotated_deg"], row["euler_xyz_deg"] = angle, euler
+            rows.append(row)
+        out["bones"] = rows
+        if not armatures():
+            out["note"] = "the scene has no armature"
+        return out
+    finally:
+        if frame is not None:
+            s.frame_set(keep)
 
 
 def export_to(path, fmt="glb"):

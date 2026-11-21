@@ -46,6 +46,13 @@ class SceneRender(BaseModel):
     frames: list[int] | None = None
     engine: str = "workbench"
     size: int = 512
+    focus: str | None = None
+
+
+class ScenePose(BaseModel):
+    focus: str | None = None
+    frames: list[int] | None = None
+    contacts: bool = True
 
 
 class SceneExport(BaseModel):
@@ -133,7 +140,16 @@ async def run_in_scene(scene_id: str, body: SceneRun) -> dict:
 @router.post("/{scene_id}/render")
 async def render_scene(scene_id: str, body: SceneRender) -> dict:
     try:
-        return await scene_manager.render(scene_id, body.views, body.frames, body.engine, body.size)
+        return await scene_manager.render(scene_id, body.views, body.frames, body.engine, body.size, body.focus)
+    except SceneError as exc:
+        _raise(exc)
+
+
+@router.post("/{scene_id}/pose")
+async def scene_pose(scene_id: str, body: ScenePose) -> dict:
+    """The rig's pose read back in words and centimetres (pose_report in the scene)."""
+    try:
+        return await scene_manager.pose(scene_id, body.focus, body.frames, body.contacts)
     except SceneError as exc:
         _raise(exc)
 

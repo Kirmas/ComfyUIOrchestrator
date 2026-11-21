@@ -173,6 +173,21 @@ look at the result between them.
   * Never run two API processes over one `scenes` dir: each sweeper enforces
     its own limits on *every* scene it sees (a second dev server with a
     700 MB cap silently killed the first one's scenes -- 2026-11-20).
+- **Hands** (2026-11-21): agents animate bodies fine but kept botching fingers --
+  bone roll differs per rig, so a guessed local axis curls a finger sideways or
+  backwards, and a hand is a few pixels on a full-body render. Hence, all in
+  `blender_scene_server.py`: a per-hand frame (along / across-to-thumb / out of
+  the palm) found from the skeleton, never from bone axes or names (names only
+  help say which chain is which finger; unnamed rigs are classified by
+  geometry; palm side from the rest pose, `palm_flip` overrides);
+  `pose_hand`/`pose_finger` (curl 0..1, spread) built on it; `pose_report` /
+  MCP `scene_pose` reads bends back signed (negative = backwards) with
+  warnings and prop contacts; `scene_render(focus=<bone>)` closes up on a bone
+  per frame with hand-relative views and a near clip so a thigh can't hide a
+  palm. The hand view is `back_of_hand`, not `back` (that name is a world
+  view). Pose bones come back as a **new Python wrapper on every access** --
+  compare by `.name`, never `is` (an `is` check walked finger chains up to the
+  root and the thumb preset rotated the whole arm).
 - `scripts/blender_scene_smoke_test.py http://127.0.0.1:8011 dev-local-token`
   checks the whole thing end to end (builds its own 1.2M-triangle sphere and a
   painted mask); `--extras-only --idle --hard` against a server started with

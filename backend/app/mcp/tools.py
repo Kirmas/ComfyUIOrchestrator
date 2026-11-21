@@ -1350,6 +1350,7 @@ async def scene_render(
     engine: str = "workbench",
     size: int = 512,
     max_px: int = _VIEW_MAX_PX,
+    focus: str | None = None,
 ) -> list:
     """LOOK at the scene: renders it and returns the picture so you can judge
     your work instead of trusting numbers. Do this after every real change.
@@ -1358,10 +1359,20 @@ async def scene_render(
     (default ["front"]); give several for a contact sheet, each tile labelled.
     frames: animation frames to render (a row per frame) -- for checking an
     animation. engine: workbench (instant, default) | eevee (nicer) | cycles
-    (slow). size: pixels per tile."""
+    (slow). size: pixels per tile.
+
+    focus: a bone name -- close up on that bone and everything under it (a hand
+    with its fingers) instead of the whole model, re-aimed on every frame so it
+    follows the motion. With a hand as focus, views may also be palm, back_of_hand,
+    thumb_side, pinky_side, fingertips, wrist: relative to the hand itself,
+    fingers pointing up in the picture. Anything between the camera and the
+    focus (a thigh in front of a palm) is cut away."""
     from mcp.server.fastmcp import Image
 
-    meta = await _post(f"/api/scenes/{scene_id}/render", {"views": views or ["front"], "frames": frames, "engine": engine, "size": size})
+    if focus and not views:
+        views = ["palm", "thumb_side"]
+    meta = await _post(f"/api/scenes/{scene_id}/render",
+                       {"views": views or ["front"], "frames": frames, "engine": engine, "size": size, "focus": focus})
     async with get_client() as client:
         r = await client.get(f"/api/scenes/{scene_id}/render")
         raise_for_api_error(r)
@@ -1373,6 +1384,25 @@ async def scene_render(
         f"{', frames ' + str(meta['frames']) if meta['frames'] else ''}, {meta['ms']} ms{note}",
         Image(data=view, format=fmt),
     ]
+
+
+@mcp_server.tool()
+async def scene_pose(scene_id: str, focus: str | None = None, frames: list[int] | None = None,
+                     contacts: bool = True) -> dict:
+    """READ a rig's pose in words and centimetres instead of guessing from
+    matrices -- use it after posing, alongside scene_render(focus=...).
+
+    focus=None: every bone (parent, world head/tail, rotation away from rest) and
+    which bones are hands. focus=<hand bone>: that hand in its OWN frame -- per
+    finger the joint bends (positive = toward the palm, NEGATIVE = bent backwards),
+    curl 0..1, spread, the thumb tip's position and distance to each fingertip
+    (a pinch is ~0), where the palm faces and the fingers point (in the
+    character's terms), fingertip/palm contact with nearby props (a held
+    object; `inside` = passes through it), and `warnings`. focus=<other bone>:
+    that bone and its children. frames=[...] reports each frame (for checking
+    an animation); otherwise the current frame. If every finger reads as bent
+    backwards the palm side was guessed wrong: palm_flip(hand) in scene_run."""
+    return await _post(f"/api/scenes/{scene_id}/pose", {"focus": focus, "frames": frames, "contacts": contacts})
 
 
 @mcp_server.tool()
