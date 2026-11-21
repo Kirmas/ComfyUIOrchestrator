@@ -112,10 +112,17 @@ async def update_project(project_id: uuid.UUID, payload: ProjectUpdate, db: Asyn
         await _ensure_category(db, payload.category_id)
         project.category_id = payload.category_id
     if "preview_asset_id" in payload.model_fields_set:
-        if payload.preview_asset_id is not None and not await db.scalar(
-            _project_images(project_id).where(Asset.id == payload.preview_asset_id)
-        ):
-            raise HTTPException(409, "That image isn't part of this project")
+        if payload.preview_asset_id is not None:
+            # Any image will do -- including one that belongs to no project yet
+            # (an agent-chat upload or generation). Such an ownerless asset is
+            # adopted into this project so it stays part of its library.
+            asset = await db.get(Asset, payload.preview_asset_id)
+            if not asset:
+                raise HTTPException(404, "Asset not found")
+            if asset.kind != AssetKind.image:
+                raise HTTPException(409, "A cover has to be an image")
+            if asset.project_id is None and asset.node_id is None:
+                asset.project_id = project_id
         project.preview_asset_id = payload.preview_asset_id
     await db.commit()
     await db.refresh(project)

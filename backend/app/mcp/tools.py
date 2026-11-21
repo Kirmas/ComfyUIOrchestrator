@@ -492,6 +492,19 @@ async def get_dashboard(dashboard_id: str) -> dict:
 
 
 @mcp_server.tool()
+async def set_project_cover(project_id: str, asset_id: str | None = None) -> dict:
+    """Set the picture shown on the project's card on the home page.
+
+    asset_id may be any IMAGE asset: one from this or another project, or a
+    chat attachment / generation that belongs to no project yet (it is then
+    adopted into this project's library). A mesh/STL can't be a cover. Pass
+    asset_id=None to clear it, after which the card shows a random project
+    image again.
+    Returns the project, with preview_asset_id as set."""
+    return await _patch(f"/api/projects/{project_id}", {"preview_asset_id": asset_id})
+
+
+@mcp_server.tool()
 async def rename_dashboard(dashboard_id: str, name: str | None = None, asset_only_view: bool | None = None) -> dict:
     """Rename a sub-dashboard and/or toggle its asset-only view. Omit whichever
     of the two you're not changing -- only the ones passed are touched."""
