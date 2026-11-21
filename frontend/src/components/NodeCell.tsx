@@ -133,10 +133,12 @@ function AssetMetaTag({
   dims,
   backendName,
   kind,
+  seed,
 }: {
   dims: { w: number; h: number } | undefined;
   backendName: string | undefined;
   kind?: AssetKind;
+  seed?: number;
 }) {
   // "image" is the overwhelming default (every ordinary generated picture),
   // so it's left unbadged -- anything else (mask, mesh, other, and whatever
@@ -145,15 +147,19 @@ function AssetMetaTag({
   // component today (it renders via MeshThumb instead, which carries its own
   // vertex/triangle line), but the check isn't hand-tied to "mask" either way.
   const showKind = Boolean(kind) && kind !== "image";
-  if (!dims && !backendName && !showKind) return null;
+  if (!dims && !backendName && !showKind && seed === undefined) return null;
   const parts = [dims ? `${dims.w}×${dims.h}` : null, backendName ?? null].filter((p): p is string => p !== null);
   return (
-    <span className="asset-meta-tag" title={[showKind ? kind : null, parts.join(" · ")].filter(Boolean).join(" · ")}>
+    <span
+      className="asset-meta-tag"
+      title={[showKind ? kind : null, parts.join(" · "), seed !== undefined ? `seed ${seed}` : null].filter(Boolean).join(" · ")}
+    >
       {/* Own line, smaller: sharing one row with dims/backend name pushed the
           backend name off the edge into an ellipsis (2026-08-13, reported
           against a real "MASK 2048×2048 · as..." cell). */}
       {showKind && <span className="asset-kind-tag">{kind!.toUpperCase()}</span>}
       {parts.length > 0 && <span className="asset-meta-line">{parts.join(" · ")}</span>}
+      {seed !== undefined && <span className="asset-meta-line">🎲 {seed}</span>}
     </span>
   );
 }
@@ -256,6 +262,7 @@ function CandidatesGrid({
               <AssetMetaTag
                 dims={undefined}
                 backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
+                seed={typeof asset.meta.seed === "number" ? asset.meta.seed : undefined}
                 kind={asset.kind}
               />
             </div>
@@ -335,6 +342,7 @@ function CandidatesGrid({
               <AssetMetaTag
                 dims={assetDims(asset, dimsById[asset.id])}
                 backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
+                seed={typeof asset.meta.seed === "number" ? asset.meta.seed : undefined}
                 kind={asset.kind}
               />
             </div>
@@ -432,6 +440,7 @@ function AssetFaceView({
             <AssetMetaTag
               dims={undefined}
               backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
+                seed={typeof asset.meta.seed === "number" ? asset.meta.seed : undefined}
               kind={asset.kind}
             />
           </div>
@@ -504,6 +513,7 @@ function AssetFaceView({
             <AssetMetaTag
               dims={assetDims(asset, dims)}
               backendName={typeof asset.meta.backend_name === "string" ? asset.meta.backend_name : undefined}
+                seed={typeof asset.meta.seed === "number" ? asset.meta.seed : undefined}
               kind={asset.kind}
             />
           </div>
@@ -1366,6 +1376,20 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
     return options.reverse();
   }, [nodesById, outputsByNode, node.id, t]);
 
+  // Seeds of this node's own generated outputs (stamped into Asset.meta.seed by
+  // the worker), newest first -- offered as one-click "pin this seed" chips.
+  const outputSeeds = useMemo(() => {
+    const seen: number[] = [];
+    for (const candidate of Object.values(nodesById)) {
+      if (candidate.created_by_node_id !== node.id) continue;
+      for (const asset of outputsByNode[candidate.id] ?? []) {
+        const seed = asset.meta?.seed;
+        if (typeof seed === "number" && !seen.includes(seed)) seen.push(seed);
+      }
+    }
+    return seen.reverse().slice(0, 6);
+  }, [nodesById, outputsByNode, node.id]);
+
   /** The picture currently feeding one of this node type's image/file fields,
    * as a URL -- what every in-modal editor (crop box, mask brush, transplant
    * layers) needs before it can draw anything. Named field -> its position
@@ -1999,6 +2023,29 @@ function BaseWorkflowNodeView({ node, templates, backends, capabilities, registe
                   setNode(updated);
                 }}
               />
+            </div>
+          )}
+
+          {!isDeterministic && (
+            <div className="field-row" style={{ flexWrap: "wrap" }}>
+              <label>{t("cell.seed")}</label>
+              <input
+                type="number"
+                min={0}
+                placeholder={t("cell.seedRandom")}
+                value={typeof node.params.fixed_seed === "number" ? node.params.fixed_seed : ""}
+                onChange={(e) => updateParam("fixed_seed", e.target.value === "" ? null : Math.max(0, Math.floor(Number(e.target.value))))}
+              />
+              {typeof node.params.fixed_seed === "number" && (
+                <button type="button" onClick={() => updateParam("fixed_seed", null)} title={t("cell.seedRandom")}>
+                  🎲
+                </button>
+              )}
+              {outputSeeds.map((seed) => (
+                <button key={seed} type="button" className="seed-chip" title={t("cell.seedPin")} onClick={() => updateParam("fixed_seed", seed)}>
+                  🔒 {seed}
+                </button>
+              ))}
             </div>
           )}
 

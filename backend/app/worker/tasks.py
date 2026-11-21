@@ -66,6 +66,8 @@ _running_job_tasks: dict[str, asyncio.Task] = {}
 # exceeded that, so stay under the tightest known limit rather than the
 # full int64 range.
 MAX_SEED_VALUE = 2**50 - 1
+# Node.params key holding a person-chosen seed; absent/None = random per run.
+FIXED_SEED_KEY = "fixed_seed"
 
 
 async def selected_or_latest_output(db, node: Node) -> Asset | None:
@@ -425,7 +427,12 @@ async def _get_or_create_output_asset_node(db, workflow_node: Node, is_native: b
 
 
 async def resolve_node_inputs(
-    db, node: Node, param_schema: dict[str, Any] | None, defaults: dict[str, Any] | None = None, by_reference: bool = False
+    db,
+    node: Node,
+    param_schema: dict[str, Any] | None,
+    defaults: dict[str, Any] | None = None,
+    by_reference: bool = False,
+    variant_index: int = 0,
 ) -> dict[str, Any]:
     """Merge Node.inputs (InputRef list, matched positionally to image/file
     slot fields in param_schema) with Node.params (direct values for the
@@ -455,8 +462,18 @@ async def resolve_node_inputs(
     storage = get_storage()
 
     resolved: dict[str, Any] = dict(node.params or {})
+    # A node's own "fixed_seed" (set from the node's settings, or copied from
+    # an asset's recorded seed) pins the generation: variant i gets
+    # fixed_seed + i so several variants still differ from each other while a
+    # re-run reproduces them exactly. Without it every call is random. Kept
+    # under its own key, never in the seed field itself -- a template can seed
+    # Node.params with a stale default for that field, which must not lock.
+    fixed_seed = resolved.pop(FIXED_SEED_KEY, None)
     for field_name in seed_fields:
-        resolved[field_name] = random.randint(0, MAX_SEED_VALUE)
+        if isinstance(fixed_seed, int) and not isinstance(fixed_seed, bool):
+            resolved[field_name] = (fixed_seed + variant_index) % (MAX_SEED_VALUE + 1)
+        else:
+            resolved[field_name] = random.randint(0, MAX_SEED_VALUE)
 
     # A "fixed" image field's value never comes from a grid cell (see
     # core/node_types.is_slot_field) -- it's a constant baked onto the node
@@ -745,7 +762,9 @@ async def _wait_with_stall_detection(instance: ComfyUIBackend, external_job_id: 
         raise
 
 
-async def _materialize_job_result(db, job: Job, node: Node, effective, instance, external_job_id: str, project_id: str) -> None:
+async def _materialize_job_result(
+    db, job: Job, node: Node, effective, instance, external_job_id: str, project_id: str, seed: int | None = None
+) -> None:
     """Fetches a finished job's output assets and marks it done -- shared by
     the normal dispatch path (run_variant_job) and orphan recovery
     (_resume_orphaned_job) once each has confirmed the backend actually
@@ -775,6 +794,8 @@ async def _materialize_job_result(db, job: Job, node: Node, effective, instance,
         meta = dict(asset_ref.meta or {})
         if backend_name:
             meta["backend_name"] = backend_name
+        if seed is not None:
+            meta["seed"] = seed
         db.add(
             Asset(
                 node_id=asset_node.id,
@@ -909,7 +930,11 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
             # `retryable = False` turns the automatic retries off.
             budget = getattr(choice.instance, "job_timeout_s", settings.job_timeout_seconds)
             agentic = getattr(choice.instance, "agentic", False)
-            resolved_inputs = await resolve_node_inputs(db, node, effective.param_schema, effective.defaults, by_reference=agentic)
+            resolved_inputs = await resolve_node_inputs(db, node, effective.param_schema, effective.defaults, by_reference=agentic, variant_index=job.variant_index)
+            used_seed = next(
+                (resolved_inputs[f["name"]] for f in (effective.param_schema or {}).get("fields", []) if f.get("type") == "seed"),
+                None,
+            )
             if agentic:
                 # Where the work belongs, for a backend that opens a chat about it.
                 resolved_inputs["_task"] = {"node_id": str(node.id), "project_id": str(project_id), "job_id": job_id}
@@ -957,7 +982,7 @@ async def run_variant_job(job_id: str, exclude_backend_ids: list[str] | None = N
                 detail = await choice.instance.error_detail(external_job_id)
                 raise RuntimeError(detail or "backend reported execution error")
 
-            await _materialize_job_result(db, job, node, effective, choice.instance, external_job_id, project_id)
+            await _materialize_job_result(db, job, node, effective, choice.instance, external_job_id, project_id, used_seed)
 
             # Logged only once the call actually succeeded and produced a
             # result -- a failed/timed-out attempt never reaches here, so
