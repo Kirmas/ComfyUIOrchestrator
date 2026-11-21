@@ -28,6 +28,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.config import get_settings
 from app.core import glb_stats
+from app.core.stl_convert import stl_triangle_count
 from app.db.models import AssetKind
 
 # The grid renders an asset's face at 118x118 CSS px (a 260px .node-cell minus
@@ -135,7 +136,12 @@ class MeshProducer(PreviewProducer):
     def build(self, data: bytes, capacity: int) -> tuple[bytes, dict] | None:
         counts = glb_stats.counts_from_bytes(data)
         if counts is None:
-            return None
+            # An STL has no shared vertices to count (every triangle repeats its
+            # corners): 0 means "unknown" in the descriptor, triangles are real.
+            triangles = stl_triangle_count(data)
+            if triangles is None:
+                return None
+            return b"", {"verts": 0, "faces": triangles}
         vertices, triangles = counts
         return b"", {"verts": vertices, "faces": triangles}
 

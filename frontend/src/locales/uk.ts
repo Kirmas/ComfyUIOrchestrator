@@ -644,6 +644,7 @@ export const uk: Record<TKey, string> = {
   "cell.doubleClickFullSize": "Подвійний клік — відкрити в повний розмір",
   "cell.compareWith": "Порівняти з іншим вузлом-ассетом",
   "cell.compareKindMismatch": "Картинку не можна порівняти з 3D-моделлю. Оберіть ассет того самого типу.",
+  "mesh.statsTris": "{tris} трикутників",
   "mesh.stats": "{verts} вершин · {tris} трикутників",
   "mesh.doubleClickOpen": "Подвійний клік — відкрити 3D-перегляд",
   "mesh.regenerateThumb": "Переробити мініатюру з моделі",

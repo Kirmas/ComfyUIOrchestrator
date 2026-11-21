@@ -50,7 +50,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 _ID_RE = re.compile(r"^[0-9a-f]{12}$")
 _GPU_ERROR = re.compile(r"GPU|Vulkan|OpenGL|EGL|GHOST|no display", re.I)
 _MIME_EXT = {
-    "model/gltf-binary": ".glb", "model/gltf+json": ".gltf", "image/png": ".png", "image/jpeg": ".jpg",
+    "model/gltf-binary": ".glb", "model/stl": ".stl", "model/gltf+json": ".gltf", "image/png": ".png", "image/jpeg": ".jpg",
     "image/webp": ".webp", "model/obj": ".obj", "model/stl": ".stl",
 }
 _IMPORTABLE = {".glb", ".gltf", ".fbx", ".obj", ".stl", ".ply"}

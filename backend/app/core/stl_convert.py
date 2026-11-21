@@ -14,7 +14,24 @@ import numpy as np
 
 from app.core.mesh_simplify import _vertex_normals, _write_glb
 
+STL_MIME = "model/stl"
+# (x, y, z) -> (x, z, -y): a proper rotation (det +1), so winding is kept.
+_Z_UP_TO_Y_UP = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=np.float32)
 _ASCII_VERTEX = re.compile(rb"vertex\s+(\S+)\s+(\S+)\s+(\S+)")
+
+
+def stl_triangle_count(data: bytes) -> int | None:
+    """Triangle count of an STL, or None when the bytes aren't one. Cheap: a
+    binary STL is recognised by its exact size (84 + 50 per triangle, which
+    nothing else matches by accident), an ASCII one by its `solid`/`facet`
+    head -- neither parses the geometry, so this is safe on every upload."""
+    if len(data) >= 84:
+        (count,) = struct.unpack_from("<I", data, 80)
+        if count and len(data) == 84 + 50 * count:
+            return count
+    if data[:512].lstrip()[:5].lower() == b"solid" and b"facet" in data[:4096]:
+        return data.count(b"endfacet") or None
+    return None
 
 
 def _triangles(data: bytes) -> np.ndarray | None:
@@ -44,7 +61,9 @@ def stl_to_glb(data: bytes) -> bytes | None:
     # Weld identical corners (STL repeats every vertex once per triangle).
     keyed = flat.view(np.dtype((np.void, 12))).ravel()
     _, first, inverse = np.unique(keyed, return_index=True, return_inverse=True)
-    points = flat[first]
+    # STL is Z-up (3D printing), glTF is Y-up: without this the viewer's "front"
+    # looks down onto the model from above.
+    points = flat[first] @ _Z_UP_TO_Y_UP.T
     faces = inverse.reshape(-1, 3).astype(np.uint32)
     return _write_glb(points, _vertex_normals(points, faces), faces, None)
 
@@ -85,11 +104,9 @@ def _node_matrix(node: dict) -> np.ndarray:
     return m
 
 
-def glb_to_stl(data: bytes) -> bytes:
-    """Binary STL of every triangle in the GLB's default scene, node transforms
-    applied. Geometry only: colour, textures, skins and animation are dropped
-    (STL can't hold them), the rest pose is what is written. Axes and units are
-    kept as they are in the GLB (glTF is Y-up, in metres)."""
+def glb_triangles(data: bytes) -> np.ndarray:
+    """(n, 3, 3) float32 triangles of every mesh in the GLB's default scene, node
+    transforms applied (rest pose; skins and animation ignored)."""
     from app.core.mesh_simplify import _accessor, _split_glb
 
     doc, blob = _split_glb(data)
@@ -118,8 +135,26 @@ def glb_to_stl(data: bytes) -> bytes:
     for root in roots:
         visit(root, np.eye(4))
     if not chunks:
-        raise ValueError("The GLB has no triangle geometry to write as STL")
-    tris = np.concatenate(chunks)
+        raise ValueError("The GLB has no triangle geometry")
+    return np.concatenate(chunks)
+
+
+def mesh_triangles(data: bytes) -> tuple[np.ndarray, str]:
+    """((n, 3, 3) triangles, format) of a GLB or STL; ValueError otherwise."""
+    fmt = detect_mesh_format(data)
+    if fmt == "glb":
+        return glb_triangles(data), fmt
+    if fmt == "stl":
+        return _triangles(data), fmt
+    raise ValueError("not a GLB or STL file")
+
+
+def glb_to_stl(data: bytes) -> bytes:
+    """Binary STL of every triangle in the GLB's default scene, node transforms
+    applied. Geometry only: colour, textures, skins and animation are dropped
+    (STL can't hold them), the rest pose is what is written. Written Z-up as slicers expect; units are
+    kept as they are in the GLB (glTF is in metres, an STL has no unit)."""
+    tris = glb_triangles(data) @ _Z_UP_TO_Y_UP  # Y-up -> Z-up, the inverse of stl_to_glb
     normals = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
     length = np.linalg.norm(normals, axis=1, keepdims=True)
     length[length == 0] = 1.0
@@ -139,7 +174,7 @@ def convert_mesh(data: bytes, target: str) -> tuple[bytes, str, str]:
     if source is None:
         raise ValueError(f"Can't convert to {target.upper()}: the input isn't a GLB or STL file")
     if source == "glb" and target == "stl":
-        return glb_to_stl(data), "model/stl", "other"
+        return glb_to_stl(data), STL_MIME, "mesh"
     if source == "stl" and target == "glb":
         glb = stl_to_glb(data)
         if glb is None:

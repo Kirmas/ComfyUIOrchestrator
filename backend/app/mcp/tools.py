@@ -1203,7 +1203,8 @@ async def view_asset(asset_id: str, max_px: int = _VIEW_MAX_PX, region: list[flo
     handed that isn't in one of your nodes (get_candidates takes a node id).
     Scaled to fit max_px; region=[left, top, right, bottom] as fractions of the
     image crops a detail first, exactly as in get_candidates. Meshes, video and
-    audio can't be shown this way (open a mesh with scene_create)."""
+    audio can't be shown this way. A mesh (GLB/STL) comes back as a four-view
+    contact sheet plus its facts; describe_mesh gives the facts alone."""
     from mcp.server.fastmcp import Image
 
     if region is not None and (len(region) != 4 or not (0 <= region[0] < region[2] <= 1 and 0 <= region[1] < region[3] <= 1)):
@@ -1217,12 +1218,50 @@ async def view_asset(asset_id: str, max_px: int = _VIEW_MAX_PX, region: list[flo
     if asset is None:
         raise ValueError(f"no asset {asset_id}")
     kind = getattr(asset.kind, "value", asset.kind)
+    if kind == "mesh":
+        # A quick look without Blender: four views (front/side/top/three-quarter)
+        # of the shape, and the facts. scene_create is for working on it.
+        from app.core import mesh_info
+
+        data = await asyncio.to_thread(get_storage().get_object, asset.storage_key)
+        try:
+            facts = await asyncio.to_thread(mesh_info.describe, data)
+            sheet = await asyncio.to_thread(mesh_info.contact_sheet, data)
+        except ValueError as exc:
+            return [f"asset {asset_id} is a mesh ({asset.mime_type}) that can't be previewed here: {exc}; "
+                    "open it with scene_create to look at it"]
+        return [f"asset {asset_id} (mesh, {facts['format']}): front / side / top / three-quarter views, "
+                f"{facts['triangles']:,} triangles, size {facts['bounding_box_size']}. {facts['axes']}. "
+                "A quick look at the shape, not a render; scene_create + scene_render for detail.",
+                Image(data=sheet, format="png")]
     if kind not in ("image", "mask"):
-        return [f"asset {asset_id} is a {kind} ({asset.mime_type}), which can't be shown as a picture"
-                + ("; open it with scene_create to work on and render it" if kind == "mesh" else "")]
+        return [f"asset {asset_id} is a {kind} ({asset.mime_type}), which can't be shown as a picture"]
     data = await asyncio.to_thread(get_storage().get_object, asset.storage_key)
     view, fmt, size = await asyncio.to_thread(_agent_view, data, max_px, region)
     return [f"asset {asset_id} ({kind}, sent at {size[0]}x{size[1]})", Image(data=view, format=fmt)]
+
+
+@mcp_server.tool()
+async def describe_mesh(asset_id: str) -> dict:
+    """What a 3D asset (GLB or STL) contains, without opening Blender: format,
+    triangle/vertex counts, bounding box size, and for a GLB its materials,
+    textures, animations and skins. The axes/unit convention of the format is
+    included -- an STL stores no unit. view_asset shows the shape."""
+    from app.core import mesh_info
+
+    try:
+        key = uuid.UUID(asset_id)
+    except ValueError:
+        raise ValueError(f"{asset_id!r} is not an asset id") from None
+    async with async_session_maker() as db:
+        asset = await db.get(Asset, key)
+    if asset is None:
+        raise ValueError(f"no asset {asset_id}")
+    kind = getattr(asset.kind, "value", asset.kind)
+    if kind != "mesh":
+        raise ValueError(f"asset {asset_id} is a {kind}, not a mesh")
+    data = await asyncio.to_thread(get_storage().get_object, asset.storage_key)
+    return await asyncio.to_thread(mesh_info.describe, data)
 
 
 @mcp_server.tool()

@@ -512,6 +512,11 @@ class AssetRead(ORMModel):
     # isn't a GLB.
     vertex_count: int | None = None
     triangle_count: int | None = None
+    # A mesh's own format ("glb", "stl", ...). Every mesh format is kind=mesh;
+    # `view_url` is a GLB the viewer can load when the original isn't one
+    # (None when `url` already is), and download/nodes keep using `url`.
+    mesh_format: str | None = None
+    view_url: str | None = None
     # Video/audio timing properties from prefix block or metadata
     duration_ms: int | None = None
     fps: float | None = None

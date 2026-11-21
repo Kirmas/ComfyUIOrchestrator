@@ -335,6 +335,10 @@ export interface Asset {
    * isn't a GLB). */
   vertex_count?: number | null;
   triangle_count?: number | null;
+  /** A mesh's own format ("glb", "stl"); every format is kind "mesh". `view_url`
+   * is a GLB the viewer can load when `url` (the original) isn't one. */
+  mesh_format?: string | null;
+  view_url?: string | null;
   /** Video/audio timing properties from server-side prefix descriptor or metadata */
   duration_ms?: number | null;
   fps?: number | null;

@@ -68,11 +68,30 @@ export function useModelViewerReady(): boolean {
 /** "12 345 vertices · 24 690 triangles", or null when the file's counts are
  * unknown (not a GLB, or nothing readable in it). */
 function meshStats(asset: Asset, t: TFunc): string | null {
-  if (asset.vertex_count == null || asset.triangle_count == null) return null;
-  return t("mesh.stats", {
-    verts: asset.vertex_count.toLocaleString(),
-    tris: asset.triangle_count.toLocaleString(),
-  });
+  if (asset.triangle_count == null) return null;
+  const format = (asset.mesh_format ?? "glb").toUpperCase();
+  // A format with no shared vertices (STL) reports triangles only.
+  const counts =
+    asset.vertex_count == null
+      ? t("mesh.statsTris", { tris: asset.triangle_count.toLocaleString() })
+      : t("mesh.stats", {
+          verts: asset.vertex_count.toLocaleString(),
+          tris: asset.triangle_count.toLocaleString(),
+        });
+  return `${format} · ${counts}`;
+}
+
+/** Key of a mesh's stored still. A converted format got its own key when STL
+ * was oriented Z-up -> Y-up, so stills captured from the old (top-down) view
+ * are not reused. */
+function stillKey(asset: Asset): string {
+  return asset.mesh_format && asset.mesh_format !== "glb" ? `${asset.id}#y-up3` : asset.id;
+}
+
+/** What the 3D viewer loads: a GLB. The original (`url`) is only that when the
+ * mesh is stored as GLB; otherwise the server hands out a converted rendition. */
+export function meshViewUrl(asset: Asset): string {
+  return resolveAssetUrl(asset.view_url ?? asset.url);
 }
 
 /** The name a mesh downloads as, shared by every download control for one (the
@@ -82,7 +101,8 @@ function meshStats(asset: Asset, t: TFunc): string | null {
  * extension-less "file", and the stored mime is application/octet-stream, so
  * nothing else says what it is. The stem is the dashboard's name when this
  * cell is that dashboard's result, otherwise a readable creation timestamp
- * (never the asset id). Always .glb: the kind is mesh, the bytes are glTF. */
+ * (never the asset id). The extension is the mesh's own format (glb unless
+ * the server says otherwise). */
 export function meshDownloadName(asset: Asset, downloadName?: string): string {
   // Callers build downloadName as "<dashboard name>.<extension for the mime>"
   // (here that's ".bin"). Strip exactly that suffix -- a dashboard name can
@@ -93,7 +113,7 @@ export function meshDownloadName(asset: Asset, downloadName?: string): string {
       ? downloadName.slice(0, -suffix.length)
       : downloadName
     : `model_${new Date(asset.created_at).toISOString().slice(0, 19).replace(/[:T]/g, "-")}`;
-  return `${stem}.glb`;
+  return `${stem}.${asset.mesh_format ?? "glb"}`;
 }
 
 /** Grid thumbnail: the model's front as a still image, nothing to drag. A cell is
@@ -120,6 +140,7 @@ export function MeshThumb({
   const t = useT();
   const ready = useModelViewerReady();
   const url = resolveAssetUrl(asset.url);
+  const viewUrl = meshViewUrl(asset);
   const stats = meshStats(asset, t);
   // undefined while the stored still is being looked up, null when there is
   // none (so one must be rendered), otherwise the still's object URL.
@@ -130,7 +151,7 @@ export function MeshThumb({
 
   useEffect(() => {
     let alive = true;
-    loadStill(asset.id).then((found) => {
+    loadStill(stillKey(asset)).then((found) => {
       if (alive) setStill(found);
     });
     return () => {
@@ -166,8 +187,15 @@ export function MeshThumb({
     let alive = true;
     const onLoad = async () => {
       try {
+        // `load` means the file is parsed, not that this element has been drawn:
+        // model-viewer frames and paints on its next frames, through one WebGL
+        // canvas shared by every element. Capturing at once got whatever that
+        // canvas last held (every thumbnail came out the same), so let two
+        // frames pass first.
+        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+        if (!alive) return;
         const dataUrl = viewer.toDataURL("image/webp", 0.9);
-        const captured = await saveStill(asset.id, dataUrl);
+        const captured = await saveStill(stillKey(asset), dataUrl);
         if (alive) setStill(captured);
       } catch {
         if (alive) setFailed(true);
@@ -196,7 +224,7 @@ export function MeshThumb({
       ) : rendering ? (
         <ModelViewer
           ref={viewerRef}
-          src={url}
+          src={viewUrl}
           camera-orbit={FRONT_ORBIT}
           interaction-prompt="none"
           disable-zoom
@@ -247,7 +275,7 @@ export function MeshThumb({
         disabled={rendering}
         onClick={async (e) => {
           e.stopPropagation();
-          await dropStill(asset.id);
+          await dropStill(stillKey(asset));
           setFailed(false);
           setStill(null);
         }}
@@ -481,7 +509,7 @@ export function MeshCompareModal({ left, right, onClose }: { left: Asset; right:
             <>
               <ModelViewer
                 ref={leftRef}
-                src={resolveAssetUrl(left.url)}
+                src={meshViewUrl(left)}
                 camera-controls
                 camera-orbit={FRONT_ORBIT}
                 environment-image="neutral"
@@ -489,7 +517,7 @@ export function MeshCompareModal({ left, right, onClose }: { left: Asset; right:
               />
               <ModelViewer
                 ref={rightRef}
-                src={resolveAssetUrl(right.url)}
+                src={meshViewUrl(right)}
                 camera-controls
                 camera-orbit={FRONT_ORBIT}
                 environment-image="neutral"

@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import asset_response
 from app.core.asset_preview import fit_rendition, svg_preview
-from app.core.storage import build_asset_url, build_fit_url, build_preview_url, get_storage
+from app.core.mesh_view import MESH_FORMAT_BY_MIME, mesh_view_path
+from app.core.storage import build_asset_url, build_fit_url, build_preview_url, build_view_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Node, NodeKind, NodeStatus
 from app.schemas.schemas import AssetMoveUpdate, AssetRead, AssetSelectUpdate
@@ -36,7 +37,11 @@ def to_asset_read(asset: Asset) -> AssetRead:
     if asset.kind == AssetKind.mesh:
         counts = get_storage().mesh_counts(asset.storage_key)
         if counts:
-            item.vertex_count, item.triangle_count = counts
+            # 0 vertices = unknown (an STL has no shared vertices to count).
+            item.vertex_count, item.triangle_count = (counts[0] or None), counts[1]
+        item.mesh_format = MESH_FORMAT_BY_MIME.get(asset.mime_type, "glb")
+        if item.mesh_format != "glb":
+            item.view_url = build_view_url(asset.id)
     elif asset.kind == AssetKind.video:
         vmeta = get_storage().video_meta(asset.storage_key)
         if vmeta:
@@ -119,6 +124,30 @@ async def get_asset_file(request: Request, asset_id: uuid.UUID, db: AsyncSession
     if download:
         response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(asset_download_name(asset), safe='')}"
     return response
+
+
+@router.get("/{asset_id}/view")
+async def get_asset_view(request: Request, asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """A mesh as a GLB, for the 3D viewer. The stored original is untouched
+    (download and nodes keep getting it); a non-GLB format is converted once
+    and the result cached on disk (core/mesh_view.py)."""
+    asset = await db.get(Asset, asset_id)
+    if not asset or asset.kind != AssetKind.mesh:
+        raise HTTPException(404, "Mesh not found")
+    storage = get_storage()
+    path = storage.path_of(asset.storage_key)
+    if not path.is_file():
+        raise HTTPException(404, "Asset file missing")
+    if MESH_FORMAT_BY_MIME.get(asset.mime_type, "glb") == "glb":
+        return asset_response.stream_payload(
+            request, path, storage.payload_offset(asset.storage_key), asset.mime_type,
+            asset_response.payload_etag(asset.storage_key))
+    try:
+        view = await mesh_view_path(asset.storage_key, lambda: storage.get_object(asset.storage_key), asset.mime_type)
+    except ValueError as exc:
+        raise HTTPException(422, f"Can't show this mesh: {exc}")
+    return asset_response.stream_payload(
+        request, view, 0, "model/gltf-binary", asset_response.payload_etag(asset.storage_key + "#view"))
 
 
 @router.get("/{asset_id}/preview")

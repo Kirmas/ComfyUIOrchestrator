@@ -7,7 +7,10 @@ a PNG sent as application/octet-stream comes out image/png, and the stored
 type is what gets served back, so it has to be true.
 
 Only signatures that can't be mistaken for something else: text formats
-(OBJ/PLY/STL) have none and stay with the declared type. FBX has no viewer
+(OBJ/PLY) have none and stay with the declared type. STL is the exception,
+recognised by its structure (stl_convert.stl_triangle_count) and stored as a
+mesh in its own format -- every mesh format is `kind=mesh`, the format is the
+MIME; the viewer gets a GLB rendition (routes/assets.py `/view`). FBX has no viewer
 yet, so it isn't classified here either.
 
 Containers that can hold either picture or sound (ISO-BMFF, Matroska, Ogg)
@@ -18,6 +21,7 @@ family wins over that guess (an audio-only .webm declared audio/webm stays
 audio), so the guess only decides when the client said nothing useful.
 """
 
+from app.core.stl_convert import STL_MIME, stl_triangle_count
 from app.db.models import AssetKind
 
 _SIGNATURES: tuple[tuple[bytes, str], ...] = (
@@ -46,6 +50,7 @@ _EXTENSIONS = {
     "image/gif": ".gif",
     "image/webp": ".webp",
     "model/gltf-binary": ".glb",
+    STL_MIME: ".stl",
     "video/mp4": ".mp4",
     "video/quicktime": ".mov",
     "video/webm": ".webm",
@@ -59,6 +64,10 @@ _EXTENSIONS = {
 
 def sniff_mime(data: bytes) -> str | None:
     """MIME type the leading bytes identify, or None when nothing recognised."""
+    # Binary STL has no magic, only an exact size, which is stronger evidence
+    # than any two-byte sync below -- so it is asked first.
+    if stl_triangle_count(data) is not None:
+        return STL_MIME
     for signature, mime in _SIGNATURES:
         if data.startswith(signature):
             return mime
@@ -96,7 +105,7 @@ def resolve_upload(data: bytes, declared_mime: str | None) -> tuple[str, AssetKi
         declared_family = declared_mime.split("/", 1)[0]
         if declared_family in ("audio", "video") and declared_family != sniffed.split("/", 1)[0]:
             mime_type = declared_mime
-    if mime_type == "model/gltf-binary":
+    if mime_type in ("model/gltf-binary", STL_MIME):
         return mime_type, AssetKind.mesh
     return mime_type, AssetKind.for_mime(mime_type)
 

@@ -25,7 +25,7 @@ import { VideoTrimPreview } from "./VideoTrimPreview";
 import { VideoExtractFramePreview } from "./VideoExtractFramePreview";
 import { IdeaTextPicker, MacroPreview } from "./IdeaTextPicker";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
-import { MeshThumb, MeshViewer, meshDownloadName } from "./Mesh3D";
+import { MeshThumb, MeshViewer, meshDownloadName, meshViewUrl } from "./Mesh3D";
 import { ReferencePicker } from "./ReferencePicker";
 import { ZoomableImage } from "./ZoomableImage";
 
@@ -557,7 +557,7 @@ export function FullSizeModal({
           ×
         </button>
         {asset?.kind === "mesh" ? (
-          <MeshViewer url={url} asset={asset} />
+          <MeshViewer url={meshViewUrl(asset)} asset={asset} />
         ) : asset?.kind === "video" ? (
           <video
             src={url}

@@ -644,6 +644,7 @@ export const en = {
   "cell.doubleClickFullSize": "Double-click to open full size",
   "cell.compareWith": "Compare with another asset node",
   "cell.compareKindMismatch": "A picture can't be compared with a 3D model. Pick an asset of the same kind.",
+  "mesh.statsTris": "{tris} triangles",
   "mesh.stats": "{verts} vertices · {tris} triangles",
   "mesh.doubleClickOpen": "Double-click to open the 3D viewer",
   "mesh.regenerateThumb": "Re-render the thumbnail from the model",
