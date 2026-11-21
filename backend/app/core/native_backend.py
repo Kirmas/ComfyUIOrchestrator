@@ -654,3 +654,18 @@ class VideoExtractFrameBackend(NativeBackend):
         frame_index = max(0, int(inputs.get("frame_index", 0)))
         png_bytes = extract_video_frame(video_data, frame_index)
         return [AssetRef(data=png_bytes, mime_type="image/png", kind="image")]
+
+
+class ConvertMeshBackend(NativeBackend):
+    """Format-to-format for 3D files. The input format is read from the bytes
+    of the asset to the left, the output is the node's `format` setting; a pair
+    that can't be done is an error, not a silent copy (core/stl_convert.py)."""
+
+    async def _run(self, execution_config: dict, inputs: dict[str, Any]) -> list[AssetRef]:
+        from app.core.stl_convert import convert_mesh
+
+        data = inputs.get("mesh")
+        if not data or not isinstance(data, (bytes, bytearray)):
+            raise ValueError("A 3D file is required on the left of this node")
+        out, mime, kind = convert_mesh(bytes(data), str(inputs.get("format") or "glb"))
+        return [AssetRef(data=out, mime_type=mime, kind=kind)]

@@ -27,6 +27,7 @@ from app.core.agent_task import INPUT_SLOTS, AgentTaskBackend
 from app.core.native_backend import (
     DEFAULT_TRANSPLANT_FEATHER,
     CharacterChartBackend,
+    ConvertMeshBackend,
     CropBackend,
     MaskBackend,
     MergeMaskBackend,
@@ -139,6 +140,18 @@ NATIVE_NODE_TYPES: dict[str, NativeNodeType] = {
         },
         defaults={"scale_percent": 10.0},
         backend_cls=ScaleMaskBackend,
+    ),
+    "convert_mesh": NativeNodeType(
+        slug="convert_mesh",
+        name="Convert 3D Format",
+        param_schema={
+            "fields": [
+                {"name": "mesh", "type": "file", "label": "3D file", "required": True},
+                {"name": "format", "type": "enum", "label": "Output format", "options": ["glb", "stl"], "default": "stl"},
+            ]
+        },
+        defaults={"format": "stl"},
+        backend_cls=ConvertMeshBackend,
     ),
     "video_trim": NativeNodeType(
         slug="video_trim",
