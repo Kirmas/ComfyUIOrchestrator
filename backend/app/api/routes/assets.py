@@ -3,6 +3,7 @@ import uuid
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import asset_response
@@ -10,8 +11,9 @@ from app.core.asset_preview import fit_rendition, svg_preview
 from app.core.mesh_view import MESH_FORMAT_BY_MIME, mesh_view_path
 from app.core.storage import build_asset_url, build_fit_url, build_preview_url, build_view_url, get_storage
 from app.db.base import get_db
-from app.db.models import Asset, AssetKind, Node, NodeKind, NodeStatus
-from app.schemas.schemas import AssetMoveUpdate, AssetRead, AssetSelectUpdate
+from app.db.models import Asset, AssetKind, Dashboard, Node, NodeKind, NodeStatus, Track
+from app.mcp.client import AGENT_ACTOR_HEADER
+from app.schemas.schemas import AssetMoveUpdate, AssetNameUpdate, AssetRead, AssetSelectUpdate
 from app.core.upload_type import resolve_upload
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
@@ -65,14 +67,57 @@ def to_asset_read(asset: Asset) -> AssetRead:
     return item
 
 
-def asset_download_name(asset: Asset) -> str:
-    """One filename for both the chat attachment card and the download."""
+def upload_name(filename: str | None) -> str | None:
+    """An uploaded file's own name, minus any directory and extension -- what an
+    upload starts out named (a generated asset starts with none)."""
+    base = (filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+    stem = base.rsplit(".", 1)[0] if "." in base.lstrip(".") else base
+    return clean_name(stem)
+
+
+def clean_name(name: str | None) -> str | None:
+    """A name fit for a filename stem: no path separators or control
+    characters, trimmed, at most 255 chars; blank means no name."""
+    if name is None:
+        return None
+    cleaned = "".join(" " if ch in "/\\" or ord(ch) < 32 else ch for ch in name).strip()
+    return cleaned[:255] or None
+
+
+def _extension(asset: Asset) -> str:
+    if asset.kind == AssetKind.mesh:
+        return "." + MESH_FORMAT_BY_MIME.get(asset.mime_type, "glb")
+    ext = mimetypes.guess_extension(asset.mime_type.split(";")[0].strip()) or ""
+    return {".jpe": ".jpg", ".jpeg": ".jpg"}.get(ext, ext)
+
+
+def asset_download_name(asset: Asset, container_name: str | None = None) -> str:
+    """One filename for both the chat attachment card and the download, in this
+    order: the name of a dashboard whose result this asset is, the asset's own
+    name, then an automatic one (the generator's own filename if it reported
+    one, else kind + creation time)."""
+    stem = clean_name(container_name) or clean_name(asset.name)
+    if stem:
+        return f"{stem}{_extension(asset)}"
     original = (asset.meta or {}).get("filename")
     if isinstance(original, str):
         name = original.replace("\\", "/").rsplit("/", 1)[-1][:255]
         if name.strip():
             return name
-    return f"asset-{str(asset.id)[:8]}{mimetypes.guess_extension(asset.mime_type) or ''}"
+    stamp = asset.created_at.strftime("%Y-%m-%d_%H-%M-%S") if asset.created_at else str(asset.id)[:8]
+    kind = getattr(asset.kind, "value", asset.kind)
+    return f"{kind}_{stamp}{_extension(asset)}"
+
+
+async def result_of_dashboard(db: AsyncSession, asset_id: uuid.UUID) -> Dashboard | None:
+    """A dashboard whose marked result this asset is, preferring a named one."""
+    rows = (await db.execute(select(Dashboard).where(Dashboard.result_asset_id == asset_id))).scalars().all()
+    return next((d for d in rows if clean_name(d.name)), rows[0] if rows else None)
+
+
+async def resolve_download_name(db: AsyncSession, asset: Asset) -> str:
+    dashboard = await result_of_dashboard(db, asset.id)
+    return asset_download_name(asset, dashboard.name if dashboard else None)
 
 
 @router.post("/upload", response_model=AssetRead, status_code=201)
@@ -81,7 +126,7 @@ async def upload_asset(file: UploadFile, db: AsyncSession = Depends(get_db)):
     mime_type, kind = resolve_upload(data, file.content_type)
     storage = get_storage()
     key = await storage.put_object(data, mime_type, prefix="uploads", kind=kind)
-    asset = Asset(node_id=None, storage_key=key, mime_type=mime_type, kind=kind, selected=False, meta={})
+    asset = Asset(node_id=None, storage_key=key, mime_type=mime_type, kind=kind, selected=False, meta={}, name=upload_name(file.filename))
     db.add(asset)
     await db.commit()
     await db.refresh(asset)
@@ -122,7 +167,7 @@ async def get_asset_file(request: Request, asset_id: uuid.UUID, db: AsyncSession
         asset_response.payload_etag(asset.storage_key),
     )
     if download:
-        response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(asset_download_name(asset), safe='')}"
+        response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(await resolve_download_name(db, asset), safe='')}"
     return response
 
 
@@ -245,6 +290,68 @@ async def select_asset(asset_id: uuid.UUID, payload: AssetSelectUpdate, db: Asyn
     await db.commit()
     await db.refresh(asset)
     return to_asset_read(asset)
+
+
+async def _set_name(db: AsyncSession, request: Request, asset: Asset, name: str | None) -> AssetRead:
+    """The naming rules every route that names an asset goes through: not a
+    dashboard's marked result (it downloads under the dashboard's own name, so
+    rename the dashboard), and an agent may only name an asset that has no
+    name yet -- renaming or clearing a name is left to the person."""
+    dashboard = await result_of_dashboard(db, asset.id)
+    if dashboard is not None:
+        raise HTTPException(409, f"This asset is the result of dashboard {dashboard.id} and is named after it; rename the dashboard instead")
+    if request.headers.get(AGENT_ACTOR_HEADER) == "agent" and asset.name:
+        raise HTTPException(409, f"Asset already has a name ({asset.name!r}); only the person can change it")
+    asset.name = clean_name(name)
+    await db.commit()
+    await db.refresh(asset)
+    return to_asset_read(asset)
+
+
+@router.patch("/{asset_id}/name", response_model=AssetRead)
+async def rename_asset(asset_id: uuid.UUID, payload: AssetNameUpdate, request: Request, db: AsyncSession = Depends(get_db)):
+    """Name an asset (blank clears it); see _set_name for who may."""
+    asset = await db.get(Asset, asset_id)
+    if not asset:
+        raise HTTPException(404, "Asset not found")
+    return await _set_name(db, request, asset, payload.name)
+
+
+@router.get("/{asset_id}/container-name")
+async def container_name_suggestion(asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """A name for this asset taken from the dashboard its cell sits in,
+    numbered to stay unique there: "<dashboard> 2", "<dashboard> 3", ... --
+    only a suggestion (the rename dialog's "container name" button puts it in
+    the field for the person to edit); nothing is saved. The bare name is never
+    suggested, since the dashboard's own result downloads under it. An asset
+    already named "<dashboard> N" gets its own N back. {"name": null} when the
+    cell isn't in a named sub-dashboard."""
+    asset = await db.get(Asset, asset_id)
+    if not asset:
+        raise HTTPException(404, "Asset not found")
+    node = await db.get(Node, asset.node_id) if asset.node_id else None
+    track = await db.get(Track, node.track_id) if node else None
+    dashboard = await db.get(Dashboard, track.dashboard_id) if track and track.dashboard_id else None
+    base = clean_name(dashboard.name) if dashboard else None
+    if not base:
+        return {"name": None}
+    taken = set(
+        (
+            await db.execute(
+                select(Asset.name)
+                .join(Node, Asset.node_id == Node.id)
+                .join(Track, Node.track_id == Track.id)
+                .where(Track.dashboard_id == dashboard.id, Asset.id != asset.id, Asset.name.is_not(None))
+            )
+        ).scalars()
+    )
+    own = asset.name or ""
+    if own.startswith(base + " ") and own[len(base) + 1:].isdigit() and own not in taken:
+        return {"name": own}
+    n = 2
+    while f"{base} {n}" in taken:
+        n += 1
+    return {"name": f"{base} {n}"}
 
 
 @router.post("/{asset_id}/move", response_model=AssetRead)

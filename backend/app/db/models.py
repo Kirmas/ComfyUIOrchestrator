@@ -541,6 +541,11 @@ class Asset(Base):
     # on both Postgres and the SQLite dev fallback isn't worth writing.
     tags: Mapped[list] = mapped_column(JSONVariant, default=list, nullable=False)
     meta: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    # The person's own name for this file (no extension). An upload starts with
+    # the uploaded file's stem; a generated asset starts empty. It is the second
+    # choice for a download's filename, after the name of a dashboard whose
+    # marked result this asset is -- see assets.py::resolve_download_name.
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     node: Mapped["Node"] = relationship(back_populates="outputs", foreign_keys=[node_id])

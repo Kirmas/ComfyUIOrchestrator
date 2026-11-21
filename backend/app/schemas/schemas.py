@@ -495,6 +495,7 @@ class AssetRead(ORMModel):
     selected: bool
     tags: list[str] = []
     meta: dict
+    name: str | None = None
     created_at: datetime
     url: str | None = None
     # The grid-sized thumbnail; always safe to use as an <img src>, since the
@@ -532,6 +533,11 @@ class AssetSelectUpdate(BaseModel):
 
 class AssetMoveUpdate(BaseModel):
     node_id: uuid.UUID
+
+
+class AssetNameUpdate(BaseModel):
+    # Empty/blank clears the name.
+    name: str | None = None
 
 
 # ---------- Job ----------

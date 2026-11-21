@@ -22,7 +22,7 @@ from app.core.storage import build_asset_url, get_storage
 from app.core.upload_type import resolve_upload
 from app.core.ws_manager import ws_manager
 from app.mcp.client import AGENT_ACTOR_HEADER
-from app.api.routes.assets import to_asset_read
+from app.api.routes.assets import to_asset_read, upload_name
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Dashboard, Job, JobStatusEnum, Node, NodeKind, NodeStatus, Track
 from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeDuplicate, NodeMove, NodeRead, NodeUpdate, PickCandidate
@@ -913,6 +913,9 @@ async def upload_asset_to_node(
     node_id: uuid.UUID,
     file: UploadFile,
     kind: str | None = Form(None),
+    # A clipboard paste: the browser calls every pasted image "image.png",
+    # which is no name at all, so the asset starts unnamed like a generated one.
+    unnamed: bool = Form(False),
     db: AsyncSession = Depends(get_db),
 ):
     """Manual fill for an asset-kind node (the grid's start cell) -- no
@@ -971,7 +974,7 @@ async def upload_asset_to_node(
     # the one-off reorg of pre-existing rows).
     track = await db.get(Track, node.track_id)
     key = await storage.put_object(data, mime_type, prefix=f"projects/{track.project_id}/nodes/{node.id}", kind=asset_kind)
-    asset = Asset(node_id=node.id, storage_key=key, mime_type=mime_type, kind=asset_kind, selected=True, meta={})
+    asset = Asset(node_id=node.id, storage_key=key, mime_type=mime_type, kind=asset_kind, selected=True, meta={}, name=None if unnamed else upload_name(file.filename))
     db.add(asset)
     node.status = NodeStatus.done
     node.error = None

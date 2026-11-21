@@ -32,6 +32,15 @@ export function resolveAssetUrl(path: string | null | undefined): string {
   return `${getApiBaseUrl()}${path}`;
 }
 
+/** The asset's original with ?download=true: the server then sends a
+ * Content-Disposition filename (dashboard name if it's that dashboard's result,
+ * else the asset's own name, else an automatic one), which also beats the
+ * <a download> attribute -- so the naming rule lives only in assets.py. */
+export function assetDownloadUrl(asset: { url: string | null }): string {
+  const url = resolveAssetUrl(asset.url);
+  return url ? `${url}${url.includes("?") ? "&" : "?"}download=true` : "";
+}
+
 /** What a grid-sized <img> should point at: the asset's thumbnail when the
  * backend has one, the original otherwise. Kept next to resolveAssetUrl so the
  * "which URL does a cell use" decision lives in exactly one place -- full-size

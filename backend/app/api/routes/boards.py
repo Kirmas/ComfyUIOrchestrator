@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.idea_macros import resolve_macros, strip_markdown
 from app.core.storage import build_asset_url, get_storage
 from app.core.upload_type import resolve_upload
-from app.api.routes.assets import to_asset_read
+from app.api.routes.assets import to_asset_read, upload_name
 from app.db.base import get_db
 from app.db.models import Asset, Board, BoardItem, BoardItemKind, Project
 from app.schemas.schemas import (
@@ -233,7 +233,7 @@ async def upload_project_asset(project_id: uuid.UUID, file: UploadFile, db: Asyn
     data = await file.read()
     mime_type, kind = resolve_upload(data, file.content_type)
     key = await get_storage().put_object(data, mime_type, prefix=f"projects/{project_id}", kind=kind)
-    asset = Asset(project_id=project_id, storage_key=key, mime_type=mime_type, kind=kind, selected=False, tags=[], meta={})
+    asset = Asset(project_id=project_id, storage_key=key, mime_type=mime_type, kind=kind, selected=False, tags=[], meta={}, name=upload_name(file.filename))
     db.add(asset)
     await db.commit()
     await db.refresh(asset)

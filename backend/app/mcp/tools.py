@@ -755,6 +755,7 @@ async def get_candidates(
     listing = [
         {
             "asset_id": asset["id"],
+            "name": asset.get("name"),
             "selected": asset.get("selected"),
             "size": f"{asset['width']}x{asset['height']}" if asset.get("width") else None,
             "mime_type": asset.get("mime_type"),
@@ -792,6 +793,27 @@ async def show_in_chat(chat_id: str, asset_id: str, caption: str = "") -> dict:
     if not re.fullmatch(r"[0-9a-f]{12}|[0-9a-fA-F-]{36}", chat_id):
         raise ValueError("Use the current Agent chat_id or session UUID from your session instructions")
     return await _post(f"/api/agent-chats/{chat_id}/media", {"asset_id": asset_id, "caption": caption})
+
+
+@mcp_server.tool()
+async def name_asset(asset_id: str, name: str = "", from_container: bool = False) -> dict:
+    """Give an unnamed asset a name (no extension -- the download adds it).
+
+    The name is what the file downloads as, unless the asset is a dashboard's
+    marked result (then the dashboard's name wins, and naming it is refused --
+    use rename_dashboard). Generated assets start unnamed; uploads start with
+    the uploaded file's name. You may only name an asset whose name is empty
+    (see `name` in get_candidates / list_reference_assets); renaming one that
+    already has a name is the person's call, so it's refused.
+
+    from_container=True ignores `name` and names it after the sub-dashboard
+    its cell sits in, numbered unique there ("Knight armour 2", "... 3").
+    """
+    if from_container:
+        name = (await _get(f"/api/assets/{asset_id}/container-name"))["name"]
+        if not name:
+            raise ValueError("This asset's cell isn't in a named sub-dashboard, so there is no container name to take")
+    return await _patch(f"/api/assets/{asset_id}/name", {"name": name})
 
 
 @mcp_server.tool()

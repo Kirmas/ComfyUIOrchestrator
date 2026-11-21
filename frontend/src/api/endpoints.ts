@@ -279,9 +279,11 @@ export const nodesApi = {
   // how many currently resolve to a real asset. Never shrinks below required
   // fields or grows a track; see db/models.py's Node.visible_slot_count.
   recomputeSpan: (id: string) => api.post<NodeItem>(`/api/nodes/${id}/recompute-span`),
-  uploadAsset: (id: string, file: File) => {
+  // `unnamed`: a clipboard paste, whose "image.png" isn't a real name.
+  uploadAsset: (id: string, file: File, unnamed = false) => {
     const form = new FormData();
     form.append("file", file);
+    if (unnamed) form.append("unnamed", "true");
     return api.postForm<Asset>(`/api/nodes/${id}/upload-asset`, form);
   },
 };
@@ -296,6 +298,10 @@ export const assetsApi = {
   select: (id: string, selected: boolean) => api.patch<Asset>(`/api/assets/${id}/select`, { selected }),
   move: (id: string, nodeId: string) => api.post<Asset>(`/api/assets/${id}/move`, { node_id: nodeId }),
   setTags: (id: string, tags: string[]) => api.patch<Asset>(`/api/assets/${id}/tags`, { tags }),
+  rename: (id: string, name: string | null) => api.patch<Asset>(`/api/assets/${id}/name`, { name }),
+  // A suggested "<dashboard name> N", numbered unique in that dashboard; null
+  // outside a named sub-dashboard. Only a suggestion -- nothing is saved.
+  containerName: (id: string) => api.get<{ name: string | null }>(`/api/assets/${id}/container-name`),
   remove: (id: string) => api.delete(`/api/assets/${id}`),
   // Same shape as build_asset_url server-side -- for a raw id with no
   // pre-built AssetRead.url around (e.g. Settings' unowned-assets scan,

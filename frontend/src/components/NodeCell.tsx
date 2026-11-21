@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { createPortal } from "react-dom";
-import { resolveAssetPreviewUrl, resolveAssetUrl } from "../api/client";
+import { assetDownloadUrl, resolveAssetPreviewUrl, resolveAssetUrl } from "../api/client";
 import { assetsApi, dashboardsApi, nodesApi, nodeTemplatesApi } from "../api/endpoints";
 import { detectCropGroups, resolveCropImageField } from "../cropUtils";
 import { isFileDrag } from "../dragUtils";
@@ -14,7 +14,7 @@ import { defaultInputsForSchema, groupTemplatesByCategory, slotFields } from "..
 import { openAgentChat } from "../agentNav";
 import type { Asset, AssetKind, Backend, Capability, Dashboard, InputRef, Job, NodeItem, NodeStatus, NodeTemplate } from "../types";
 import { useT, type TFunc } from "../i18n";
-import { backendColors, cx, extensionForMimeType, formatDuration } from "../utils";
+import { backendColors, cx, formatDuration } from "../utils";
 import { capabilityUsesMultiAngleLora } from "../multiAngleLora";
 import { capabilityUsesIdeogram4 } from "../ideogram4";
 import { CaptionBoxEditor, type CaptionBgOption } from "./CaptionBoxEditor";
@@ -25,7 +25,8 @@ import { VideoTrimPreview } from "./VideoTrimPreview";
 import { VideoExtractFramePreview } from "./VideoExtractFramePreview";
 import { IdeaTextPicker, MacroPreview } from "./IdeaTextPicker";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
-import { MeshThumb, MeshViewer, meshDownloadName, meshViewUrl } from "./Mesh3D";
+import { MeshThumb, MeshViewer, meshViewUrl } from "./Mesh3D";
+import { AssetNameDialog } from "./AssetNameDialog";
 import { ReferencePicker } from "./ReferencePicker";
 import { ZoomableImage } from "./ZoomableImage";
 
@@ -324,7 +325,7 @@ function CandidatesGrid({
               </button>
               <a
                 className="zoom-button download-button"
-                href={resolveAssetUrl(asset.url)}
+                href={assetDownloadUrl(asset)}
                 download
                 onClick={(e) => e.stopPropagation()}
                 title={t("cell.download")}
@@ -381,16 +382,11 @@ function CandidatesGrid({
 function AssetFaceView({
   asset,
   borrowed = false,
-  downloadName,
   onImageOpen,
   onCompare,
 }: {
   asset: Asset;
   borrowed?: boolean;
-  // Filename (with extension) to save the download as, when this container
-  // has a meaningful name of its own -- e.g. a subgraph's dashboard name.
-  // Left unset falls back to whatever name the storage URL itself carries.
-  downloadName?: string;
   onImageOpen: (url: string, asset?: Asset) => void;
   onCompare: (asset: Asset) => void;
 }) {
@@ -406,7 +402,6 @@ function AssetFaceView({
         {asset.kind === "mesh" ? (
           <MeshThumb
             asset={asset}
-            downloadName={downloadName}
             onOpen={() => onImageOpen(url, asset)}
             onCompare={() => onCompare(asset)}
           />
@@ -427,8 +422,8 @@ function AssetFaceView({
             <audio src={url} controls style={{ width: "100%", height: 30 }} onClick={(e) => e.stopPropagation()} />
             <a
               className="zoom-button download-button"
-              href={url}
-              download={downloadName ?? true}
+              href={assetDownloadUrl(asset)}
+              download
               onClick={(e) => e.stopPropagation()}
               title={t("cell.download")}
             >
@@ -499,8 +494,8 @@ function AssetFaceView({
             </button>
             <a
               className="zoom-button download-button"
-              href={url}
-              download={downloadName ?? true}
+              href={assetDownloadUrl(asset)}
+              download
               onClick={(e) => e.stopPropagation()}
               title={t("cell.download")}
             >
@@ -691,11 +686,17 @@ function BaseAssetNodeView({
   const loadProject = useProjectStore((s) => s.loadProject);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isCandidatesGrid = node.node_type === "asset.select";
-  // Named after the dashboard when this cell's output IS that dashboard's
-  // marked result -- shared by the text download button below and the
-  // overlay one AssetFaceView renders on the thumbnail itself.
-  const downloadName =
-    isDashboardResult && dashboardName && outputs[0] ? `${dashboardName}.${extensionForMimeType(outputs[0].mime_type)}` : undefined;
+  // The header names the file the way a download will (assets.py::
+  // resolve_download_name): the dashboard's name when this output is its
+  // marked result -- renamed through the dashboard, not here -- else the
+  // asset's own name. The server enforces the same rule on rename.
+  const single = outputs.length === 1 && !isCandidatesGrid ? outputs[0] : null;
+  const assetTitle = single ? (isDashboardResult ? dashboardName : single.name) : null;
+  const canRename = !!single && !isDashboardResult;
+  const [renaming, setRenaming] = useState(false);
+  const renameAsset = () => {
+    if (canRename) setRenaming(true);
+  };
 
   const { fullSize, openFullSize: openImage, closeFullSize: closeImage } = useFullSizeState();
   // Only an asset.select picker's own candidates get select/discard actions
@@ -874,9 +875,9 @@ function BaseAssetNodeView({
     }
   };
 
-  const uploadFiles = async (files: File[]) => {
+  const uploadFiles = async (files: File[], pasted = false) => {
     for (const file of files) {
-      await nodesApi.uploadAsset(node.id, file);
+      await nodesApi.uploadAsset(node.id, file, pasted);
     }
     await refreshOutputs(node.id);
     const updated = await nodesApi.get(node.id);
@@ -919,7 +920,7 @@ function BaseAssetNodeView({
       .filter((f): f is File => f !== null);
     if (files.length === 0) return;
     e.preventDefault();
-    uploadFiles(files);
+    uploadFiles(files, true);
   };
 
   // Keep this candidate; the backend forks the rest onto their own line
@@ -1018,7 +1019,26 @@ function BaseAssetNodeView({
       onClick={() => compareActive && onCellClicked(node)}
     >
       <div className="node-cell-header">
-        <span>{isCandidatesGrid ? t("cell.assetSelect") : t("cell.asset")}</span>
+        <span
+          onDoubleClick={canRename ? renameAsset : undefined}
+          title={canRename ? t("cell.renameAssetTitle") : undefined}
+          style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}
+        >
+          {assetTitle || (isCandidatesGrid ? t("cell.assetSelect") : t("cell.asset"))}
+        </span>
+        {canRename && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              renameAsset();
+            }}
+            title={t("cell.renameAssetTitle")}
+            style={{ fontSize: 10, padding: "0 4px", lineHeight: 1.4 }}
+          >
+            ✎
+          </button>
+        )}
         {isManualPlacement && (
           <span title={t("cell.manualPinTitle")} style={{ fontSize: 11, opacity: 0.7 }}>
             📌
@@ -1027,6 +1047,9 @@ function BaseAssetNodeView({
         <AgentBadge node={node} />
         <span className="status-pill">{statusLabel(t, node.status)}</span>
       </div>
+      {renaming && single && (
+        <AssetNameDialog asset={single} onClose={() => setRenaming(false)} onSaved={() => void refreshOutputs(node.id)} />
+      )}
 
       <input
         ref={fileInputRef}
@@ -1044,8 +1067,8 @@ function BaseAssetNodeView({
           <a
             className="primary"
             style={{ textDecoration: "none", padding: "4px 8px" }}
-            href={resolveAssetUrl(outputs[0].url)}
-            download={outputs[0].kind === "mesh" ? meshDownloadName(outputs[0], downloadName) : (downloadName ?? true)}
+            href={assetDownloadUrl(outputs[0])}
+            download
           >
             {t("cell.download")}
           </a>
@@ -1164,7 +1187,7 @@ function BaseAssetNodeView({
       {isCandidatesGrid ? (
         <CandidatesGrid outputs={outputs} onSelect={selectCandidate} onDiscard={discardCandidate} onImageOpen={openImage} onCompare={startCompare} />
       ) : outputs.length === 1 ? (
-        <AssetFaceView asset={outputs[0]} downloadName={downloadName} onImageOpen={openImage} onCompare={startCompare} />
+        <AssetFaceView asset={outputs[0]} onImageOpen={openImage} onCompare={startCompare} />
       ) : null}
 
       {isComparingSource && (
@@ -2640,7 +2663,6 @@ function SubgraphNodeView({ node, registerRef, compareActive, onCellClicked, onS
       {face ? (
         <AssetFaceView
           asset={face}
-          downloadName={info?.name ? `${info.name}.${extensionForMimeType(face.mime_type)}` : undefined}
           onImageOpen={openFullSize}
           onCompare={(asset) => onStartCompare(node, asset)}
         />

@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.api.routes.assets import asset_download_name
+from app.api.routes.assets import resolve_download_name
 from app.api.routes.nodes import upload_asset_to_node
 from app.db.base import get_db
 from app.core.storage import get_storage
@@ -301,7 +301,7 @@ async def attach_media(chat_id: str, payload: AgentMediaAttach, db: AsyncSession
         raise HTTPException(404, "Asset not found")
     if not get_storage().path_of(asset.storage_key).is_file():
         raise HTTPException(404, "Asset file missing")
-    name = asset_download_name(asset)
+    name = await resolve_download_name(db, asset)
     return await _call("POST", f"/chats/{chat_id}/media", json={
         "asset_id": str(asset.id), "mime_type": asset.mime_type,
         "name": name, "caption": payload.caption,

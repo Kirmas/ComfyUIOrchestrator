@@ -2,12 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ElementType, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import type { Material, Mesh, MeshNormalMaterial, Object3D } from "three";
-import { resolveAssetUrl } from "../api/client";
+import { assetDownloadUrl, resolveAssetUrl } from "../api/client";
 import { useT } from "../i18n";
 import type { TFunc } from "../i18n";
 import { acquireRenderSlot, dropStill, loadStill, releaseRenderSlot, saveStill } from "../meshStills";
 import type { Asset } from "../types";
-import { cx, extensionForMimeType } from "../utils";
+import { cx } from "../utils";
 
 /** Everything here renders a mesh asset (AssetKind.mesh, a .glb).
  *
@@ -94,28 +94,6 @@ export function meshViewUrl(asset: Asset): string {
   return resolveAssetUrl(asset.view_url ?? asset.url);
 }
 
-/** The name a mesh downloads as, shared by every download control for one (the
- * overlay ⬇ on the thumbnail and the text button in the node's action row).
- *
- * The asset URL ends in `/file`, so without a name the browser saves an
- * extension-less "file", and the stored mime is application/octet-stream, so
- * nothing else says what it is. The stem is the dashboard's name when this
- * cell is that dashboard's result, otherwise a readable creation timestamp
- * (never the asset id). The extension is the mesh's own format (glb unless
- * the server says otherwise). */
-export function meshDownloadName(asset: Asset, downloadName?: string): string {
-  // Callers build downloadName as "<dashboard name>.<extension for the mime>"
-  // (here that's ".bin"). Strip exactly that suffix -- a dashboard name can
-  // carry dots of its own ("Head v1.2"), so cutting at the last dot would eat them.
-  const suffix = `.${extensionForMimeType(asset.mime_type)}`;
-  const stem = downloadName
-    ? downloadName.endsWith(suffix)
-      ? downloadName.slice(0, -suffix.length)
-      : downloadName
-    : `model_${new Date(asset.created_at).toISOString().slice(0, 19).replace(/[:T]/g, "-")}`;
-  return `${stem}.${asset.mesh_format ?? "glb"}`;
-}
-
 /** Grid thumbnail: the model's front as a still image, nothing to drag. A cell is
  * 118 CSS px, so orbit controls there only ever got in the way -- and the
  * interaction prompt (model-viewer's hand icon) was drawn over the picture.
@@ -128,7 +106,6 @@ export function MeshThumb({
   asset,
   onOpen,
   onCompare,
-  downloadName,
   bare = false,
 }: {
   asset: Asset;
@@ -139,11 +116,9 @@ export function MeshThumb({
   // Omitted where there is nothing to compare against (a board sticker, a chat
   // message) -- the ⇄ button is then not drawn at all.
   onCompare?: () => void;
-  downloadName?: string;
 }) {
   const t = useT();
   const ready = useModelViewerReady();
-  const url = resolveAssetUrl(asset.url);
   const viewUrl = meshViewUrl(asset);
   const stats = meshStats(asset, t);
   // undefined while the stored still is being looked up, null when there is
@@ -268,8 +243,8 @@ export function MeshThumb({
         )}
         <a
           className="zoom-button download-button"
-          href={url}
-          download={meshDownloadName(asset, downloadName)}
+          href={assetDownloadUrl(asset)}
+          download
           onClick={(e) => e.stopPropagation()}
           title={t("cell.download")}
         >

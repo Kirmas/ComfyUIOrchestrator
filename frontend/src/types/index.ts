@@ -318,6 +318,9 @@ export interface Asset {
   selected: boolean;
   tags?: string[];
   meta: Record<string, unknown>;
+  // The person's own name (no extension); null for a generated asset nobody
+  // named yet. Downloads are named server-side (assets.py::resolve_download_name).
+  name?: string | null;
   created_at: string;
   url: string | null;
   /** Grid-sized thumbnail out of the asset file's own prefix block. Always safe
