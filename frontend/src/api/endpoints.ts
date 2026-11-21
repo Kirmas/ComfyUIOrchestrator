@@ -298,6 +298,7 @@ export const assetsApi = {
   select: (id: string, selected: boolean) => api.patch<Asset>(`/api/assets/${id}/select`, { selected }),
   move: (id: string, nodeId: string) => api.post<Asset>(`/api/assets/${id}/move`, { node_id: nodeId }),
   setTags: (id: string, tags: string[]) => api.patch<Asset>(`/api/assets/${id}/tags`, { tags }),
+  setFront: (id: string, orbit: number[] | null) => api.patch<Asset>(`/api/assets/${id}/front`, { orbit }),
   rename: (id: string, name: string | null) => api.patch<Asset>(`/api/assets/${id}/name`, { name }),
   // A suggested "<dashboard name> N", numbered unique in that dashboard; null
   // outside a named sub-dashboard. Only a suggestion -- nothing is saved.

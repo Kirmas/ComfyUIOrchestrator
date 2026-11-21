@@ -1,3 +1,4 @@
+import math
 import mimetypes
 import uuid
 from urllib.parse import quote
@@ -13,7 +14,7 @@ from app.core.storage import build_asset_url, build_fit_url, build_preview_url, 
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Dashboard, Node, NodeKind, NodeStatus, Track
 from app.mcp.client import AGENT_ACTOR_HEADER
-from app.schemas.schemas import AssetMoveUpdate, AssetNameUpdate, AssetRead, AssetSelectUpdate
+from app.schemas.schemas import AssetFrontUpdate, AssetMoveUpdate, AssetNameUpdate, AssetRead, AssetSelectUpdate
 from app.core.upload_type import resolve_upload
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
@@ -41,6 +42,7 @@ def to_asset_read(asset: Asset) -> AssetRead:
         if counts:
             # 0 vertices = unknown (an STL has no shared vertices to count).
             item.vertex_count, item.triangle_count = (counts[0] or None), counts[1]
+        item.front_orbit = (asset.meta or {}).get("front_orbit")
         item.mesh_format = MESH_FORMAT_BY_MIME.get(asset.mime_type, "glb")
         if item.mesh_format != "glb":
             item.view_url = build_view_url(asset.id)
@@ -315,6 +317,29 @@ async def rename_asset(asset_id: uuid.UUID, payload: AssetNameUpdate, request: R
     if not asset:
         raise HTTPException(404, "Asset not found")
     return await _set_name(db, request, asset, payload.name)
+
+
+@router.patch("/{asset_id}/front", response_model=AssetRead)
+async def set_mesh_front(asset_id: uuid.UUID, payload: AssetFrontUpdate, db: AsyncSession = Depends(get_db)):
+    """Remember which view of a mesh is its front (null resets). Lives in meta:
+    it is a property of the model, and STL has no front of its own to go by."""
+    asset = await db.get(Asset, asset_id)
+    if not asset:
+        raise HTTPException(404, "Asset not found")
+    if asset.kind != AssetKind.mesh:
+        raise HTTPException(400, "Only a mesh has a front")
+    orbit = payload.orbit
+    if orbit is not None and (len(orbit) != 3 or not all(math.isfinite(v) for v in orbit) or orbit[2] <= 0):
+        raise HTTPException(422, "orbit must be [theta, phi, radius] with a positive radius")
+    meta = dict(asset.meta or {})  # a new dict, or the JSON column isn't seen as changed
+    if orbit is None:
+        meta.pop("front_orbit", None)
+    else:
+        meta["front_orbit"] = orbit
+    asset.meta = meta
+    await db.commit()
+    await db.refresh(asset)
+    return to_asset_read(asset)
 
 
 @router.get("/{asset_id}/container-name")

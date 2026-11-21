@@ -342,6 +342,8 @@ export interface Asset {
    * is a GLB the viewer can load when `url` (the original) isn't one. */
   mesh_format?: string | null;
   view_url?: string | null;
+  /** A mesh's person-chosen front: [theta, phi (radians), radius]. null = default. */
+  front_orbit?: number[] | null;
   /** Video/audio timing properties from server-side prefix descriptor or metadata */
   duration_ms?: number | null;
   fps?: number | null;

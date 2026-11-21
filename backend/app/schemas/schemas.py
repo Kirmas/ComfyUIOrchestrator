@@ -518,6 +518,8 @@ class AssetRead(ORMModel):
     # (None when `url` already is), and download/nodes keep using `url`.
     mesh_format: str | None = None
     view_url: str | None = None
+    # A mesh's person-chosen front (see AssetFrontUpdate), None = default.
+    front_orbit: list[float] | None = None
     # Video/audio timing properties from prefix block or metadata
     duration_ms: int | None = None
     fps: float | None = None
@@ -533,6 +535,13 @@ class AssetSelectUpdate(BaseModel):
 
 class AssetMoveUpdate(BaseModel):
     node_id: uuid.UUID
+
+
+class AssetFrontUpdate(BaseModel):
+    # The mesh viewer's camera orbit that counts as this model's "front":
+    # [theta, phi] in radians and radius in the viewer's own units. None resets
+    # to the default front.
+    orbit: list[float] | None = None
 
 
 class AssetNameUpdate(BaseModel):

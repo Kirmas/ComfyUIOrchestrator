@@ -5,6 +5,7 @@ import type { Material, Mesh, MeshNormalMaterial, Object3D } from "three";
 import { assetDownloadUrl, resolveAssetUrl } from "../api/client";
 import { useT } from "../i18n";
 import type { TFunc } from "../i18n";
+import { orbitAttr, saveFront, useFront } from "../meshFronts";
 import { acquireRenderSlot, dropStill, loadStill, releaseRenderSlot, saveStill } from "../meshStills";
 import type { Asset } from "../types";
 import { cx } from "../utils";
@@ -43,11 +44,6 @@ export type ModelViewerElement = HTMLElement & {
 // anyway, so the one loose typing lives here instead of on every use.
 const ModelViewer = "model-viewer" as unknown as ElementType;
 
-/** Where every mesh view starts: theta 0 is the model's +Z, which is the front
- * a glTF export is authored toward, at model-viewer's own default elevation and
- * framing distance. */
-export const FRONT_ORBIT = "0deg 75deg 105%";
-
 /** True once @google/model-viewer has registered its element. */
 export function useModelViewerReady(): boolean {
   const [ready, setReady] = useState(false);
@@ -84,8 +80,10 @@ function meshStats(asset: Asset, t: TFunc): string | null {
 /** Key of a mesh's stored still. A converted format got its own key when STL
  * was oriented Z-up -> Y-up, so stills captured from the old (top-down) view
  * are not reused. */
-function stillKey(asset: Asset): string {
-  return asset.mesh_format && asset.mesh_format !== "glb" ? `${asset.id}#y-up3` : asset.id;
+function stillKey(asset: Asset, front: number[] | null): string {
+  const base = asset.mesh_format && asset.mesh_format !== "glb" ? `${asset.id}#y-up3` : asset.id;
+  // A person-chosen front is part of the picture, so it is part of the key.
+  return front ? `${base}@${front.map((v) => v.toFixed(3)).join(",")}` : base;
 }
 
 /** What the 3D viewer loads: a GLB. The original (`url`) is only that when the
@@ -121,6 +119,8 @@ export function MeshThumb({
   const ready = useModelViewerReady();
   const viewUrl = meshViewUrl(asset);
   const stats = meshStats(asset, t);
+  const front = useFront(asset);
+  const key = stillKey(asset, front);
   // undefined while the stored still is being looked up, null when there is
   // none (so one must be rendered), otherwise the still's object URL.
   const [still, setStill] = useState<string | null | undefined>(undefined);
@@ -130,13 +130,14 @@ export function MeshThumb({
 
   useEffect(() => {
     let alive = true;
-    loadStill(stillKey(asset)).then((found) => {
+    setStill(undefined);
+    loadStill(key).then((found) => {
       if (alive) setStill(found);
     });
     return () => {
       alive = false;
     };
-  }, [asset.id]);
+  }, [key]);
 
   // Wait for this cell's turn to render. Released by the cleanup below, which
   // runs once the still exists (or rendering failed), or on unmount.
@@ -174,7 +175,7 @@ export function MeshThumb({
         await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
         if (!alive) return;
         const dataUrl = viewer.toDataURL("image/webp", 0.9);
-        const captured = await saveStill(stillKey(asset), dataUrl);
+        const captured = await saveStill(key, dataUrl);
         if (alive) setStill(captured);
       } catch {
         if (alive) setFailed(true);
@@ -194,7 +195,7 @@ export function MeshThumb({
       viewer.removeEventListener("load", onLoad);
       viewer.removeEventListener("error", onError);
     };
-  }, [rendering, asset.id]);
+  }, [rendering, key]);
 
   return (
     <div className="output-thumb mesh-thumb" onDoubleClick={onOpen} title={t("mesh.doubleClickOpen")}>
@@ -204,7 +205,7 @@ export function MeshThumb({
         <ModelViewer
           ref={viewerRef}
           src={viewUrl}
-          camera-orbit={FRONT_ORBIT}
+          camera-orbit={orbitAttr(front)}
           interaction-prompt="none"
           disable-zoom
           disable-pan
@@ -256,7 +257,7 @@ export function MeshThumb({
           disabled={rendering}
           onClick={async (e) => {
             e.stopPropagation();
-            await dropStill(stillKey(asset));
+            await dropStill(key);
             setFailed(false);
             setStill(null);
           }}
@@ -325,6 +326,33 @@ export function MeshViewer({ url, asset }: { url: string; asset: Asset }) {
   const [wireframe, setWireframe] = useState(false);
   const [normals, setNormals] = useState(false);
   const stats = meshStats(asset, t);
+  const front = useFront(asset);
+  const [saving, setSaving] = useState(false);
+
+  const goToFront = () => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    viewer.cameraOrbit = orbitAttr(front);
+    viewer.cameraTarget = "auto auto auto";
+  };
+  // Saves the view as it is on screen right now: theta and phi (the two ways
+  // the model is turned) and the distance it is looked at from.
+  const saveFrontAs = async (orbit: number[] | null) => {
+    setSaving(true);
+    try {
+      await saveFront(asset, orbit);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const makeFront = () => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    const o = viewer.getCameraOrbit();
+    void saveFrontAs([o.theta, o.phi, o.radius]);
+  };
 
   useEffect(() => {
     const viewer = viewerRef.current;
@@ -358,7 +386,7 @@ export function MeshViewer({ url, asset }: { url: string; asset: Asset }) {
           ref={viewerRef}
           src={url}
           camera-controls
-          camera-orbit={FRONT_ORBIT}
+          camera-orbit={orbitAttr(front)}
           environment-image="neutral"
           style={{ width: "100%", height: "100%" }}
         />
@@ -383,15 +411,18 @@ export function MeshViewer({ url, asset }: { url: string; asset: Asset }) {
         <button
           type="button"
           className="mesh-tool"
-          onClick={() => {
-            const viewer = viewerRef.current;
-            if (!viewer) return;
-            viewer.cameraOrbit = FRONT_ORBIT;
-            viewer.cameraTarget = "auto auto auto";
-          }}
+          onClick={goToFront}
         >
           {t("mesh.frontView")}
         </button>
+        <button type="button" className="mesh-tool" disabled={!loaded || saving} onClick={makeFront} title={t("mesh.makeFrontHint")}>
+          {t("mesh.makeFront")}
+        </button>
+        {front && (
+          <button type="button" className="mesh-tool" disabled={saving} onClick={() => void saveFrontAs(null)}>
+            {t("mesh.resetFront")}
+          </button>
+        )}
         {stats && <span className="mesh-viewer-stats">{stats}</span>}
       </div>
       {!loaded && <div className="mesh-viewer-loading">{t("mesh.loading")}</div>}
@@ -426,6 +457,8 @@ export function MeshCompareModal({ left, right, onClose }: { left: Asset; right:
   const leftRef = useRef<ModelViewerElement | null>(null);
   const rightRef = useRef<ModelViewerElement | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  // The pair opens on the reference (left) model's front, both models alike.
+  const leftFront = orbitAttr(useFront(left));
   // Fraction of the stage width that shows the left model.
   const [split, setSplit] = useState(0.5);
 
@@ -464,7 +497,7 @@ export function MeshCompareModal({ left, right, onClose }: { left: Asset; right:
   const resetView = () => {
     for (const viewer of [leftRef.current, rightRef.current]) {
       if (!viewer) continue;
-      viewer.cameraOrbit = FRONT_ORBIT;
+      viewer.cameraOrbit = leftFront;
       viewer.cameraTarget = "auto auto auto";
     }
   };
@@ -494,7 +527,7 @@ export function MeshCompareModal({ left, right, onClose }: { left: Asset; right:
                 ref={leftRef}
                 src={meshViewUrl(left)}
                 camera-controls
-                camera-orbit={FRONT_ORBIT}
+                camera-orbit={leftFront}
                 environment-image="neutral"
                 style={{ ...LAYER_STYLE, clipPath: `inset(0 ${(1 - split) * 100}% 0 0)` }}
               />
@@ -502,7 +535,7 @@ export function MeshCompareModal({ left, right, onClose }: { left: Asset; right:
                 ref={rightRef}
                 src={meshViewUrl(right)}
                 camera-controls
-                camera-orbit={FRONT_ORBIT}
+                camera-orbit={leftFront}
                 environment-image="neutral"
                 style={{ ...LAYER_STYLE, clipPath: `inset(0 0 0 ${split * 100}%)` }}
               />
