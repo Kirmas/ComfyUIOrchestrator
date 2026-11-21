@@ -94,6 +94,7 @@ async def run_update(provider) -> dict:
         try:
             proc = await asyncio.create_subprocess_exec(
                 provider.binary, *provider.update_args,
+                env=provider.update_env(),
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             )
             out, _ = await asyncio.wait_for(proc.communicate(), UPDATE_TIMEOUT)

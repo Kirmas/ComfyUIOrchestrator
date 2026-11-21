@@ -164,6 +164,9 @@ class Provider:
     update_args: list[str] = ["update"]
     latest_version_url: str | None = None
 
+    def update_env(self) -> dict[str, str] | None:
+        return None
+
     def parse_latest_version(self, body: str) -> str | None:
         """The newest version out of latest_version_url's response."""
         return json.loads(body).get("version")
@@ -804,6 +807,18 @@ class CodexProvider(Provider):
     binary_name = "codex"
     # What the CLI itself checks (cached in ~/.codex/version.json); tags are "rust-v0.170.0".
     latest_version_url = "https://api.github.com/repos/openai/codex/releases/latest"
+
+    def update_env(self) -> dict[str, str] | None:
+        if not self.binary:
+            return None
+        executable = Path(self.binary).resolve()
+        npm_layout = ("lib", "node_modules", "@openai", "codex", "bin", "codex.js")
+        if executable.parts[-len(npm_layout):] != npm_layout:
+            return None
+        # Codex invokes npm for this installation. Keep npm pointed at the
+        # prefix that owns the running CLI, even if its default is /usr/local.
+        prefix = executable.parents[len(npm_layout) - 1]
+        return {**os.environ, "npm_config_prefix": str(prefix)}
 
     def parse_latest_version(self, body: str) -> str | None:
         return (json.loads(body).get("tag_name") or "").removeprefix("rust-v") or None
