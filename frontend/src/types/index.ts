@@ -919,3 +919,16 @@ export interface SceneInfo {
     bounds: { min: number[]; max: number[] };
   };
 }
+
+/** What converting a mesh learned (GET /api/assets/{id}/view-info): for an FBX its
+ * animation clips, bone count, whether it has a mesh of its own (else the
+ * viewer draws a stick skeleton) and whether any clip moves the root. */
+export interface MeshViewInfo {
+  clips?: { name: string; frames: number; seconds: number; root_motion: boolean }[];
+  fps?: number;
+  bones?: number;
+  has_mesh?: boolean;
+  /** Every mesh the file holds (a file can carry several models). */
+  meshes?: { name: string; vertices: number }[];
+  root_motion?: boolean;
+}

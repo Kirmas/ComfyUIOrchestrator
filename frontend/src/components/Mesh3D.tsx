@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ElementType, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import type { Material, Mesh, MeshNormalMaterial, Object3D } from "three";
+import type { LineBasicMaterial, Material, Mesh, MeshNormalMaterial, Object3D } from "three";
+import { assetsApi } from "../api/endpoints";
 import { assetDownloadUrl, resolveAssetUrl } from "../api/client";
 import { useT } from "../i18n";
 import type { TFunc } from "../i18n";
 import { orbitAttr, saveFront, useFront } from "../meshFronts";
 import { acquireRenderSlot, dropStill, loadStill, releaseRenderSlot, saveStill } from "../meshStills";
-import type { Asset } from "../types";
+import type { Asset, MeshViewInfo } from "../types";
 import { cx } from "../utils";
 
 /** Everything here renders a mesh asset (AssetKind.mesh, a .glb).
@@ -38,6 +39,12 @@ export type ModelViewerElement = HTMLElement & {
   /** Snaps the camera to its goal and redraws. */
   jumpCameraToGoal(): void;
   model?: Object3D;
+  /** Animation playback: seconds into the current clip, and its length. */
+  currentTime: number;
+  readonly duration: number;
+  readonly paused: boolean;
+  play(): void;
+  pause(): void;
 };
 
 // React has no JSX types for <model-viewer>, and its settings are attributes
@@ -315,6 +322,175 @@ function applyShading(model: Object3D, normal: MeshNormalMaterial, wireframe: bo
   });
 }
 
+/** three.js's loader strips spaces/dots from node names; the names from the file
+ * are cleaned the same way to find their nodes. */
+const threeName = (n: string) => n.replace(/\s/g, "_").replace(/[[\].:/]/g, "");
+
+/** The root bone of the skeleton that skins the mesh node called `name` (a mesh's
+ * own node, or a group holding its primitives), or null if it isn't skinned. */
+function skeletonRootOf(model: Object3D, name: string): Object3D | null {
+  let root: Object3D | null = null;
+  model.traverse((node) => {
+    if (root || node.name !== threeName(name)) return;
+    node.traverse((inner) => {
+      const bone = (inner as { skeleton?: { bones: Object3D[] } }).skeleton?.bones[0];
+      if (root || !bone) return;
+      let top: Object3D = bone;
+      while (top.parent && (top.parent as { isBone?: boolean }).isBone) top = top.parent;
+      root = top;
+    });
+  });
+  return root;
+}
+
+/** Animation of a converted mesh (an FBX): its clips come from the server's
+ * `view-info`, the viewer plays one at a time. Everything here is inert for a
+ * mesh without clips, so the static case is unchanged. */
+function useMeshAnimation(
+  asset: Asset,
+  url: string,
+  viewerRef: { current: ModelViewerElement | null },
+  loaded: boolean,
+) {
+  const [info, setInfo] = useState<MeshViewInfo | null>(null);
+  const [clipName, setClipName] = useState<string | null>(null);
+  const [inPlace, setInPlace] = useState(false);
+  const [part, setPart] = useState<string>("all");
+  const [paused, setPaused] = useState(false);
+  const [time, setTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const wantsInfo = asset.mesh_format === "fbx";
+
+  useEffect(() => {
+    if (!wantsInfo) return;
+    let alive = true;
+    assetsApi.viewInfo(asset.id).then((i) => alive && setInfo(i), () => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [asset.id, wantsInfo]);
+
+  // One frame is a pose, not an animation (a T-pose export is exactly that).
+  const clips = (info?.clips ?? []).filter((c) => c.frames > 1);
+  const clip = clipName && clips.some((c) => c.name === clipName) ? clipName : clips[0]?.name;
+  const src = inPlace ? `${url}${url.includes("?") ? "&" : "?"}in_place=true` : url;
+
+  // <model-viewer> starts paused unless `autoplay` was already on when the model
+  // loaded, and the clips are only known after the load (view-info is a separate
+  // request) -- so start it here, and again when the clip or rendition changes.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!loaded || !viewer || !clips.length) return;
+    viewer.play();
+    setPaused(false);
+  }, [loaded, clips.length, clip, src, viewerRef]);
+
+  // Follows the playhead while it runs (the element has no time event).
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!loaded || !viewer || !clips.length) return;
+    let raf = 0;
+    const tick = () => {
+      setTime(viewer.currentTime);
+      setDuration(viewer.duration);
+      setPaused(viewer.paused);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [loaded, clips.length, viewerRef]);
+
+  const toggle = () => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    if (viewer.paused) viewer.play();
+    else viewer.pause();
+    setPaused(viewer.paused);
+  };
+  const seek = (seconds: number) => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    viewer.pause();
+    viewer.currentTime = seconds;
+    setPaused(true);
+    setTime(seconds);
+  };
+
+  return {
+    info, part, setPart, clips, clip, setClip: setClipName, inPlace, setInPlace, src, paused, time, duration, toggle, seek,
+    hasClips: clips.length > 0,
+  };
+}
+
+/** "Armature|Armature|Unreal Take|baselayer" -> "Unreal Take": the exporter
+ * stacks the object names in front and a layer name behind the take's own. */
+function clipLabel(name: string): string {
+  const parts = name.split("|");
+  if (parts.length > 1 && parts[parts.length - 1] === "baselayer") parts.pop();
+  return parts[parts.length - 1] || name;
+}
+
+function MeshAnimationBar({ anim }: { anim: ReturnType<typeof useMeshAnimation> }) {
+  const t = useT();
+  const { info } = anim;
+  if (!info) return null;
+  return (
+    <>
+      {(info.meshes?.length ?? 0) > 1 && (
+        <select className="mesh-tool" value={anim.part} onChange={(e) => anim.setPart(e.target.value)}>
+          <option value="all">{t("mesh.partAll", { n: info.meshes?.length ?? 0 })}</option>
+          {info.meshes?.map((m) => (
+            <option key={m.name} value={m.name}>
+              {m.name} · {m.vertices.toLocaleString()}
+            </option>
+          ))}
+        </select>
+      )}
+      {info.has_mesh === false && <span className="mesh-viewer-stats">{t("mesh.skeletonOnly")}</span>}
+      {anim.hasClips && (
+        <>
+          <button type="button" className="mesh-tool" onClick={anim.toggle}>
+            {anim.paused ? `▶ ${t("mesh.play")}` : `⏸ ${t("mesh.pause")}`}
+          </button>
+          <input
+            type="range"
+            className="mesh-anim-slider"
+            min={0}
+            max={anim.duration || 1}
+            step={0.01}
+            value={Math.min(anim.time, anim.duration || 1)}
+            onChange={(e) => anim.seek(Number(e.target.value))}
+          />
+          {anim.clips.length > 1 && (
+            <select className="mesh-tool" value={anim.clip} onChange={(e) => anim.setClip(e.target.value)}>
+              {anim.clips.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {clipLabel(c.name)} · {c.seconds}s
+                </option>
+              ))}
+            </select>
+          )}
+          {info.root_motion && (
+            <button
+              type="button"
+              className={cx("mesh-tool", anim.inPlace && "active")}
+              aria-pressed={anim.inPlace}
+              title={t("mesh.inPlaceHint")}
+              onClick={() => anim.setInPlace((v) => !v)}
+            >
+              {t("mesh.inPlace")}
+            </button>
+          )}
+          <span className="mesh-viewer-stats">
+            {t("mesh.clipsInfo", { clips: anim.clips.length, bones: info.bones ?? 0, fps: info.fps ?? 0 })}
+          </span>
+        </>
+      )}
+    </>
+  );
+}
+
+
 /** The fullscreen body for a mesh asset -- FullSizeModal renders this in place
  * of the zoomable picture, so it keeps the same backdrop, close button and
  * candidate actions. Orbit, zoom and pan are model-viewer's own controls. */
@@ -325,9 +501,12 @@ export function MeshViewer({ url, asset }: { url: string; asset: Asset }) {
   const [loaded, setLoaded] = useState(false);
   const [wireframe, setWireframe] = useState(false);
   const [normals, setNormals] = useState(false);
+  const [bones, setBones] = useState(false);
+  const [hasBones, setHasBones] = useState(false);
   const stats = meshStats(asset, t);
   const front = useFront(asset);
   const [saving, setSaving] = useState(false);
+  const anim = useMeshAnimation(asset, url, viewerRef, loaded);
 
   const goToFront = () => {
     const viewer = viewerRef.current;
@@ -354,6 +533,10 @@ export function MeshViewer({ url, asset }: { url: string; asset: Asset }) {
     void saveFrontAs([o.theta, o.phi, o.radius]);
   };
 
+  // A new src (the in-place rendition) is a new model: it has to load, and be
+  // shaded, again.
+  useEffect(() => setLoaded(false), [anim.src]);
+
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewer) return;
@@ -379,12 +562,69 @@ export function MeshViewer({ url, asset }: { url: string; asset: Asset }) {
     };
   }, [loaded, wireframe, normals]);
 
+  // The skeleton as lines drawn over the model (three's SkeletonHelper, fetched
+  // with three itself on first use). It lives in the top scene object, not under
+  // the model: the helper carries the model's own world matrix, so a parent with
+  // a transform would apply it twice.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const model = viewer ? threeSceneOf(viewer) : null;
+    if (!loaded || !viewer || !model) return;
+    let found = false;
+    model.traverse((o) => {
+      if ((o as { isBone?: boolean }).isBone) found = true;
+    });
+    setHasBones(found);
+    if (!bones || !found) return;
+    let helper: import("three").SkeletonHelper | null = null;
+    let cancelled = false;
+    import("three").then(({ SkeletonHelper }) => {
+      if (cancelled) return;
+      // One mesh picked out of several: only its own skeleton is drawn.
+      const only = anim.part === "all" ? null : skeletonRootOf(model, anim.part);
+      helper = new SkeletonHelper(only ?? model);
+      const material = helper.material as LineBasicMaterial;
+      material.depthTest = false; // visible through the mesh
+      material.depthWrite = false;
+      material.color.set(0xffd54a);
+      helper.renderOrder = 999;
+      let top: Object3D = model;
+      while (top.parent) top = top.parent;
+      top.add(helper);
+      viewer.jumpCameraToGoal();
+    });
+    return () => {
+      cancelled = true;
+      if (helper) {
+        helper.removeFromParent();
+        helper.dispose();
+        viewer.jumpCameraToGoal();
+      }
+    };
+  }, [loaded, bones, anim.src, anim.part]);
+
+  // Which of the file's meshes is shown.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const model = viewer ? threeSceneOf(viewer) : null;
+    const meshes = anim.info?.meshes ?? [];
+    if (!loaded || !viewer || !model || meshes.length < 2) return;
+    const names = new Set(meshes.map((m) => threeName(m.name)));
+    const shown = anim.part === "all" ? null : threeName(anim.part);
+    model.traverse((obj) => {
+      if (names.has(obj.name)) obj.visible = shown === null || obj.name === shown;
+    });
+    viewer.jumpCameraToGoal();
+  }, [loaded, anim.part, anim.info]);
+
   return (
     <div className="mesh-viewer">
       {ready && (
         <ModelViewer
           ref={viewerRef}
-          src={url}
+          src={anim.src}
+          autoplay={anim.hasClips || undefined}
+          animation-name={anim.clip}
           camera-controls
           camera-orbit={orbitAttr(front)}
           environment-image="neutral"
@@ -408,6 +648,16 @@ export function MeshViewer({ url, asset }: { url: string; asset: Asset }) {
         >
           {t("mesh.normals")}
         </button>
+        {hasBones && (
+          <button
+            type="button"
+            className={cx("mesh-tool", bones && "active")}
+            aria-pressed={bones}
+            onClick={() => setBones((b) => !b)}
+          >
+            {t("mesh.bones")}
+          </button>
+        )}
         <button
           type="button"
           className="mesh-tool"
@@ -424,6 +674,7 @@ export function MeshViewer({ url, asset }: { url: string; asset: Asset }) {
           </button>
         )}
         {stats && <span className="mesh-viewer-stats">{stats}</span>}
+        <MeshAnimationBar anim={anim} />
       </div>
       {!loaded && <div className="mesh-viewer-loading">{t("mesh.loading")}</div>}
     </div>

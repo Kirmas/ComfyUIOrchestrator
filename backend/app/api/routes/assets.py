@@ -9,12 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import asset_response
 from app.core.asset_preview import fit_rendition, svg_preview
-from app.core.mesh_view import MESH_FORMAT_BY_MIME, mesh_view_path
+from app.core.mesh_view import MESH_FORMAT_BY_MIME, mesh_view_info, mesh_view_path, view_counts, warm
 from app.core.storage import build_asset_url, build_fit_url, build_preview_url, build_view_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Dashboard, Node, NodeKind, NodeStatus, Track
 from app.mcp.client import AGENT_ACTOR_HEADER
 from app.schemas.schemas import AssetFrontUpdate, AssetMoveUpdate, AssetNameUpdate, AssetRead, AssetSelectUpdate
+from app.core.fbx_convert import FBX_MIME
 from app.core.upload_type import resolve_upload
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
@@ -38,7 +39,14 @@ def to_asset_read(asset: Asset) -> AssetRead:
     # == not `is`: the column is a plain String, so a row comes back as a str,
     # which is never the enum member itself.
     if asset.kind == AssetKind.mesh:
-        counts = get_storage().mesh_counts(asset.storage_key)
+        storage = get_storage()
+        counts = storage.mesh_counts(asset.storage_key)
+        if not counts and asset.mime_type == FBX_MIME:
+            # No counts of its own: take them off the converted rendition, and
+            # start building it now if it isn't there yet.
+            counts = view_counts(asset.storage_key)
+            if not counts:
+                warm(asset.storage_key, lambda: storage.get_object(asset.storage_key), asset.mime_type)
         if counts:
             # 0 vertices = unknown (an STL has no shared vertices to count).
             item.vertex_count, item.triangle_count = (counts[0] or None), counts[1]
@@ -173,28 +181,51 @@ async def get_asset_file(request: Request, asset_id: uuid.UUID, db: AsyncSession
     return response
 
 
-@router.get("/{asset_id}/view")
-async def get_asset_view(request: Request, asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    """A mesh as a GLB, for the 3D viewer. The stored original is untouched
-    (download and nodes keep getting it); a non-GLB format is converted once
-    and the result cached on disk (core/mesh_view.py)."""
+async def _mesh_asset(db: AsyncSession, asset_id: uuid.UUID) -> Asset:
     asset = await db.get(Asset, asset_id)
     if not asset or asset.kind != AssetKind.mesh:
         raise HTTPException(404, "Mesh not found")
-    storage = get_storage()
-    path = storage.path_of(asset.storage_key)
-    if not path.is_file():
+    if not get_storage().path_of(asset.storage_key).is_file():
         raise HTTPException(404, "Asset file missing")
+    return asset
+
+
+@router.get("/{asset_id}/view")
+async def get_asset_view(request: Request, asset_id: uuid.UUID, in_place: bool = False,
+                         db: AsyncSession = Depends(get_db)):
+    """A mesh as a GLB, for the 3D viewer. The stored original is untouched
+    (download and nodes keep getting it); a non-GLB format is converted once
+    and the result cached on disk (core/mesh_view.py). `in_place=true` is an
+    animated FBX with its root motion taken out."""
+    asset = await _mesh_asset(db, asset_id)
+    storage = get_storage()
     if MESH_FORMAT_BY_MIME.get(asset.mime_type, "glb") == "glb":
         return asset_response.stream_payload(
-            request, path, storage.payload_offset(asset.storage_key), asset.mime_type,
+            request, storage.path_of(asset.storage_key), storage.payload_offset(asset.storage_key), asset.mime_type,
             asset_response.payload_etag(asset.storage_key))
     try:
-        view = await mesh_view_path(asset.storage_key, lambda: storage.get_object(asset.storage_key), asset.mime_type)
+        view = await mesh_view_path(asset.storage_key, lambda: storage.get_object(asset.storage_key),
+                                    asset.mime_type, in_place)
     except ValueError as exc:
         raise HTTPException(422, f"Can't show this mesh: {exc}")
     return asset_response.stream_payload(
-        request, view, 0, "model/gltf-binary", asset_response.payload_etag(asset.storage_key + "#view"))
+        request, view, 0, "model/gltf-binary",
+        asset_response.payload_etag(asset.storage_key + ("#view-in-place" if in_place else "#view")))
+
+
+@router.get("/{asset_id}/view-info")
+async def get_asset_view_info(asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """What converting the mesh learned about it: for an FBX its animation clips
+    (name, frames, seconds, root_motion), bone count, whether it has a mesh of
+    its own (else the viewer shows a stick skeleton) and whether any clip moves
+    the root. Empty for a format with nothing to report. Converts on first call."""
+    asset = await _mesh_asset(db, asset_id)
+    storage = get_storage()
+    try:
+        info = await mesh_view_info(asset.storage_key, lambda: storage.get_object(asset.storage_key), asset.mime_type)
+    except ValueError as exc:
+        raise HTTPException(422, f"Can't read this mesh: {exc}")
+    return info or {}
 
 
 @router.get("/{asset_id}/preview")

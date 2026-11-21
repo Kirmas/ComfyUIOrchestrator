@@ -10,8 +10,8 @@ Only signatures that can't be mistaken for something else: text formats
 (OBJ/PLY) have none and stay with the declared type. STL is the exception,
 recognised by its structure (stl_convert.stl_triangle_count) and stored as a
 mesh in its own format -- every mesh format is `kind=mesh`, the format is the
-MIME; the viewer gets a GLB rendition (routes/assets.py `/view`). FBX has no viewer
-yet, so it isn't classified here either.
+MIME; the viewer gets a GLB rendition (routes/assets.py `/view`). FBX is the same,
+by its signature, converted through Blender (fbx_convert.py).
 
 Containers that can hold either picture or sound (ISO-BMFF, Matroska, Ogg)
 are split by what the bytes can tell cheaply: the ISO-BMFF major brand says
@@ -21,6 +21,7 @@ family wins over that guess (an audio-only .webm declared audio/webm stays
 audio), so the guess only decides when the client said nothing useful.
 """
 
+from app.core.fbx_convert import FBX_MIME, is_fbx
 from app.core.stl_convert import STL_MIME, stl_triangle_count
 from app.db.models import AssetKind
 
@@ -51,6 +52,7 @@ _EXTENSIONS = {
     "image/webp": ".webp",
     "model/gltf-binary": ".glb",
     STL_MIME: ".stl",
+    FBX_MIME: ".fbx",
     "video/mp4": ".mp4",
     "video/quicktime": ".mov",
     "video/webm": ".webm",
@@ -68,6 +70,8 @@ def sniff_mime(data: bytes) -> str | None:
     # than any two-byte sync below -- so it is asked first.
     if stl_triangle_count(data) is not None:
         return STL_MIME
+    if is_fbx(data):
+        return FBX_MIME
     for signature, mime in _SIGNATURES:
         if data.startswith(signature):
             return mime
@@ -105,7 +109,7 @@ def resolve_upload(data: bytes, declared_mime: str | None) -> tuple[str, AssetKi
         declared_family = declared_mime.split("/", 1)[0]
         if declared_family in ("audio", "video") and declared_family != sniffed.split("/", 1)[0]:
             mime_type = declared_mime
-    if mime_type in ("model/gltf-binary", STL_MIME):
+    if mime_type in ("model/gltf-binary", STL_MIME, FBX_MIME):
         return mime_type, AssetKind.mesh
     return mime_type, AssetKind.for_mime(mime_type)
 

@@ -4499,3 +4499,9 @@ th, td {
 .scene-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .scene-details { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); overflow-x: auto; }
 button.scene-danger { color: var(--danger); border-color: var(--danger); }
+
+.mesh-anim-slider {
+  flex: 1 1 120px;
+  min-width: 90px;
+  max-width: 260px;
+}

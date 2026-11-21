@@ -205,6 +205,10 @@ look at the result between them.
   scene because `GET /{id}/info` *reopens* it (it asks the live Blender).
   Verified without a browser (none can run on this box: no libnss3) by
   server-rendering the components with real API data in both languages.
+## FBX meshes (`core/fbx_convert.py`, `core/blender_fbx_to_glb.py`, `core/mesh_view.py`)
+
+An FBX is stored untouched (`kind=mesh`, mime `model/fbx`, found by signature) and shown through a GLB that a background Blender converts once and `mesh_view` caches (`/view`, `/view?in_place=true`, `/view-info`). Blender's importer applies the file's units/axes; the glTF exporter writes metres/Y-up -- no user choice, by design. Kept: mesh, skeleton, skinning, materials, every clip (each action stacked as an NLA track). A file with a skeleton but no mesh gets thin skinned "sticks" along the bones. `in_place` flattens the root's *horizontal* location curves (horizontal judged from the bone's own rest orientation, not assumed x/y). A clip of one frame is a pose, not an animation (the viewer ignores it). A file may hold several models (the "cat" had two overlapping meshes + armatures): `view-info.meshes` feeds a dropdown that only hides nodes. Vertex counts come from the converted GLB, built in a background thread by `warm()` when a list read finds none. Pitfalls found: a new `BMVert.index` is -1 until `index_update()`; bones of an imported skeleton-only file are non-deforming and the exporter then drops the skin. No FBX export, no ABC, no retargeting (decided).
+
 ## Agent task node (`native.agent_task`, `backend/app/core/agent_task.py`)
 
 A node that hands its job to an agent instead of running a model -- "an

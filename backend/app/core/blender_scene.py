@@ -51,7 +51,7 @@ _ID_RE = re.compile(r"^[0-9a-f]{12}$")
 _GPU_ERROR = re.compile(r"GPU|Vulkan|OpenGL|EGL|GHOST|no display", re.I)
 _MIME_EXT = {
     "model/gltf-binary": ".glb", "model/stl": ".stl", "model/gltf+json": ".gltf", "image/png": ".png", "image/jpeg": ".jpg",
-    "image/webp": ".webp", "model/obj": ".obj", "model/stl": ".stl",
+    "image/webp": ".webp", "model/obj": ".obj", "model/stl": ".stl", "model/fbx": ".fbx",
 }
 _IMPORTABLE = {".glb", ".gltf", ".fbx", ".obj", ".stl", ".ply"}
 EXPORT_FORMATS = {"glb": "model/gltf-binary", "fbx": "application/octet-stream", "obj": "model/obj"}
