@@ -4536,3 +4536,16 @@ button.scene-danger { color: var(--danger); border-color: var(--danger); }
   font-size: 0.85em;
   word-break: break-all;
 }
+
+.agent-upload {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  font-size: 0.85em;
+}
+
+.agent-upload progress {
+  flex: 1;
+  height: 10px;
+}

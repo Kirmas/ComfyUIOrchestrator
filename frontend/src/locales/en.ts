@@ -218,6 +218,8 @@ export const en = {
   "agent.runner.confirmRestart": "Restart the agent runner? It comes back in a few seconds.",
   "agent.runner.restarting": "Restarting… the page reconnects by itself.",
   "agent.runner.busyWarning": "Chats working right now: {count} — their current turn will be cut off.",
+  "agent.upload.sending": "Uploading… {pct}%",
+  "agent.upload.reading": "Reading the file…",
   "agent.attachFiles": "Attach any files (zip, logs, pictures…) — or paste / drop here",
   "agent.fileTooBig": "{name} is over 100 MB",
   "agent.imageFailed": "Couldn't read {name} as a picture",

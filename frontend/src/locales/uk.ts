@@ -215,6 +215,8 @@ export const uk: Record<TKey, string> = {
   "agent.runner.confirmRestart": "Перезапустити runner агентів? Повернеться за кілька секунд.",
   "agent.runner.restarting": "Перезапускаю… сторінка перепідключиться сама.",
   "agent.runner.busyWarning": "Чатів зараз працює: {count} — їхній поточний хід буде перервано.",
+  "agent.upload.sending": "Завантажується… {pct}%",
+  "agent.upload.reading": "Читаю файл…",
   "agent.attachFiles": "Прикріпити будь-які файли (zip, логи, картинки…) — або вставте / перетягніть сюди",
   "agent.fileTooBig": "{name} більше 100 МБ",
   "agent.imageFailed": "Не вдалося прочитати {name} як картинку",

@@ -1119,6 +1119,9 @@ export function ChatView({
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
+  // 0..1 while a message with files is being uploaded; null otherwise.
+  const [uploadFraction, setUploadFraction] = useState<number | null>(null);
+  const [readingFiles, setReadingFiles] = useState(0);
   const [sending, setSending] = useState(false);
   const [legacyModelsChatId, setLegacyModelsChatId] = useState<string | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -1162,11 +1165,14 @@ export function ChatView({
           alert(t("agent.fileTooBig", { name: file.name }));
           continue;
         }
+        setReadingFiles((n) => n + 1);
         try {
           const f = await readFileAttachment(file);
           setFileAttachments((list) => [...list, f]);
         } catch {
           alert(t("agent.imageFailed", { name: file.name || "file" }));
+        } finally {
+          setReadingFiles((n) => n - 1);
         }
       }
     }
@@ -1303,7 +1309,14 @@ export function ChatView({
           }
         }
       }
-      await agentChatsApi.send(chat.id, body, images, fileAttachments.map(({ name, data }) => ({ name, data })));
+      if (fileAttachments.length) setUploadFraction(0);
+      await agentChatsApi.send(
+        chat.id,
+        body,
+        images,
+        fileAttachments.map(({ name, data }) => ({ name, data })),
+        fileAttachments.length ? setUploadFraction : undefined,
+      );
       setDraft("");
       setAttachments([]);
       setFileAttachments([]);
@@ -1313,6 +1326,7 @@ export function ChatView({
       alert(err instanceof Error ? err.message : String(err));
     } finally {
       setSending(false);
+      setUploadFraction(null);
     }
   };
 
@@ -1825,6 +1839,16 @@ export function ChatView({
               </button>
             </span>
           ))}
+        </div>
+      )}
+      {(uploadFraction !== null || readingFiles > 0) && (
+        <div className="agent-upload">
+          <progress max={1} value={uploadFraction ?? undefined} />
+          <span>
+            {uploadFraction !== null
+              ? t("agent.upload.sending", { pct: Math.round(uploadFraction * 100) })
+              : t("agent.upload.reading")}
+          </span>
         </div>
       )}
       {fileAttachments.length > 0 && (

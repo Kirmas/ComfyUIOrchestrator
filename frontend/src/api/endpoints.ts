@@ -459,8 +459,10 @@ export const agentChatsApi = {
   setModel: (id: string, model: string) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { model }),
   setDone: (id: string, done: boolean) => api.patch<AgentChat>(`/api/agent-chats/${id}`, { done }),
   remove: (id: string) => api.delete(`/api/agent-chats/${id}`),
-  send: (id: string, text: string, images: AgentImageUpload[] = [], files: AgentFileUpload[] = []) =>
-    api.post<AgentChat>(`/api/agent-chats/${id}/messages`, { text, images, files }),
+  send: (id: string, text: string, images: AgentImageUpload[] = [], files: AgentFileUpload[] = [], onProgress?: (fraction: number) => void) =>
+    onProgress
+      ? api.postProgress<AgentChat>(`/api/agent-chats/${id}/messages`, { text, images, files }, onProgress)
+      : api.post<AgentChat>(`/api/agent-chats/${id}/messages`, { text, images, files }),
   assetMediaUrl: (assetId: string, rendition: "file" | "fit" = "file", download = false) =>
     `${getApiBaseUrl()}/api/assets/${encodeURIComponent(assetId)}/${rendition}?token=${encodeURIComponent(getApiToken())}${download ? "&download=true" : ""}`,
   attachmentUrl: (id: string, name: string, preview = false, download = false) =>

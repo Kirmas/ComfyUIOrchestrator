@@ -85,7 +85,34 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** POST JSON with upload progress (fetch can't report it). onProgress gets 0..1. */
+function postWithProgress<T>(path: string, body: unknown, onProgress: (fraction: number) => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${getApiBaseUrl()}${path}`);
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.setRequestHeader("Authorization", `Bearer ${getApiToken()}`);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(e.loaded / e.total);
+    };
+    xhr.onerror = () => reject(new ApiError(0, "Network error"));
+    xhr.onload = () => {
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(xhr.responseText);
+      } catch {
+        // not JSON
+      }
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(parsed as T);
+      const detail = (parsed as { detail?: unknown } | null)?.detail;
+      reject(new ApiError(xhr.status, typeof detail === "string" ? detail : xhr.responseText || xhr.statusText));
+    };
+    xhr.send(JSON.stringify(body));
+  });
+}
+
 export const api = {
+  postProgress: postWithProgress,
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "POST", body: body !== undefined ? JSON.stringify(body) : undefined }),
