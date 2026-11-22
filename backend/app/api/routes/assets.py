@@ -221,7 +221,8 @@ async def get_asset_view_info(asset_id: uuid.UUID, db: AsyncSession = Depends(ge
     asset = await _mesh_asset(db, asset_id)
     storage = get_storage()
     try:
-        info = await mesh_view_info(asset.storage_key, lambda: storage.get_object(asset.storage_key), asset.mime_type)
+        info = await mesh_view_info(asset.storage_key, lambda: storage.get_object(asset.storage_key), asset.mime_type,
+                                    (storage.path_of(asset.storage_key), storage.payload_offset(asset.storage_key)))
     except ValueError as exc:
         raise HTTPException(422, f"Can't read this mesh: {exc}")
     return info or {}

@@ -2,8 +2,10 @@
 # checks themselves are the guide's own groom_precheck.py, unchanged).
 # Standalone: select the Curves objects and run in the Text Editor, or
 #   blender -b file.blend --python groom_precheck.py -- Obj1 Obj2
-# As a module (the scene server's groom_check/export_to): report(objects) -> list of
-# {"object", "ok", "info": [...], "issues": [...]}. Changes nothing in the scene.
+# As a module (the scene server's groom_check/export_to, and the Unreal/Blender bridge add-on,
+# whose download zip carries a copy of this file): report(objects) -> list of
+# {"object", "ok", "info": [...], "issues": [...]}, changes nothing in the scene;
+# map_attributes(objects) fills the add-on's empty attribute fields before an export.
 import bpy, sys
 import numpy as np
 
@@ -16,6 +18,33 @@ DEFAULTS = {
     "att_groom_width": "radius",
     "att_groom_color": "color",
 }
+
+# What an export fills into the add-on's empty fields: the checked attributes plus the optional
+# extras Unreal also reads (roughness, AO), each only when the curves actually carry it.
+EXPORT_MAPPING = {**DEFAULTS, "att_groom_roughness": "roughness", "att_groom_ao": "groom_AO"}
+
+
+def map_attributes(obs):
+    """Fill each hair object's empty add-on mapping fields with the default attribute names it
+    actually carries; returns {object: {field: name}}."""
+    dg = bpy.context.evaluated_depsgraph_get()
+    out = {}
+    for ob in obs:
+        have = ob.evaluated_get(dg).data.attributes
+        gp = ob.GroomProperty
+        out[ob.name] = {}
+        for field, name in EXPORT_MAPPING.items():
+            if not getattr(gp, field) and have.get(name) is not None:
+                setattr(gp, field, name)
+            if getattr(gp, field):
+                out[ob.name][field] = getattr(gp, field)
+        # The add-on reads the mapping from the EVALUATED object, whose copy of a custom
+        # property group stays stale until the original is tagged (found by
+        # groom_export_test.py: a valid groom exported with no groom_* attributes at all).
+        ob.update_tag()
+    bpy.context.view_layer.update()
+    return out
+
 
 def mapping(ob):
     gp = getattr(ob, "GroomProperty", None)

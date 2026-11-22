@@ -813,16 +813,6 @@ def pose_report(focus=None, frame=None, contacts=True):
 # 55 MB of libraries, and most scenes never have hair.
 ADDONS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "blender_addons")
 _GROOM = {}
-# add-on field -> default attribute name (GroomExporter_Guide.md section 4); a field is only
-# filled when the curves actually carry such an attribute and the person set nothing else.
-GROOM_DEFAULT_MAPPING = {
-    "att_groom_root_uv": "surface_uv_coordinate", "att_groom_guide": "groom_is_guide",
-    "att_groom_id": "groom_guide_id", "att_groom_closest_guides": "groom_guide_closest",
-    "att_groom_guide_weights": "groom_guide_weights", "att_groom_width": "radius",
-    "att_groom_color": "color", "att_groom_roughness": "roughness", "att_groom_ao": "groom_AO",
-}
-
-
 def _groom():
     """(GroomExporter package, groom_precheck module), registered once per Blender."""
     if not _GROOM:
@@ -852,25 +842,10 @@ def groom_curves():
 
 def groom_map_attributes():
     """Fill each hair object's add-on mapping with the guide's default attribute names
-    (only the empty fields whose attribute exists); returns {object: {field: name}}."""
-    _groom()
-    dg = bpy.context.evaluated_depsgraph_get()
-    out = {}
-    for ob in groom_curves():
-        have = ob.evaluated_get(dg).data.attributes
-        gp = ob.GroomProperty
-        out[ob.name] = {}
-        for field, name in GROOM_DEFAULT_MAPPING.items():
-            if not getattr(gp, field) and have.get(name) is not None:
-                setattr(gp, field, name)
-            if getattr(gp, field):
-                out[ob.name][field] = getattr(gp, field)
-        # The add-on reads the mapping from the EVALUATED object, whose copy of a custom
-        # property group stays stale until the original is tagged (found by
-        # groom_export_test.py: a valid groom exported with no groom_* attributes at all).
-        ob.update_tag()
-    bpy.context.view_layer.update()
-    return out
+    (only the empty fields whose attribute exists); returns {object: {field: name}}.
+    The logic lives in groom_precheck.map_attributes, shared with the bridge add-on."""
+    _, chk = _groom()
+    return chk.map_attributes(groom_curves())
 
 
 def groom_check(names=None):

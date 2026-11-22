@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "1.0.0",
+	"Version": 5,
+	"VersionName": "1.2.2",
 	"FriendlyName": "ComfyUI Orchestrator Bridge",
 	"Description": "Send assets between ComfyUI Orchestrator and the Unreal Editor (two-way).",
 	"Category": "Editor",
@@ -15,6 +15,12 @@
 			"Name": "OrchestratorBridge",
 			"Type": "Editor",
 			"LoadingPhase": "PostEngineInit"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "GLTFExporter",
+			"Enabled": true
 		}
 	]
 }

@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "orchestrator_bridge"
-version = "1.0.6"
+version = "1.1.2"
 name = "ComfyUI Orchestrator Bridge"
 tagline = "Send assets between ComfyUI Orchestrator and Blender"
 maintainer = "ComfyUI Orchestrator"

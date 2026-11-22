@@ -389,9 +389,10 @@ function useMeshAnimation(
   const [paused, setPaused] = useState(false);
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  // Formats a background Blender converts report what they found (FBX: clips,
-  // bones, meshes; Alembic: grooms, frames). GLB and STL have nothing to report.
-  const wantsInfo = asset.mesh_format === "fbx" || asset.mesh_format === "abc";
+  // What the server found in the file: FBX/Alembic from their conversion (clips,
+  // bones, meshes; grooms, frames), a GLB straight off its own JSON (clips, bones,
+  // meshes -- glb_stats.view_info). STL has nothing to report.
+  const wantsInfo = asset.mesh_format === "fbx" || asset.mesh_format === "abc" || asset.mesh_format === "glb";
 
   useEffect(() => {
     if (!wantsInfo) return;

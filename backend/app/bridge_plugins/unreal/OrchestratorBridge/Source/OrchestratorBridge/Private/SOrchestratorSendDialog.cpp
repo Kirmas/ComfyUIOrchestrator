@@ -11,6 +11,8 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture.h"
 #include "Exporters/Exporter.h"
+#include "Exporters/FbxExportOption.h"
+#include "Options/GLTFExportOptions.h"
 #include "Framework/Application/SlateApplication.h"
 #include "HAL/FileManager.h"
 #include "Interfaces/IHttpResponse.h"
@@ -90,6 +92,16 @@ void SOrchestratorSendDialog::Construct(const FArguments& InArgs)
 				.OnCheckStateChanged_Lambda([this](ECheckBoxState S) { bPlace = S == ECheckBoxState::Checked; })
 				[
 					SNew(STextBlock).Text(LOCTEXT("Place", "Also place as a cell (new row in the graph)"))
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+			[
+				SNew(SCheckBox)
+				.IsChecked_Lambda([this]() { return bSourceGeometry ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+				.OnCheckStateChanged_Lambda([this](ECheckBoxState S) { bSourceGeometry = S == ECheckBoxState::Checked; })
+				.ToolTipText(LOCTEXT("SourceTip", "Static meshes only. On: the full source geometry (a Nanite mesh can be millions of triangles -- a heavy file). Off: the render mesh (for Nanite, its light fallback). Skeletal meshes and animations always go with their skin."))
+				[
+					SNew(STextBlock).Text(LOCTEXT("Source", "Full source geometry (not the Nanite fallback)"))
 				]
 			]
 			+ SVerticalBox::Slot().AutoHeight().Padding(0, 4)
@@ -244,34 +256,38 @@ FReply SOrchestratorSendDialog::OnSend()
 	return FReply::Handled();
 }
 
-bool SOrchestratorSendDialog::ExportOne(UObject* Object, FString& OutPath, FString& OutMime, FString& OutError) const
+/** One export attempt; false (with a reason) if the exporter is missing or wrote nothing. */
+/** glTF exporter options, set explicitly: left to the defaults it exported a Nanite mesh's render
+ *  data (the ~3k-triangle fallback of a 14M-triangle body) and baked no Base Color at all
+ *  (baseColorFactor 0 = black, only occlusion baked) -- 2026-11-22.
+ *  The source model is asked for STATIC meshes only: that is where Nanite hides the real
+ *  geometry, while a skeletal mesh's render LOD0 is already full detail and is the data that
+ *  carries the skin -- with the source model too, skeletal meshes arrived as static ones. */
+static UObject* MakeGltfOptions(UObject* Object, bool bSourceGeometry)
 {
-	FString Ext;
-	if (Object->IsA<UTexture>())
-	{
-		Ext = TEXT("png");
-		OutMime = TEXT("image/png");
-	}
-	else if (Object->IsA<UStaticMesh>() || Object->IsA<USkeletalMesh>() || Object->IsA<UAnimSequence>())
-	{
-		Ext = TEXT("fbx");
-		OutMime = TEXT("model/fbx");
-	}
-	else
-	{
-		OutError = FString::Printf(TEXT("%s: a %s can't be sent (meshes, animations and textures can)"),
-			*Object->GetName(), *Object->GetClass()->GetName());
-		return false;
-	}
+	UGLTFExportOptions* Options = NewObject<UGLTFExportOptions>();
+	Options->ResetToDefault();
+	Options->bExportSourceModel = bSourceGeometry && Object->IsA<UStaticMesh>();
+	Options->BakeMaterialInputs = EGLTFMaterialBakeMode::Simple;  // bake complex inputs into textures
+	Options->DefaultMaterialBakeSize.X = 2048;
+	Options->DefaultMaterialBakeSize.Y = 2048;
+	Options->DefaultMaterialBakeSize.bAutoDetect = false;
+	// a rig, its clips and shape keys
+	Options->bExportVertexSkinWeights = true;
+	Options->bExportAnimationSequences = true;
+	Options->bExportMorphTargets = true;
+	return Options;
+}
+
+static bool TryExport(UObject* Object, const FString& Ext, const FString& OutPath, bool bSourceGeometry, FString& OutError)
+{
 	UExporter* Exporter = UExporter::FindExporter(Object, *Ext);
 	if (!Exporter)
 	{
-		OutError = FString::Printf(TEXT("%s: no .%s exporter for %s"), *Object->GetName(), *Ext, *Object->GetClass()->GetName());
+		OutError = FString::Printf(TEXT("no .%s exporter for %s"), *Ext, *Object->GetClass()->GetName());
 		return false;
 	}
-	OutPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("Orchestrator") / TEXT("Outgoing")
-		/ (OrchestratorUtils::SafeName(Object->GetName(), TEXT("Asset")) + TEXT(".") + Ext));
-
+	IFileManager::Get().Delete(*OutPath, false, true, true);
 	UAssetExportTask* Task = NewObject<UAssetExportTask>();
 	Task->AddToRoot();
 	Task->Object = Object;
@@ -281,14 +297,72 @@ bool SOrchestratorSendDialog::ExportOne(UObject* Object, FString& OutPath, FStri
 	Task->bReplaceIdentical = true;
 	Task->bPrompt = false;
 	Task->bAutomated = true;
-	const bool bOk = UExporter::RunAssetExportTask(Task);
-	Task->RemoveFromRoot();
-	if (!bOk || !FPaths::FileExists(OutPath))
+	if (Ext == TEXT("glb"))
 	{
-		OutError = FString::Printf(TEXT("%s: export to .%s failed"), *Object->GetName(), *Ext);
+		Task->Options = MakeGltfOptions(Object, bSourceGeometry);
+	}
+	else if (Ext == TEXT("fbx") && Object->IsA<UAnimSequence>())
+	{
+		// An animation is wanted as just that: skeleton + clip, no preview mesh (the person's
+		// call; the orchestrator draws a mesh-less FBX as a stick skeleton that plays the clip).
+		UFbxExportOption* Fbx = NewObject<UFbxExportOption>();
+		Fbx->bExportPreviewMesh = false;
+		Task->Options = Fbx;
+	}
+	const bool bOk = UExporter::RunAssetExportTask(Task);
+	const TArray<FString> TaskErrors = Task->Errors;
+	Task->RemoveFromRoot();
+	if (!bOk || !FPaths::FileExists(OutPath) || IFileManager::Get().FileSize(*OutPath) <= 0)
+	{
+		OutError = FString::Printf(TEXT(".%s export failed%s%s"), *Ext,
+			TaskErrors.Num() ? TEXT(": ") : TEXT(" (see Output Log)"), TaskErrors.Num() ? *TaskErrors[0] : TEXT(""));
 		return false;
 	}
 	return true;
+}
+
+bool SOrchestratorSendDialog::ExportOne(UObject* Object, FString& OutPath, FString& OutMime, FString& OutError) const
+{
+	// Meshes: GLB first -- the orchestrator shows it natively and the glTF exporter carries baked
+	// materials -- and FBX when the GLB fails. Animations: FBX, skeleton + clip only.
+	TArray<TPair<FString, FString>> Formats;
+	if (Object->IsA<UTexture>())
+	{
+		Formats.Add({TEXT("png"), TEXT("image/png")});
+	}
+	else if (Object->IsA<UAnimSequence>())
+	{
+		Formats.Add({TEXT("fbx"), TEXT("model/fbx")});
+	}
+	else if (Object->IsA<UStaticMesh>() || Object->IsA<USkeletalMesh>())
+	{
+		Formats.Add({TEXT("glb"), TEXT("model/gltf-binary")});
+		Formats.Add({TEXT("fbx"), TEXT("model/fbx")});
+	}
+	else
+	{
+		OutError = FString::Printf(TEXT("%s: a %s can't be sent (meshes, animations and textures can)"),
+			*Object->GetName(), *Object->GetClass()->GetName());
+		return false;
+	}
+	// Exporters (the FBX SDK above all) don't create the folder they write into.
+	const FString Dir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("Orchestrator") / TEXT("Outgoing"));
+	IFileManager::Get().MakeDirectory(*Dir, true);
+
+	TArray<FString> Tried;
+	for (const TPair<FString, FString>& Format : Formats)
+	{
+		OutPath = Dir / (OrchestratorUtils::SafeName(Object->GetName(), TEXT("Asset")) + TEXT(".") + Format.Key);
+		FString Why;
+		if (TryExport(Object, Format.Key, OutPath, bSourceGeometry, Why))
+		{
+			OutMime = Format.Value;
+			return true;
+		}
+		Tried.Add(Why);
+	}
+	OutError = Object->GetName() + TEXT(": ") + FString::Join(Tried, TEXT("; "));
+	return false;
 }
 
 void SOrchestratorSendDialog::SendNext()

@@ -19,4 +19,4 @@ Pairing (no token to copy anywhere):
   in `/Game/Orchestrator/<project>/`; sending again replaces it. Unreal must
   be open and connected -- otherwise it isn't offered, nothing is queued.
 - Unreal -> Orchestrator: Content Browser, right-click assets > Send to
-  Orchestrator... Meshes/animations go as FBX, textures as PNG.
+  Orchestrator... Meshes go as GLB (FBX if that fails), animations as FBX with just the skeleton and the clip (no preview mesh), textures as PNG.

@@ -28,6 +28,7 @@ public class OrchestratorBridge : ModuleRules
 			"HTTP",
 			"Json",
 			"Settings",
+			"GLTFExporter",
 		});
 	}
 }

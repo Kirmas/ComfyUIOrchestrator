@@ -22,7 +22,12 @@ space means evenly spread over the scalp rather than every-Nth-in-file-order
 (file order is often by region, and would bald one side).
 
 Axes: Alembic has no unit/up-axis; Blender's importer yields Z-up, written Y-up
-(x, z, -y) like every other format here.
+(x, z, -y) like every other format here. EXCEPT an Unreal groom from the Groom
+Exporter add-on (signature "Groom Exporter" in its metadata): it is written the
+way Unreal reads it -- Z up, Y negated -- while Blender's importer assumes Y-up,
+so read naively the hair came out lying down and mirrored (2026-11-22, measured
+with strands of known direction). `_UE_GROOM_TO_BLENDER` undoes both; the bridge
+add-on applies the same fix when such a file is imported back into Blender.
 """
 import importlib.util
 import json
@@ -47,6 +52,11 @@ _SEND_ALL_UP_TO = 4000      # strands: below this nothing is dropped
 _SEND_FRACTION = 0.25       # above it, send at most this share (the slider tops out there)
 _SEND_MAX = 60000
 _Z_UP_TO_Y_UP = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=np.float32)
+# Blender-imported point of a Groom Exporter file -> the point it was in Blender: the importer
+# mapped the stored (x, -y, z) to (x, -z, -y), so this is (bx, -bz, -by). A reflection (det -1).
+_UE_GROOM_TO_BLENDER = np.array([[1, 0, 0], [0, 0, -1], [0, -1, 0]], dtype=np.float32)
+GROOM_EXPORTER_SIGNATURE = b"Groom Exporter"
+_TO_VIEW = _Z_UP_TO_Y_UP
 
 
 def _glb_writer():
@@ -60,7 +70,7 @@ def _world(points: np.ndarray, obj) -> np.ndarray:
     """Object-space points -> world, then Z-up -> Y-up."""
     m = np.array(obj.matrix_world, dtype=np.float32)
     world = points @ m[:3, :3].T + m[:3, 3]
-    return (world @ _Z_UP_TO_Y_UP.T).astype(np.float32)
+    return (world @ _TO_VIEW.T).astype(np.float32)
 
 
 def _spread_order(roots: np.ndarray) -> np.ndarray:
@@ -169,6 +179,10 @@ def _mesh_primitives(obj, depsgraph) -> tuple[list[dict], list[dict]]:
 def main() -> None:
     rest = sys.argv[sys.argv.index("--") + 1:]
     src, dst, info_path = rest[:3]
+    global _TO_VIEW
+    ue_groom = GROOM_EXPORTER_SIGNATURE in Path(src).read_bytes()
+    if ue_groom:
+        _TO_VIEW = _Z_UP_TO_Y_UP @ _UE_GROOM_TO_BLENDER
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.ops.wm.alembic_import(filepath=src, as_background_job=False, set_frame_range=True)
     scene = bpy.context.scene
@@ -200,7 +214,8 @@ def main() -> None:
         "meshes": [{"name": p["name"], "vertices": p["vertices"]} for p in parts],
         "parts": parts,
         "source": {"format": "alembic", "frames": int(frames), "frame_start": int(scene.frame_start),
-                   "frame_end": int(scene.frame_end), "static_first_frame": frames > 1},
+                   "frame_end": int(scene.frame_end), "static_first_frame": frames > 1,
+                   "unreal_groom": ue_groom},
     }
     Path(info_path).write_text(json.dumps(info))
 

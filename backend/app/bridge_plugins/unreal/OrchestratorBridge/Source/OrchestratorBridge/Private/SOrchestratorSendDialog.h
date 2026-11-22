@@ -58,6 +58,7 @@ private:
 	TSharedPtr<STextComboBox> ProjectCombo;
 	TSharedPtr<STextComboBox> GraphCombo;
 	bool bPlace = true;
+	bool bSourceGeometry = true;
 	bool bBusy = false;
 	FString Status;
 

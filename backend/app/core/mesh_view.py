@@ -35,7 +35,7 @@ def converts_via_blender(mime: str) -> bool:
 # `?v=` of the view URL (core/storage.build_view_url). The URL has to change because
 # the file is served `immutable` -- a browser never asks again, so a better GLB under
 # the same URL is never seen (the colourless Alembic grooms, 2026-11-22).
-VIEW_VERSION = 5
+VIEW_VERSION = 6
 
 _locks: dict[str, asyncio.Lock] = {}
 
@@ -88,9 +88,14 @@ async def mesh_view_path(key: str, read_original: Callable[[], bytes], mime: str
     return path
 
 
-async def mesh_view_info(key: str, read_original: Callable[[], bytes], mime: str) -> dict | None:
+async def mesh_view_info(key: str, read_original: Callable[[], bytes], mime: str,
+                         original: tuple[Path, int] | None = None) -> dict | None:
     """What the conversion learned about the file (FBX: clips, bones, root
-    motion); None for a format that has nothing to report."""
+    motion); a GLB is read for the same report straight off its JSON chunk
+    (`original` = its path and payload offset); None for a format that has
+    nothing to report (STL)."""
+    if mime == "model/gltf-binary" and original is not None:
+        return glb_stats.view_info_from_file(*original)
     if not converts_via_blender(mime):
         return None
     await mesh_view_path(key, read_original, mime)

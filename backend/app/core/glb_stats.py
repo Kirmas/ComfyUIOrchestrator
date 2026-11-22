@@ -79,18 +79,66 @@ def counts_from_bytes(data: bytes) -> tuple[int, int] | None:
     return _counts(doc) if doc is not None else None
 
 
-def counts_from_file(path: Path, offset: int = 0) -> tuple[int, int] | None:
-    """(vertices, triangles) for a GLB on disk, reading only its header and JSON
-    chunk. `offset` is where the GLB starts -- past the prefix block, for a
-    stored asset."""
-
+def _doc_from_file(path: Path, offset: int) -> dict | None:
     def read(start: int, size: int) -> bytes:
         with path.open("rb") as f:
             f.seek(offset + start)
             return f.read(size)
 
     try:
-        doc = _json_chunk(read)
+        return _json_chunk(read)
     except OSError:
         return None
+
+
+def counts_from_file(path: Path, offset: int = 0) -> tuple[int, int] | None:
+    """(vertices, triangles) for a GLB on disk, reading only its header and JSON
+    chunk. `offset` is where the GLB starts -- past the prefix block, for a
+    stored asset."""
+    doc = _doc_from_file(path, offset)
     return _counts(doc) if doc is not None else None
+
+
+def _view_info(doc: dict) -> dict:
+    """The same report a converted FBX gets (core/blender_fbx_to_glb.py's info.json),
+    read off a GLB's own JSON: its animation clips, bones, and meshes -- so the viewer
+    offers clips and parts for a GLB too. glTF stores no frame rate: `frames` is the
+    densest keyframe track and `fps` follows from it (exact for baked exports, which
+    key every frame)."""
+    accessors = doc.get("accessors", [])
+    clips = []
+    for i, anim in enumerate(doc.get("animations", [])):
+        lo, hi, keys = None, 0.0, 0
+        for sampler in anim.get("samplers", []):
+            acc = accessors[sampler["input"]]
+            hi = max(hi, float((acc.get("max") or [0])[0]))
+            first = float((acc.get("min") or [0])[0])
+            lo = first if lo is None else min(lo, first)
+            keys = max(keys, int(acc.get("count", 0)))
+        seconds = hi - (lo or 0.0)  # a clip exported from frame 1 starts at 1/fps, not 0
+        clips.append({"name": anim.get("name") or f"Animation {i + 1}", "frames": keys,
+                      "seconds": round(seconds, 3), "root_motion": False})
+    timed = [c for c in clips if c["seconds"] > 0 and c["frames"] > 1]
+    fps = round((timed[0]["frames"] - 1) / timed[0]["seconds"], 3) if timed else 0
+    joints = {j for skin in doc.get("skins", []) for j in skin.get("joints", [])}
+    meshes_doc = doc.get("meshes", [])
+    meshes = []
+    for node in doc.get("nodes", []):
+        if "mesh" not in node:
+            continue
+        prims = meshes_doc[node["mesh"]].get("primitives", [])
+        vertices = sum(int(accessors[p["attributes"]["POSITION"]]["count"]) for p in prims
+                       if "POSITION" in p.get("attributes", {}))
+        meshes.append({"name": node.get("name") or meshes_doc[node["mesh"]].get("name") or "mesh", "vertices": vertices})
+    return {"clips": clips, "fps": fps, "bones": len(joints), "has_mesh": bool(meshes),
+            "root_motion": False, "meshes": meshes}
+
+
+def view_info_from_file(path: Path, offset: int = 0) -> dict | None:
+    doc = _doc_from_file(path, offset)
+    if doc is None:
+        return None
+    try:
+        return _view_info(doc)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None

@@ -20,7 +20,7 @@ preferences). Server-side counterpart: backend/app/api/routes/bridge.py.
 bl_info = {
     "name": "ComfyUI Orchestrator Bridge",
     "author": "ComfyUI Orchestrator",
-    "version": (1, 0, 6),
+    "version": (1, 1, 2),
     "blender": (4, 2, 0),
     "location": "3D View > Sidebar > Orchestrator; Image Editor > Image menu",
     "description": "Send assets between ComfyUI Orchestrator and Blender",
@@ -44,7 +44,12 @@ from bpy.props import BoolProperty, EnumProperty, StringProperty
 
 from .wsclient import WSClient, WSClosed
 
-VERSION = "1.0.6"
+try:  # the zip from the orchestrator carries a copy of its blender_addons/groom_precheck.py
+    from . import groom_precheck
+except ImportError:
+    groom_precheck = None
+
+VERSION = "1.1.2"
 PROP = "orch_asset_id"
 
 
@@ -359,6 +364,27 @@ def _run_importer(fmt, kind, path):
         raise RuntimeError(f"Blender can't import a {kind} ({fmt or 'unknown format'}) asset")
 
 
+# An Unreal groom from the Groom Exporter is stored the way Unreal reads it (Z up, Y negated,
+# centimetres), but Blender's Alembic importer assumes Y-up -- imported naively it lies on its
+# side, mirrored and 100x too big. Same fix as the orchestrator's viewer
+# (core/blender_abc_to_glb.py, _UE_GROOM_TO_BLENDER): imported (bx, by, bz) -> (bx, -bz, -by).
+GROOM_EXPORTER_SIGNATURE = b"Groom Exporter"
+
+
+def _is_ue_groom(path):
+    with open(path, "rb") as f:
+        return GROOM_EXPORTER_SIGNATURE in f.read()
+
+
+def _ue_groom_back_to_blender(objs):
+    from mathutils import Matrix
+    to_blender = Matrix(((1, 0, 0, 0), (0, 0, -1, 0), (0, -1, 0, 0), (0, 0, 0, 1)))
+    unit = Matrix.Scale(0.01 / (bpy.context.scene.unit_settings.scale_length or 1.0), 4)
+    for o in objs:
+        if o.parent not in objs:
+            o.matrix_world = unit @ to_blender @ o.matrix_world
+
+
 def _import(msg, tmp):
     asset = msg["asset"]
     aid, fmt, kind = asset["id"], (asset.get("format") or "").lower(), asset.get("kind")
@@ -382,6 +408,8 @@ def _import(msg, tmp):
         with bpy.context.temp_override(**_view3d_override()):
             _run_importer(fmt, kind, final)
         new = [o for o in bpy.data.objects if o not in before]
+        if fmt == "abc" and _is_ue_groom(final):
+            _ue_groom_back_to_blender(new)
         for o in new:
             o[PROP] = aid
         roots = [o for o in new if o.parent not in new]
@@ -462,6 +490,8 @@ def _bake_glow_for_export(objs, warnings):
     active_before = bpy.context.view_layer.objects.active
 
     for ob in objs:
+        if ob.type != "MESH":
+            continue  # hair curves, empties...: nothing to bake
         for slot in getattr(ob, "material_slots", []):
             mat = slot.material
             if mat is None or not mat.use_nodes or mat.name in done:
@@ -566,9 +596,227 @@ def _bake_glow_for_export(objs, warnings):
     return undo_all
 
 
-def _upload(path, filename, mime, wm_project, wm_graph, place, source_path):
+# Same problem as the glow, for the rest of the surface (2026-11-22, the bracers): glTF only
+# understands an image wired (almost) straight into Principled BSDF. A material that *computes*
+# Base Color / Metallic / Roughness (masks x parameters through Mix/Multiply) or its normal (vector
+# maths into a Normal Map) is not followed by the exporter -- it grabs the first image it meets
+# upstream, so the bracers arrived in the raw blue/pink of their mask texture. The fix is the same
+# as the glow's: bake what the material actually produces, wire the bakes in for the export only,
+# then put the graph back exactly as it was.
+SURFACE_BAKE_MIN, SURFACE_BAKE_MAX = 512, 2048
+
+
+def _src(socket):
+    return socket.links[0].from_node if socket.is_linked else None
+
+
+def _is_image(node):
+    return node is not None and node.bl_idname == "ShaderNodeTexImage" and node.image is not None
+
+
+def _exports_as_is(bsdf):
+    """Which inputs the glTF exporter already maps faithfully (unlinked, or an image straight in;
+    metallic/roughness may also come through a Separate Color of an image; the normal through a
+    Normal Map whose Color is an image)."""
+    def scalar_ok(sock):
+        n = _src(sock)
+        if n is None or _is_image(n):
+            return True
+        return n.bl_idname in ("ShaderNodeSeparateColor", "ShaderNodeSeparateRGB") and _is_image(_src(n.inputs[0]))
+    base = bsdf.inputs["Base Color"]
+    normal = _src(bsdf.inputs["Normal"])
+    return {
+        "base": not base.is_linked or _is_image(_src(base)),
+        "mr": scalar_ok(bsdf.inputs["Metallic"]) and scalar_ok(bsdf.inputs["Roughness"]),
+        "normal": normal is None or (normal.bl_idname == "ShaderNodeNormalMap" and _is_image(_src(normal.inputs["Color"]))),
+    }
+
+
+def _bake_size(nt):
+    sizes = [max(n.image.size) for n in nt.nodes if _is_image(n)]
+    return int(min(max(max(sizes, default=1024), SURFACE_BAKE_MIN), SURFACE_BAKE_MAX))
+
+
+def _bake_into(ob, nt, img, bake_type, **kw):
+    """Bake `bake_type` of `ob` into `img` through a temporary active image node in `nt`.
+
+    Cycles bakes every material of the object at once and refuses unless each one has an active
+    image node, so the object's *other* materials get a throwaway target for the duration."""
+    targets = [(nt, img)]
+    scratch = None
+    for slot in ob.material_slots:
+        m = slot.material
+        if m is not None and m.use_nodes and m.node_tree is not nt and all(t is not m.node_tree for t, _ in targets):
+            if scratch is None:
+                scratch = bpy.data.images.new("orch_bake_scratch", 64, 64, float_buffer=True)
+            targets.append((m.node_tree, scratch))
+    added = []
+    for tree, image in targets:
+        node = tree.nodes.new("ShaderNodeTexImage")
+        node.image = image
+        for n in tree.nodes:
+            n.select = False
+        node.select = True
+        added.append((tree, node, tree.nodes.active))
+        tree.nodes.active = node
+    bpy.ops.object.select_all(action="DESELECT")
+    ob.select_set(True)
+    bpy.context.view_layer.objects.active = ob
+    try:
+        bpy.ops.object.bake(type=bake_type, **kw)
+    finally:
+        for tree, node, active in added:
+            tree.nodes.remove(node)
+            tree.nodes.active = active
+        if scratch is not None:
+            bpy.data.images.remove(scratch)
+
+
+def _bake_socket(ob, nt, out_node, socket, img):
+    """Bake whatever `socket` receives (colour or value) by routing it through an Emission shader."""
+    emit = nt.nodes.new("ShaderNodeEmission")
+    surface = out_node.inputs["Surface"]
+    old = [l.from_socket for l in surface.links]
+    for l in list(surface.links):
+        nt.links.remove(l)
+    nt.links.new(socket.links[0].from_socket, emit.inputs["Color"])
+    nt.links.new(emit.outputs["Emission"], surface)
+    try:
+        _bake_into(ob, nt, img, "EMIT")
+    finally:
+        nt.nodes.remove(emit)
+        for s in old:
+            nt.links.new(s, surface)
+
+
+def _bake_surface_for_export(objs, warnings):
+    """Bakes computed Base Color / Metallic+Roughness / Normal of each material into images and
+    wires them in for the glTF export; returns the undo. Problems go to `warnings`."""
+    import numpy as np
+    undo = []
+    done = set()
+    scene = bpy.context.scene
+    engine_before = scene.render.engine
+    samples_before = getattr(scene.cycles, "samples", None)
+    sel_before = list(bpy.context.selected_objects)
+    active_before = bpy.context.view_layer.objects.active
+    scene.render.engine = "CYCLES"
+    scene.cycles.samples = 4
+
+    def new_image(name, size, color):
+        img = bpy.data.images.new(name, size, size, alpha=False, float_buffer=True)
+        # before any pixel access -- see the colorspace note in _bake_glow_for_export
+        img.colorspace_settings.name = "sRGB" if color else "Non-Color"
+        return img
+
+    def rewire(nt, socket, from_socket):
+        old_links = [l.from_socket for l in socket.links]
+        old_value = tuple(socket.default_value) if hasattr(socket.default_value, "__len__") else socket.default_value
+        for l in list(socket.links):
+            nt.links.remove(l)
+        nt.links.new(from_socket, socket)
+
+        def restore():
+            for l in list(socket.links):
+                nt.links.remove(l)
+            socket.default_value = old_value
+            for s in old_links:
+                nt.links.new(s, socket)
+        undo.append(restore)
+
+    def add_node(nt, kind, image=None):
+        node = nt.nodes.new(kind)
+        if image is not None:
+            node.image = image
+        undo.append(lambda nt=nt, node=node: nt.nodes.remove(node))
+        return node
+
+    try:
+        for ob in objs:
+            if ob.type != "MESH":
+                continue
+            for slot in getattr(ob, "material_slots", []):
+                mat = slot.material
+                if mat is None or not mat.use_nodes or mat.name in done:
+                    continue
+                done.add(mat.name)
+                nt = mat.node_tree
+                out = nt.get_output_node("CYCLES") or nt.get_output_node("ALL")
+                bsdfs = [n for n in nt.nodes if n.bl_idname == "ShaderNodeBsdfPrincipled"]
+                if out is None or not bsdfs:
+                    continue
+                bsdf = bsdfs[0]
+                ok = _exports_as_is(bsdf)
+                if all(ok.values()):
+                    continue
+                if not ob.data.uv_layers:
+                    warnings.append(f"{mat.name}: '{ob.name}' has no UVs -- its computed colours can't be baked")
+                    continue
+                size = _bake_size(nt)
+                tag = "orch_" + mat.name
+                try:
+                    # the normal first, while the material's own surface is still connected
+                    if not ok["normal"]:
+                        img = new_image(tag + "_normal", size, False)
+                        _bake_into(ob, nt, img, "NORMAL", normal_space="TANGENT")
+                        img.pack()
+                        undo.append(lambda img=img: bpy.data.images.remove(img))
+                        tex = add_node(nt, "ShaderNodeTexImage", img)
+                        nmap = add_node(nt, "ShaderNodeNormalMap")
+                        nt.links.new(tex.outputs["Color"], nmap.inputs["Color"])
+                        rewire(nt, bsdf.inputs["Normal"], nmap.outputs["Normal"])
+                    if not ok["base"]:
+                        img = new_image(tag + "_base", size, True)
+                        _bake_socket(ob, nt, out, bsdf.inputs["Base Color"], img)
+                        img.pack()
+                        undo.append(lambda img=img: bpy.data.images.remove(img))
+                        tex = add_node(nt, "ShaderNodeTexImage", img)
+                        rewire(nt, bsdf.inputs["Base Color"], tex.outputs["Color"])
+                    if not ok["mr"]:
+                        # glTF packs them into one image: G = roughness, B = metallic
+                        n = size * size
+                        packed = np.ones((n, 4), dtype=np.float32)
+                        for channel, name in ((1, "Roughness"), (2, "Metallic")):
+                            sock = bsdf.inputs[name]
+                            if sock.is_linked:
+                                tmp = new_image(tag + "_tmp", size, False)
+                                _bake_socket(ob, nt, out, sock, tmp)
+                                px = np.empty(n * 4, dtype=np.float32)
+                                tmp.pixels.foreach_get(px)
+                                packed[:, channel] = px.reshape(-1, 4)[:, 0]
+                                bpy.data.images.remove(tmp)
+                            else:
+                                packed[:, channel] = sock.default_value
+                        img = new_image(tag + "_metal_rough", size, False)
+                        img.pixels.foreach_set(packed.ravel())
+                        img.pack()
+                        undo.append(lambda img=img: bpy.data.images.remove(img))
+                        tex = add_node(nt, "ShaderNodeTexImage", img)
+                        sep = add_node(nt, "ShaderNodeSeparateColor")
+                        nt.links.new(tex.outputs["Color"], sep.inputs[0])
+                        rewire(nt, bsdf.inputs["Roughness"], sep.outputs[1])
+                        rewire(nt, bsdf.inputs["Metallic"], sep.outputs[2])
+                except RuntimeError as exc:
+                    warnings.append(f"{mat.name}: bake failed ({exc}) -- it will export as Blender guesses")
+    finally:
+        scene.render.engine = engine_before
+        if samples_before is not None:
+            scene.cycles.samples = samples_before
+        bpy.ops.object.select_all(action="DESELECT")
+        for o in sel_before:
+            o.select_set(True)
+        bpy.context.view_layer.objects.active = active_before
+
+    def undo_all():
+        for fn in reversed(undo):
+            fn()
+    return undo_all
+
+
+def _upload(path, filename, mime, wm_project, wm_graph, place, source_path, groom=False):
     fields = {"project_id": wm_project, "dashboard_id": "" if wm_graph in ("", "MAIN") else wm_graph,
-              "place": "true" if place else "false", "source_path": source_path}
+              "place": "true" if place else "false", "source_path": source_path,
+              "groom": "true" if groom else "false"}
 
     def work():
         try:
@@ -604,10 +852,164 @@ _SEND_DEBOUNCE_S = 1.5
 _last_send = {"key": None, "done": 0.0}
 
 
+def _rigs_of(objs):
+    """Armatures the selected meshes are skinned to (Armature modifier) or
+    parented under. The glTF exporter writes a skin only when its armature is
+    in the export set, so selecting just the mesh -- the natural thing to do
+    with one part of a rig -- used to arrive as a static mesh."""
+    rigs = []
+    for o in objs:
+        cands = [m.object for m in getattr(o, "modifiers", []) if m.type == "ARMATURE" and m.object]
+        p = o.parent
+        while p is not None:
+            if p.type == "ARMATURE":
+                cands.append(p)
+            p = p.parent
+        for r in cands:
+            if r not in objs and r not in rigs:
+                rigs.append(r)
+    return rigs
+
+
+def _include_rigs(ctx, objs):
+    """Temporarily select (and show) the rigs of `objs`; returns an undo."""
+    rigs = _rigs_of(objs)
+    saved = [(r, r.select_get(), r.hide_get(), r.hide_viewport) for r in rigs]
+    for r in rigs:
+        r.hide_viewport = False
+        r.hide_set(False)
+        r.select_set(True)
+
+    def undo():
+        for r, sel, hidden, hide_vp in saved:
+            r.select_set(sel)
+            r.hide_set(hidden)
+            r.hide_viewport = hide_vp
+    return rigs, undo
+
+
+def _groom_exporter_ready():
+    """Is the Groom Exporter add-on (groom.buttonexport) installed and enabled here?"""
+    try:
+        bpy.ops.groom.buttonexport.get_rna_type()
+        return True
+    except (KeyError, AttributeError):
+        return False
+
+
+class _GroomNotReady(Exception):
+    pass
+
+
+def _groom_pipelines():
+    """The person's own Groom Exporter node pipelines: (tree, Export Information node, objects).
+
+    The node keeps what it exports in a CLASS-level dict that only its UI refreshes
+    (`update_attributes`), so it is refreshed here per node and read at once -- and again
+    right before an export, which reads that same shared dict."""
+    out = []
+    for tree in bpy.data.node_groups:
+        if tree.bl_idname != "GroomExporterNode":
+            continue
+        for node in tree.nodes:
+            if node.bl_idname != "GroomExportNodeType":
+                continue
+            try:
+                node.update_attributes()
+            except Exception:  # noqa: BLE001 -- a half-built pipeline is just not a candidate
+                continue
+            objs = [d["obj"] for d in node.unique_nodes.values()]
+            if objs:
+                out.append((tree, node, objs))
+    return out
+
+
+def _pick_pipeline(hair):
+    """The pipeline covering most of the selected hair, or None."""
+    best, best_n = None, 0
+    for tree, node, objs in _groom_pipelines():
+        n = sum(1 for o in hair if o in objs)
+        if n > best_n:
+            best, best_n = (tree, node, objs), n
+    return best
+
+
+def _run_groom_export(ctx, path, select=None, prepare=None):
+    """groom.buttonexport (on the selection) with our scale. `select` = the objects to export,
+    or `prepare()` selects them (a pipeline's own preparation). The person's selection is put
+    back afterwards.
+
+    The exporter reads each object's attribute mapping from the EVALUATED copy, which stays
+    stale until the original is tagged -- the same trap the scenes hit (CLAUDE.md, Groom
+    Exporter): a mapping set a moment ago then exports without those groom_* attributes. So
+    every exported object is tagged and the view layer re-evaluated first."""
+    if ctx.object is not None and ctx.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    vl = ctx.view_layer
+    sel_before = list(ctx.selected_objects)
+    active_before = vl.objects.active
+    if prepare is not None:
+        prepare()
+    if select:
+        for o in ctx.scene.objects:
+            o.select_set(o in select)
+        vl.objects.active = select[0]
+    for o in ctx.selected_objects:
+        if o.type == "CURVES":
+            o.update_tag()
+    vl.update()
+    try:
+        res = bpy.ops.groom.buttonexport(filepath=path, groom_scale=ctx.scene.unit_settings.scale_length * 100.0,
+                                         groom_width_scale=True, groom_radius_to_diameter=True,
+                                         groom_animation=False)
+    finally:
+        for o in ctx.scene.objects:
+            o.select_set(o in sel_before)
+        vl.objects.active = active_before
+    if "FINISHED" not in res or not os.path.exists(path):
+        raise RuntimeError(f"the Groom Exporter returned {res}")
+
+
+def _export_groom_pipeline(ctx, tree, node, path):
+    """Export exactly as the person's 'Export the selected curves' button would: their curve
+    selectors, their attribute mapping, their groom properties. Only the scale is ours
+    (scene units -> centimetres), since that button asks for it in a dialog."""
+    node.update_attributes()
+    trimmed = {key[0]: data["index"] for key, data in node.error_message_trim.items()}
+    if trimmed:
+        raise _GroomNotReady("strands with a single point (they crash Unreal's import): " +
+                             "; ".join(f"{name}: {len(idx)}" for name, idx in trimmed.items()))
+    objs = [d["obj"] for d in node.unique_nodes.values()]
+    # The node's own preparation (its mapping onto the objects + selecting them), run here rather
+    # than inside the operator (node_execution) so the objects can be re-evaluated in between.
+    _run_groom_export(ctx, path, prepare=node.export_preparation)
+    return objs
+
+
+def _export_groom(ctx, hair, path):
+    """Fallback when the file has no Groom Exporter node pipeline for this hair: an Unreal
+    Groom .abc through the add-on's plain export -- the same steps the orchestrator's own
+    scenes take (blender_scene_server.groom_export): fill the add-on's
+    attribute mapping from the default names, refuse a groom the pre-check finds broken
+    (1-point curves crash Unreal), scale to centimetres. Only the shown hair objects go: a
+    hidden one (a *_GuideRef feeding guides in) would leave as an extra, broken group."""
+    vl = ctx.view_layer
+    shown = [o for o in hair if not o.hide_render and not (o.name in vl.objects and o.hide_get())]
+    if not shown:
+        raise _GroomNotReady("all the selected hair is hidden")
+    if groom_precheck is not None:
+        groom_precheck.map_attributes(shown)
+        bad = [f"{r['object']}: " + "; ".join(r["issues"]) for r in groom_precheck.report(shown) if r["issues"]]
+        if bad:
+            raise _GroomNotReady("\n".join(bad))
+    _run_groom_export(ctx, path, select=shown)
+    return shown
+
+
 class ORCH_OT_send_selected(bpy.types.Operator):
     bl_idname = "orchestrator.send_selected"
     bl_label = "Send to Orchestrator"
-    bl_description = "Export the selected objects as GLB into the chosen project"
+    bl_description = "Export the selected objects as GLB into the chosen project (with the skeleton they are skinned to)"
 
     @classmethod
     def poll(cls, ctx):
@@ -626,7 +1028,14 @@ class ORCH_OT_send_selected(bpy.types.Operator):
         name = (ctx.active_object or objs[0]).name if len(objs) == 1 else (ctx.active_object or objs[0]).name + "_group"
         safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
         tmpdir = tempfile.mkdtemp(prefix="orch_")
-        path = os.path.join(tmpdir, safe + ".glb")
+        # Hair (Blender Curves objects) does not exist in glTF -- the exporter silently drops it --
+        # so a selection with hair goes as Alembic: an Unreal Groom through the Groom Exporter
+        # add-on when it is installed here (so the asset can go on to Unreal as it is), else
+        # Blender's plain Alembic (shown fine in the orchestrator, but no groom for Unreal).
+        hair = [o for o in objs if o.type == "CURVES"]
+        groom = bool(hair) and _groom_exporter_ready()
+        ext, mime = ("abc", "model/alembic") if hair else ("glb", "model/gltf-binary")
+        path = os.path.join(tmpdir, f"{safe}.{ext}")
         # use_active_scene: the exporter's default is EVERY scene in the .blend, so a file with several
         # scenes sent the whole project's meshes (97 MB for one dagger) along with the selection.
         # cursor_set: a masked/driven glow gets baked through Cycles before export (see
@@ -634,23 +1043,68 @@ class ORCH_OT_send_selected(bpy.types.Operator):
         # bake in a session is slower still (Cycles compiles its kernels). Without this the window
         # looks frozen and a second click fires a second, independent send.
         ctx.window.cursor_set("WAIT")
+        if groom:
+            pipeline = _pick_pipeline(hair)
+            try:
+                if pipeline:
+                    tree, node, _ = pipeline
+                    sent = _export_groom_pipeline(ctx, tree, node, path)
+                    self.report({"INFO"}, f"Using your Groom Exporter pipeline '{tree.name}'")
+                else:
+                    sent = _export_groom(ctx, hair, path)
+            except _GroomNotReady as exc:
+                self.report({"ERROR"}, f"Not a valid groom yet, nothing sent:\n{exc}")
+                return {"CANCELLED"}
+            finally:
+                ctx.window.cursor_set("DEFAULT")
+            others = [o.name for o in objs if o not in sent]
+            extra = [o.name for o in sent if o not in objs]
+            self.report({"INFO"}, "Hair goes as an Unreal Groom (.abc)" +
+                        (f"; also in it (the pipeline exports them together): {', '.join(extra)}" if extra else "") +
+                        (f"; not in it: {', '.join(others)} -- send those separately" if others else ""))
+        elif hair:
+            try:
+                frame = ctx.scene.frame_current
+                bpy.ops.wm.alembic_export(filepath=path, selected=True,
+                                          start=frame, end=frame, export_hair=True)
+            finally:
+                ctx.window.cursor_set("DEFAULT")
+            self.report({"WARNING"}, "Groom Exporter add-on not enabled: hair goes as plain Alembic "
+                                     "(fine to view, not an Unreal groom)")
+        else:
+            self._export_glb(ctx, objs, path)
+        _upload(path, f"{safe}.{ext}", mime, wm.orch_project, wm.orch_graph, wm.orch_place,
+                f"{bpy.data.filepath or 'unsaved'}:{name}", groom=groom)
+        self.report({"INFO"}, f"Sending {safe}.{ext}...")
+        _last_send.update(key=key, done=time.monotonic())
+        return {"FINISHED"}
+
+    def _export_glb(self, ctx, objs, path):
         try:
             warnings = []
-            undo = _bake_glow_for_export(objs, warnings)
+            undo_glow = _bake_glow_for_export(objs, warnings)
+            try:
+                undo_surface = _bake_surface_for_export(objs, warnings)
+            except Exception:
+                undo_glow()
+                raise
+
+            def undo():
+                undo_surface()
+                undo_glow()
             for w in warnings:
                 self.report({"WARNING"}, w)
+            rigs, unrig = _include_rigs(ctx, objs)
+            if rigs:
+                self.report({"INFO"}, "With skeleton: " + ", ".join(r.name for r in rigs))
             try:
                 bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", use_selection=True, use_visible=True,
                                           use_active_scene=True)
             finally:
+                unrig()
                 undo()
         finally:
             ctx.window.cursor_set("DEFAULT")
-        _upload(path, safe + ".glb", "model/gltf-binary", wm.orch_project, wm.orch_graph, wm.orch_place,
-                f"{bpy.data.filepath or 'unsaved'}:{name}")
-        self.report({"INFO"}, f"Sending {safe}.glb...")
-        _last_send.update(key=key, done=time.monotonic())
-        return {"FINISHED"}
 
 
 class ORCH_OT_send_image(bpy.types.Operator):

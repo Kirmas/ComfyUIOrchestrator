@@ -312,6 +312,7 @@ async def upload_from_app(
     dashboard_id: str = Form(""),
     place: bool = Form(True),
     source_path: str = Form(""),
+    groom: bool = Form(False),
     device: BridgeDevice = Depends(_device),
     db: AsyncSession = Depends(get_db),
 ):
@@ -326,6 +327,8 @@ async def upload_from_app(
     meta = {"source": "bridge", "bridge_app": device.app, "bridge_device": device.name}
     if source_path:
         meta["bridge_path"] = source_path[:500]
+    if groom:
+        meta["groom"] = True  # an Unreal Groom .abc (Groom Exporter add-on), not just a hair cache
     data = await file.read()
     if not place:
         asset = await create_library_asset(db, project_id, data, file.content_type, file.filename, meta)
@@ -374,6 +377,9 @@ async def download_plugin(app: str):
                 continue
             rel = path.relative_to(root.parent if keep_folder else root)
             zf.write(path, rel.as_posix())
+        if app == "blender":
+            # one copy of the groom pre-check for the scenes and the add-on (see its header)
+            zf.write(PLUGINS_DIR.parent / "blender_addons" / "groom_precheck.py", "groom_precheck.py")
     name = "orchestrator_bridge_blender.zip" if app == "blender" else "OrchestratorBridge_unreal.zip"
     return Response(buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
