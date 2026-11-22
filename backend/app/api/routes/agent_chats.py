@@ -108,9 +108,15 @@ class ChatAttachmentImport(BaseModel):
     name: str = Field(pattern=r"^[0-9a-f]{32}\.(png|jpg|gif|webp)$")
 
 
+class AgentFile(BaseModel):
+    name: str = Field(max_length=255)
+    data: str  # base64; the runner validates size and which chats take files
+
+
 class AgentMessage(BaseModel):
     text: str = ""
     images: list[AgentImage] = []
+    files: list[AgentFile] = []
 
 
 def _runner() -> httpx.AsyncClient:
@@ -158,6 +164,13 @@ async def get_limits():
 async def refresh_limits(provider: str):
     """Take a fresh reading now: a tiny turn on that CLI, a few seconds."""
     return await _call("POST", f"/limits/{provider}", timeout=httpx.Timeout(120.0))
+
+
+@router.post("/runner/restart", status_code=202)
+async def restart_runner():
+    """Restart comfy-agent-runner without SSH: it exits and systemd brings it
+    back. Sessions' CLI processes die with it; the page resumes by itself."""
+    return await _call("POST", "/restart")
 
 
 @router.get("/cli-versions")
@@ -242,7 +255,8 @@ async def delete_chat(chat_id: str):
 
 @router.post("/{chat_id}/messages")
 async def post_message(chat_id: str, payload: AgentMessage):
-    return await _call("POST", f"/chats/{chat_id}/messages", json=payload.model_dump())
+    # Files can be tens of MB: longer than the usual 30 s to hand them over.
+    return await _call("POST", f"/chats/{chat_id}/messages", json=payload.model_dump(), timeout=httpx.Timeout(120.0))
 
 
 @router.get("/{chat_id}/attachments/{name}")

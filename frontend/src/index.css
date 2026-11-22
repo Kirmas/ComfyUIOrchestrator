@@ -4526,3 +4526,13 @@ button.scene-danger { color: var(--danger); border-color: var(--danger); }
   width: 160px;
   flex: 0 0 160px;
 }
+
+.agent-file-chip {
+  display: inline-block;
+  padding: 4px 8px;
+  margin: 2px 4px 2px 0;
+  border: 1px solid var(--border, #444);
+  border-radius: 6px;
+  font-size: 0.85em;
+  word-break: break-all;
+}

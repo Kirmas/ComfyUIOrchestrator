@@ -14,6 +14,7 @@ import type {
   AgentModel,
   AgentChatKind,
   AgentEvent,
+  AgentFileUpload,
   AgentImageUpload,
   AgentProviderId,
   AgentProviderInfo,
@@ -171,6 +172,25 @@ const IMAGE_MAX_SIDE = 1568;
 const IMAGE_MAX_BYTES = 3.5 * 1024 * 1024;
 
 type Attachment = AgentImageUpload & { preview: string };
+type FileAttachment = AgentFileUpload & { size: number };
+
+const FILE_MAX_BYTES = 100 * 1024 * 1024;
+
+function readFileAttachment(file: File): Promise<FileAttachment> {
+  return new Promise((ok, fail) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = reader.result as string;
+      ok({ name: file.name, size: file.size, data: url.slice(url.indexOf(",") + 1) });
+    };
+    reader.onerror = () => fail(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatSize(n: number): string {
+  return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+}
 
 /** A picture from the person's machine, shrunk to what the model can use. */
 async function readAttachment(file: File): Promise<Attachment> {
@@ -603,11 +623,25 @@ function CliVersionsPanel({ providers }: { providers: AgentProviderInfo[] }) {
     }
   };
 
-  if (versions.length === 0) return null;
+  const restart = async () => {
+    const busyCount = versions.reduce((n, v) => n + v.busy_chats, 0);
+    const busyNote = busyCount > 0 ? `\n\n${t("agent.runner.busyWarning", { count: busyCount })}` : "";
+    if (!confirm(t("agent.runner.confirmRestart") + busyNote)) return;
+    try {
+      await agentChatsApi.restartRunner();
+      alert(t("agent.runner.restarting"));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   return (
     <div className="agent-limits">
       <div className="agent-limits-head">
         <span>{t("agent.cli.title")}</span>
+        <button className="agent-chat-delete" title={t("agent.runner.restart")} onClick={restart}>
+          ⟳
+        </button>
         <button className="agent-chat-delete" title={t("agent.cli.check")} disabled={checking} onClick={check}>
           {checking ? "…" : "↻"}
         </button>
@@ -1084,6 +1118,7 @@ export function ChatView({
   const { events, connected } = useChatEvents(chat.id);
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
   const [sending, setSending] = useState(false);
   const [legacyModelsChatId, setLegacyModelsChatId] = useState<string | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -1115,12 +1150,24 @@ export function ChatView({
 
   const attach = async (files: Iterable<File>) => {
     for (const file of files) {
-      if (!file.type.startsWith("image/")) continue;
-      try {
-        const a = await readAttachment(file);
-        setAttachments((list) => [...list, a]);
-      } catch {
-        alert(t("agent.imageFailed", { name: file.name || "image" }));
+      if (file.type.startsWith("image/") && chat.accepts_images) {
+        try {
+          const a = await readAttachment(file);
+          setAttachments((list) => [...list, a]);
+        } catch {
+          alert(t("agent.imageFailed", { name: file.name || "image" }));
+        }
+      } else if (chat.accepts_files) {
+        if (file.size > FILE_MAX_BYTES) {
+          alert(t("agent.fileTooBig", { name: file.name }));
+          continue;
+        }
+        try {
+          const f = await readFileAttachment(file);
+          setFileAttachments((list) => [...list, f]);
+        } catch {
+          alert(t("agent.imageFailed", { name: file.name || "file" }));
+        }
       }
     }
   };
@@ -1229,9 +1276,10 @@ export function ChatView({
   }, [chat.id, draft, attachments]);
 
   const refs = dock?.refs ?? [];
+  const canAttach = !!(chat.accepts_images || chat.accepts_files);
   const send = async () => {
     const text = draft.trim();
-    if ((!text && !attachments.length && !refs.length) || running || sending || isFrozen) return;
+    if ((!text && !attachments.length && !fileAttachments.length && !refs.length) || running || sending || isFrozen) return;
     setSending(true);
     try {
       const images = attachments.map(({ media_type, data }) => ({ media_type, data }));
@@ -1255,9 +1303,10 @@ export function ChatView({
           }
         }
       }
-      await agentChatsApi.send(chat.id, body, images);
+      await agentChatsApi.send(chat.id, body, images, fileAttachments.map(({ name, data }) => ({ name, data })));
       setDraft("");
       setAttachments([]);
+      setFileAttachments([]);
       dock?.onSent();
       onChanged();
     } catch (err) {
@@ -1541,6 +1590,9 @@ export function ChatView({
                   {e.images && e.images.length > 0 && (
                     <ChatImages chatId={chat.id} images={e.images} onQuote={quoteMedia} />
                   )}
+                  {e.files?.map((f, i) => (
+                    <div key={i} className="agent-file-chip">📎 {f.name} · {formatSize(f.size)}</div>
+                  ))}
                   {e.text}
                 </div>
               );
@@ -1775,6 +1827,21 @@ export function ChatView({
           ))}
         </div>
       )}
+      {fileAttachments.length > 0 && (
+        <div className="agent-images agent-attachments">
+          {fileAttachments.map((f, i) => (
+            <span key={i} className="agent-attachment agent-file-chip">
+              📎 {f.name} · {formatSize(f.size)}
+              <button
+                title={t("agent.removeImage")}
+                onClick={() => setFileAttachments((list) => list.filter((_, j) => j !== i))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       {dock && refs.length > 0 && (
         <div className="agent-dock-refs">
           {refs.map((r) => (
@@ -1790,9 +1857,9 @@ export function ChatView({
       )}
       <div
         className="agent-input"
-        onDragOver={chat.accepts_images ? (e) => e.preventDefault() : undefined}
+        onDragOver={canAttach ? (e) => e.preventDefault() : undefined}
         onDrop={
-          chat.accepts_images
+          canAttach
             ? (e) => {
                 e.preventDefault();
                 attach(e.dataTransfer.files);
@@ -1800,15 +1867,15 @@ export function ChatView({
             : undefined
         }
       >
-        {chat.accepts_images && (
+        {canAttach && (
           <>
-            <button className="agent-attach" title={t("agent.attach")} disabled={isFrozen || running || sending} onClick={() => fileRef.current?.click()}>
+            <button className="agent-attach" title={t(chat.accepts_files ? "agent.attachFiles" : "agent.attach")} disabled={isFrozen || running || sending} onClick={() => fileRef.current?.click()}>
               📎
             </button>
             <input
               ref={fileRef}
               type="file"
-              accept="image/*"
+              accept={chat.accepts_files ? undefined : "image/*"}
               multiple
               hidden
               disabled={isFrozen || running || sending}
@@ -1831,9 +1898,9 @@ export function ChatView({
           disabled={isFrozen || running || sending}
           onChange={(e) => setDraft(e.target.value)}
           onPaste={
-            chat.accepts_images && !isFrozen
+            canAttach && !isFrozen
               ? (e) => {
-                  const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
+                  const files = Array.from(e.clipboardData.files).filter((f) => chat.accepts_files || f.type.startsWith("image/"));
                   if (files.length) {
                     e.preventDefault();
                     attach(files);
@@ -1872,7 +1939,7 @@ export function ChatView({
               {t("agent.stop")}
             </button>
           ) : (
-            <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length && !refs.length) || sending || isFrozen}>
+            <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length && !fileAttachments.length && !refs.length) || sending || isFrozen}>
               {t("agent.send")}
             </button>
           )}

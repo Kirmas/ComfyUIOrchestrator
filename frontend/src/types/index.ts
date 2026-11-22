@@ -602,6 +602,7 @@ export interface AgentChat {
   permission_mode?: string;
   // Whether a message may carry pictures from the person's machine.
   accepts_images?: boolean;
+  accepts_files?: boolean;
   supports_compact?: boolean;
   context_tokens?: number | null;
   context_window?: number | null;
@@ -647,9 +648,15 @@ export interface AgentImageUpload {
   data: string;
 }
 
+// Any file going out with a message (dev chats): base64 without a prefix.
+export interface AgentFileUpload {
+  name: string;
+  data: string;
+}
+
 export type AgentEvent = { seq: number; ts: number } & (
   // images: attachment names, served by agentChatsApi.attachmentUrl.
-  | { type: "user"; text: string; origin?: "agent" | "handoff" | "system"; images?: string[] }
+  | { type: "user"; text: string; origin?: "agent" | "handoff" | "system"; images?: string[]; files?: { name: string; size: number }[] }
   | { type: "text"; text: string }
   | { type: "image"; images: string[] }
   | { type: "media"; asset_id: string; mime_type: string; name: string; caption: string }
