@@ -825,6 +825,9 @@ export const uk: Record<TKey, string> = {
 
   // --- Reference picker ------------------------------------------------
   "refpicker.title": "З референсів",
+  "refpicker.confirmDelete": "Видалити цей файл з бібліотеки назавжди? Посилання на нього в гріді та на дошці зламаються.",
+  "refpicker.deleteFailed": "Не вдалося видалити.",
+  "refpicker.deleteTitle": "Видалити з бібліотеки",
   "refpicker.all": "всі",
   "refpicker.empty": "У бібліотеці проєкту порожньо. Завантажте зображення на дошку ідей (вкладка Дошка).",
 

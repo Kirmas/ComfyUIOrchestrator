@@ -4549,3 +4549,22 @@ button.scene-danger { color: var(--danger); border-color: var(--danger); }
   flex: 1;
   height: 10px;
 }
+
+.reference-cell {
+  position: relative;
+}
+
+.reference-cell .reference-item {
+  width: 100%;
+}
+
+.reference-delete {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  padding: 0 6px;
+  line-height: 18px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.7);
+  opacity: 0.85;
+}

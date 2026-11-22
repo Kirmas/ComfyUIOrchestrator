@@ -823,6 +823,9 @@ export const en = {
 
   // --- Reference picker ------------------------------------------------
   "refpicker.title": "From references",
+  "refpicker.confirmDelete": "Delete this file from the library for good? References to it in the grid and on the board will break.",
+  "refpicker.deleteFailed": "Could not delete.",
+  "refpicker.deleteTitle": "Delete from library",
   "refpicker.all": "all",
   "refpicker.empty": "The project library is empty. Upload images to the idea board (the Board tab).",
 

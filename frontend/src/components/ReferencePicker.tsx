@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { resolveAssetPreviewUrl } from "../api/client";
-import { boardApi } from "../api/endpoints";
+import { assetsApi, boardApi } from "../api/endpoints";
 import { useT } from "../i18n";
 import type { Asset } from "../types";
 import { cx } from "../utils";
@@ -38,6 +38,16 @@ export function ReferencePicker({ projectId, onPick, onClose }: Props) {
       .finally(() => setLoading(false));
   }, [projectId]);
 
+  async function remove(asset: Asset) {
+    if (!window.confirm(t("refpicker.confirmDelete"))) return;
+    try {
+      await assetsApi.remove(asset.id);
+      setAssets((prev) => prev.filter((a) => a.id !== asset.id));
+    } catch {
+      window.alert(t("refpicker.deleteFailed"));
+    }
+  }
+
   const tags = useMemo(() => [...new Set(assets.flatMap((a) => a.tags ?? []))].sort(), [assets]);
   const shown = activeTag ? assets.filter((a) => (a.tags ?? []).includes(activeTag)) : assets;
 
@@ -70,11 +80,16 @@ export function ReferencePicker({ projectId, onPick, onClose }: Props) {
         ) : (
           <div className="reference-grid">
             {shown.map((asset) => (
-              <button key={asset.id} className="reference-item" onClick={() => void onPick(asset)} title={(asset.tags ?? []).join(", ")}>
-                {/* Thumbnails in a flat scrolling list -- the one place on the board
-                    side that wants previews rather than originals. */}
-                <img src={resolveAssetPreviewUrl(asset)} alt="" loading="lazy" decoding="async" />
-              </button>
+              <div key={asset.id} className="reference-cell">
+                <button className="reference-item" onClick={() => void onPick(asset)} title={(asset.tags ?? []).join(", ")}>
+                  {/* Thumbnails in a flat scrolling list -- the one place on the board
+                      side that wants previews rather than originals. */}
+                  <img src={resolveAssetPreviewUrl(asset)} alt="" loading="lazy" decoding="async" />
+                </button>
+                <button className="reference-delete" onClick={() => void remove(asset)} title={t("refpicker.deleteTitle")}>
+                  ×
+                </button>
+              </div>
             ))}
           </div>
         )}
