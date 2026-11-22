@@ -16,20 +16,36 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.core import glb_stats
+from app.core.abc_convert import ABC_MIME, abc_to_glb
 from app.core.fbx_convert import FBX_MIME, fbx_to_glb
 from app.core.stl_convert import STL_MIME, stl_to_glb
 
 # mime -> the short format name shown on a card. Anything not listed is "glb".
-MESH_FORMAT_BY_MIME = {"model/gltf-binary": "glb", STL_MIME: "stl", FBX_MIME: "fbx"}
+MESH_FORMAT_BY_MIME = {"model/gltf-binary": "glb", STL_MIME: "stl", FBX_MIME: "fbx", ABC_MIME: "abc"}
+
+# Formats a background Blender converts (slow, one at a time): they also leave an
+# info file next to the GLB, and are built ahead of time by warm().
+_BLENDER_CONVERTERS = {FBX_MIME: fbx_to_glb, ABC_MIME: abc_to_glb}
+
+
+def converts_via_blender(mime: str) -> bool:
+    return mime in _BLENDER_CONVERTERS
+
+# Bump whenever a converter's output changes: it names the cache directory AND is the
+# `?v=` of the view URL (core/storage.build_view_url). The URL has to change because
+# the file is served `immutable` -- a browser never asks again, so a better GLB under
+# the same URL is never seen (the colourless Alembic grooms, 2026-11-22).
+VIEW_VERSION = 5
 
 _locks: dict[str, asyncio.Lock] = {}
 
 
 def _cache_path(key: str, suffix: str = ".glb") -> Path:
     name = hashlib.sha1(key.encode()).hexdigest()
+    # v5: grooms are translucent; v4: a colour per groom (older files are simply left unused).
     # v3: v2 held one shared file for every asset (a comment ate the rest of this
     # path); v1 had STL unrotated.
-    return Path(get_settings().cache_dir) / "mesh_views_v3" / name[:2] / f"{name}{suffix}"
+    return Path(get_settings().cache_dir) / f"mesh_views_v{VIEW_VERSION}" / name[:2] / f"{name}{suffix}"
 
 
 def _write(path: Path, data: bytes) -> None:
@@ -47,8 +63,8 @@ def _convert(key: str, data: bytes, mime: str, in_place: bool) -> None:
         if glb is not None:
             _write(_cache_path(key), glb)
             return
-    elif mime == FBX_MIME:
-        glb, info = fbx_to_glb(data, in_place=in_place)
+    elif mime in _BLENDER_CONVERTERS:
+        glb, info = _BLENDER_CONVERTERS[mime](data, in_place=in_place)
         _write(_cache_path(key, ".inplace.glb" if in_place else ".glb"), glb)
         if not in_place:
             _write(_cache_path(key, ".json"), json.dumps(info).encode())
@@ -60,7 +76,7 @@ async def mesh_view_path(key: str, read_original: Callable[[], bytes], mime: str
                          in_place: bool = False) -> Path:
     """The GLB for `key`; `in_place` is the same animation with the root's
     horizontal travel removed (only meaningful for FBX, ignored otherwise)."""
-    in_place = in_place and mime == FBX_MIME
+    in_place = in_place and mime == FBX_MIME  # root motion only means something for an FBX
     path = _cache_path(key, ".inplace.glb" if in_place else ".glb")
     if path.is_file():
         return path
@@ -75,7 +91,7 @@ async def mesh_view_path(key: str, read_original: Callable[[], bytes], mime: str
 async def mesh_view_info(key: str, read_original: Callable[[], bytes], mime: str) -> dict | None:
     """What the conversion learned about the file (FBX: clips, bones, root
     motion); None for a format that has nothing to report."""
-    if mime != FBX_MIME:
+    if not converts_via_blender(mime):
         return None
     await mesh_view_path(key, read_original, mime)
     info = json.loads(_cache_path(key, ".json").read_text())
@@ -104,7 +120,7 @@ def warm(key: str, read_original: Callable[[], bytes], mime: str) -> None:
     """Starts building the rendition in a background thread (once per file), so
     a format with no readable counts of its own (FBX) gets them, and the viewer
     opens at once. Returns immediately; the counts show on a later read."""
-    if mime != FBX_MIME or key in _warming or key in _failed or _cache_path(key).is_file():
+    if not converts_via_blender(mime) or key in _warming or key in _failed or _cache_path(key).is_file():
         return
     _warming.add(key)
 

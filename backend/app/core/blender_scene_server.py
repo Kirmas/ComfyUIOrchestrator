@@ -68,7 +68,7 @@ def _aux(obj):
 
 
 def import_file(path):
-    """Import a GLB/GLTF/FBX/OBJ/STL/PLY by extension; returns the new objects' names."""
+    """Import a GLB/GLTF/FBX/OBJ/STL/PLY/ABC by extension; returns the new objects' names."""
     before = {o.name for o in bpy.context.scene.objects}
     ext = os.path.splitext(path)[1].lower()
     if ext in (".glb", ".gltf"):
@@ -81,6 +81,9 @@ def import_file(path):
         bpy.ops.wm.stl_import(filepath=path)
     elif ext == ".ply":
         bpy.ops.wm.ply_import(filepath=path)
+    elif ext == ".abc":
+        # A cache: meshes (with a sequence-cache modifier), hair/fur as CURVES objects.
+        bpy.ops.wm.alembic_import(filepath=path, as_background_job=False, set_frame_range=True)
     else:
         raise ValueError(f"don't know how to import {ext!r}")
     return [o.name for o in bpy.context.scene.objects if o.name not in before]
@@ -101,7 +104,7 @@ def bbox(objs=None):
     dg = bpy.context.evaluated_depsgraph_get()
     pts = []
     for o in objs or objects():
-        if o.type not in ("MESH", "CURVE", "SURFACE", "FONT"):
+        if o.type not in ("MESH", "CURVE", "CURVES", "SURFACE", "FONT"):
             continue
         ev = o.evaluated_get(dg)
         pts.extend(ev.matrix_world @ Vector(c) for c in ev.bound_box)
@@ -803,20 +806,26 @@ def pose_report(focus=None, frame=None, contacts=True):
 
 
 def export_to(path, fmt="glb"):
-    """Export all content (not the helper camera/lights) as glb | fbx | obj."""
-    if not meshes():
-        raise RuntimeError("nothing to export: the scene has no mesh")
+    """Export all content (not the helper camera/lights) as glb | fbx | obj | stl | abc."""
+    if not meshes() and not any(o.type == "CURVES" for o in objects()):
+        raise RuntimeError("nothing to export: the scene has no mesh or hair")
     for o in bpy.context.scene.objects:
         o.select_set(not o.get(AUX))
     fmt = fmt.lower()
+    sc = bpy.context.scene
     if fmt == "glb":
         bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", use_selection=True, export_apply=True, export_animations=True)
     elif fmt == "fbx":
         bpy.ops.export_scene.fbx(filepath=path, use_selection=True, add_leaf_bones=False, bake_anim=True)
     elif fmt == "obj":
         bpy.ops.wm.obj_export(filepath=path, export_selected_objects=True, apply_modifiers=True)
+    elif fmt == "stl":
+        bpy.ops.wm.stl_export(filepath=path, export_selected_objects=True, apply_modifiers=True)
+    elif fmt == "abc":
+        # The scene's frame range, hair included -- an Alembic is a per-frame cache.
+        bpy.ops.wm.alembic_export(filepath=path, selected=True, start=sc.frame_start, end=sc.frame_end, export_hair=True)
     else:
-        raise ValueError("format must be glb, fbx or obj")
+        raise ValueError("format must be glb, fbx, obj, stl or abc")
     return path
 
 

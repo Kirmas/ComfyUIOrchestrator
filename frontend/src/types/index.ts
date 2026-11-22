@@ -930,5 +930,9 @@ export interface MeshViewInfo {
   has_mesh?: boolean;
   /** Every mesh the file holds (a file can carry several models). */
   meshes?: { name: string; vertices: number }[];
+  /** What each drawable part is (Alembic): a mesh, or a groom of `strands` strands of which `sent` were sent. */
+  parts?: { name: string; kind: string; strands?: number; sent?: number }[];
+  /** Alembic: the file is a per-frame cache and only `frame_start` is shown. */
+  source?: { format: string; frames: number; frame_start: number; frame_end: number; static_first_frame: boolean };
   root_motion?: boolean;
 }

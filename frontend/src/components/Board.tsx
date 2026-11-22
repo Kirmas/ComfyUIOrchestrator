@@ -370,7 +370,7 @@ export function Board({ projectId }: Props) {
           ref={fileInputRef}
           type="file"
           multiple
-          accept="image/*,audio/*,video/*,.glb,.stl,.fbx,model/gltf-binary"
+          accept="image/*,audio/*,video/*,.glb,.stl,.fbx,.abc,model/gltf-binary"
           style={{ display: "none" }}
           onChange={(e) => {
             if (e.target.files) void uploadFiles(e.target.files);

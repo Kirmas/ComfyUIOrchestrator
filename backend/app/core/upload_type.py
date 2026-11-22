@@ -21,6 +21,7 @@ family wins over that guess (an audio-only .webm declared audio/webm stays
 audio), so the guess only decides when the client said nothing useful.
 """
 
+from app.core.abc_convert import ABC_MIME, is_abc
 from app.core.fbx_convert import FBX_MIME, is_fbx
 from app.core.stl_convert import STL_MIME, stl_triangle_count
 from app.db.models import AssetKind
@@ -53,6 +54,7 @@ _EXTENSIONS = {
     "model/gltf-binary": ".glb",
     STL_MIME: ".stl",
     FBX_MIME: ".fbx",
+    ABC_MIME: ".abc",
     "video/mp4": ".mp4",
     "video/quicktime": ".mov",
     "video/webm": ".webm",
@@ -72,6 +74,8 @@ def sniff_mime(data: bytes) -> str | None:
         return STL_MIME
     if is_fbx(data):
         return FBX_MIME
+    if is_abc(data):
+        return ABC_MIME
     for signature, mime in _SIGNATURES:
         if data.startswith(signature):
             return mime
@@ -109,7 +113,7 @@ def resolve_upload(data: bytes, declared_mime: str | None) -> tuple[str, AssetKi
         declared_family = declared_mime.split("/", 1)[0]
         if declared_family in ("audio", "video") and declared_family != sniffed.split("/", 1)[0]:
             mime_type = declared_mime
-    if mime_type in ("model/gltf-binary", STL_MIME, FBX_MIME):
+    if mime_type in ("model/gltf-binary", STL_MIME, FBX_MIME, ABC_MIME):
         return mime_type, AssetKind.mesh
     return mime_type, AssetKind.for_mime(mime_type)
 

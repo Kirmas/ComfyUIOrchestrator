@@ -1064,7 +1064,7 @@ function BaseAssetNodeView({
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*,video/*,audio/*,.glb,.gltf,.stl,.fbx"
+        accept="image/*,video/*,audio/*,.glb,.gltf,.stl,.fbx,.abc"
         multiple
         style={{ display: "none" }}
         onChange={(e) => {

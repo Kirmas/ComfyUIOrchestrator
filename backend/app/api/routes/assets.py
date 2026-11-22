@@ -9,13 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import asset_response
 from app.core.asset_preview import fit_rendition, svg_preview
-from app.core.mesh_view import MESH_FORMAT_BY_MIME, mesh_view_info, mesh_view_path, view_counts, warm
+from app.core.mesh_view import MESH_FORMAT_BY_MIME, converts_via_blender, mesh_view_info, mesh_view_path, view_counts, warm
 from app.core.storage import build_asset_url, build_fit_url, build_preview_url, build_view_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Dashboard, Node, NodeKind, NodeStatus, Track
 from app.mcp.client import AGENT_ACTOR_HEADER
 from app.schemas.schemas import AssetFrontUpdate, AssetMoveUpdate, AssetNameUpdate, AssetRead, AssetSelectUpdate
-from app.core.fbx_convert import FBX_MIME
 from app.core.upload_type import resolve_upload
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
@@ -41,7 +40,7 @@ def to_asset_read(asset: Asset) -> AssetRead:
     if asset.kind == AssetKind.mesh:
         storage = get_storage()
         counts = storage.mesh_counts(asset.storage_key)
-        if not counts and asset.mime_type == FBX_MIME:
+        if not counts and converts_via_blender(asset.mime_type):
             # No counts of its own: take them off the converted rendition, and
             # start building it now if it isn't there yet.
             counts = view_counts(asset.storage_key)

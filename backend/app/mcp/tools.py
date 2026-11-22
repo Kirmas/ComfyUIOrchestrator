@@ -1430,11 +1430,12 @@ async def scene_info(scene_id: str) -> dict:
 @mcp_server.tool()
 async def scene_export(scene_id: str, format: str = "glb", name: str = "") -> dict:
     """Take the result out: exports everything in the scene (not the helper
-    camera/lights; modifiers applied; animation included) as glb, fbx or obj
+    camera/lights; modifiers applied; animation included) as glb, fbx, obj, stl or abc
     and stores it as a new library asset. Returns the asset (its `id` is the
     asset_id). Put it in the grid with place_reference_asset(track_id,
-    step_index, asset_id) -- GLB shows in the 3D viewer, FBX/OBJ are files to
-    download. The scene stays open; destroy it when you're done."""
+    step_index, asset_id) -- GLB, STL, FBX and ABC all show in the 3D viewer (the
+    last two through a converted copy), OBJ is a file to download. Hair/fur
+    (curves) survives ONLY in abc: glb/fbx/stl/obj keep the meshes and drop it. The scene stays open; destroy it when you're done."""
     return await _post(f"/api/scenes/{scene_id}/export", {"format": format, "name": name or None})
 
 

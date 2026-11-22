@@ -4505,3 +4505,24 @@ button.scene-danger { color: var(--danger); border-color: var(--danger); }
   min-width: 90px;
   max-width: 260px;
 }
+
+/* The hair slider's label changes length with every value; without a fixed width the
+   toolbar re-wraps while dragging and the slider jumps to the next line. */
+.mesh-hair {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.mesh-hair-text {
+  display: inline-block;
+  min-width: 19ch;
+  font-variant-numeric: tabular-nums;
+}
+
+.mesh-hair .mesh-anim-slider {
+  width: 160px;
+  flex: 0 0 160px;
+}

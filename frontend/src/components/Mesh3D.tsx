@@ -71,7 +71,7 @@ export function useModelViewerReady(): boolean {
 /** "12 345 vertices · 24 690 triangles", or null when the file's counts are
  * unknown (not a GLB, or nothing readable in it). */
 function meshStats(asset: Asset, t: TFunc): string | null {
-  if (asset.triangle_count == null) return null;
+  if (asset.triangle_count == null || asset.triangle_count === 0) return null;
   const format = (asset.mesh_format ?? "glb").toUpperCase();
   // A format with no shared vertices (STL) reports triangles only.
   const counts =
@@ -88,7 +88,15 @@ function meshStats(asset: Asset, t: TFunc): string | null {
  * was oriented Z-up -> Y-up, so stills captured from the old (top-down) view
  * are not reused. */
 function stillKey(asset: Asset, front: number[] | null): string {
-  const base = asset.mesh_format && asset.mesh_format !== "glb" ? `${asset.id}#y-up3` : asset.id;
+  // A converted format's still depends on the converter's output, whose version is the
+  // `v=` of its view URL (an Alembic groom's also on how many strands are drawn).
+  const converted = asset.mesh_format && asset.mesh_format !== "glb";
+  const version = /[?&]v=(\d+)/.exec(asset.view_url ?? "")?.[1] ?? "0";
+  const base = !converted
+    ? asset.id
+    : asset.mesh_format === "abc"
+      ? `${asset.id}#abc-h${HAIR_DEFAULT_PCT}-v${version}`
+      : `${asset.id}#y-up3-v${version}`;
   // A person-chosen front is part of the picture, so it is part of the key.
   return front ? `${base}@${front.map((v) => v.toFixed(3)).join(",")}` : base;
 }
@@ -179,6 +187,11 @@ export function MeshThumb({
         // canvas shared by every element. Capturing at once got whatever that
         // canvas last held (every thumbnail came out the same), so let two
         // frames pass first.
+        const model = threeSceneOf(viewer);
+        if (model) {
+          applyHairRange(model, HAIR_DEFAULT_PCT); // all the strands sent would paint a solid silhouette
+          viewer.jumpCameraToGoal();
+        }
         await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
         if (!alive) return;
         const dataUrl = viewer.toDataURL("image/webp", 0.9);
@@ -322,6 +335,22 @@ function applyShading(model: Object3D, normal: MeshNormalMaterial, wireframe: bo
   });
 }
 
+/** Share of a groom's strands drawn until the person moves the slider. */
+const HAIR_DEFAULT_PCT = 5;
+
+/** Draws only the first `pct`% of every groom's strands. The file orders them so any
+ * prefix is an even sample of the head (core/blender_abc_to_glb.py), and each
+ * groom's line primitive says so in its glTF extras: the draw range is all it takes. */
+function applyHairRange(model: Object3D, pct: number) {
+  model.traverse((obj) => {
+    const { strands, strand_points: per, total_strands: total } = (obj.userData ?? {}) as Record<string, number>;
+    const geometry = (obj as { geometry?: { setDrawRange(start: number, count: number): void } }).geometry;
+    if (!strands || !per || !total || !geometry) return;
+    const k = Math.min(strands, Math.max(1, Math.round((total * pct) / 100)));
+    geometry.setDrawRange(0, k * (per - 1) * 2);
+  });
+}
+
 /** three.js's loader strips spaces/dots from node names; the names from the file
  * are cleaned the same way to find their nodes. */
 const threeName = (n: string) => n.replace(/\s/g, "_").replace(/[[\].:/]/g, "");
@@ -356,10 +385,13 @@ function useMeshAnimation(
   const [clipName, setClipName] = useState<string | null>(null);
   const [inPlace, setInPlace] = useState(false);
   const [part, setPart] = useState<string>("all");
+  const [hairPct, setHairPct] = useState(HAIR_DEFAULT_PCT);
   const [paused, setPaused] = useState(false);
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const wantsInfo = asset.mesh_format === "fbx";
+  // Formats a background Blender converts report what they found (FBX: clips,
+  // bones, meshes; Alembic: grooms, frames). GLB and STL have nothing to report.
+  const wantsInfo = asset.mesh_format === "fbx" || asset.mesh_format === "abc";
 
   useEffect(() => {
     if (!wantsInfo) return;
@@ -417,7 +449,7 @@ function useMeshAnimation(
   };
 
   return {
-    info, part, setPart, clips, clip, setClip: setClipName, inPlace, setInPlace, src, paused, time, duration, toggle, seek,
+    info, part, setPart, hairPct, setHairPct, clips, clip, setClip: setClipName, inPlace, setInPlace, src, paused, time, duration, toggle, seek,
     hasClips: clips.length > 0,
   };
 }
@@ -434,6 +466,11 @@ function MeshAnimationBar({ anim }: { anim: ReturnType<typeof useMeshAnimation> 
   const t = useT();
   const { info } = anim;
   if (!info) return null;
+  const grooms = (info.parts ?? []).filter((p) => p.kind === "curves");
+  const hairTotal = grooms.reduce((n, p) => n + (p.strands ?? 0), 0);
+  const hairSent = grooms.reduce((n, p) => n + (p.sent ?? 0), 0);
+  // The slider tops out at what was sent: the server keeps an evenly spread subset.
+  const hairMaxPct = hairTotal ? Math.max(1, Math.floor((hairSent / hairTotal) * 100)) : 1;
   return (
     <>
       {(info.meshes?.length ?? 0) > 1 && (
@@ -446,7 +483,28 @@ function MeshAnimationBar({ anim }: { anim: ReturnType<typeof useMeshAnimation> 
           ))}
         </select>
       )}
-      {info.has_mesh === false && <span className="mesh-viewer-stats">{t("mesh.skeletonOnly")}</span>}
+      {info.source?.static_first_frame && (
+        <span className="mesh-viewer-stats">
+          {t("mesh.abcFrame", { frame: info.source.frame_start, frames: info.source.frames })}
+        </span>
+      )}
+      {hairTotal > 0 && (
+        <label className="mesh-tool mesh-hair" title={t("mesh.hairHint")}>
+          <span className="mesh-hair-text">
+            {t("mesh.hair", { pct: anim.hairPct, n: Math.min(hairSent, Math.round((hairTotal * anim.hairPct) / 100)).toLocaleString() })}
+          </span>
+          <input
+            type="range"
+            className="mesh-anim-slider"
+            min={1}
+            max={hairMaxPct}
+            step={1}
+            value={Math.min(anim.hairPct, hairMaxPct)}
+            onChange={(e) => anim.setHairPct(Number(e.target.value))}
+          />
+        </label>
+      )}
+      {info.has_mesh === false && (info.bones ?? 0) > 0 && <span className="mesh-viewer-stats">{t("mesh.skeletonOnly")}</span>}
       {anim.hasClips && (
         <>
           <button type="button" className="mesh-tool" onClick={anim.toggle}>
@@ -602,6 +660,16 @@ export function MeshViewer({ url, asset }: { url: string; asset: Asset }) {
       }
     };
   }, [loaded, bones, anim.src, anim.part]);
+
+  // A groom is drawn with only its first k strands (the file orders them so any
+  // prefix is an even sample of the head): the draw range does it, no reload.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const model = viewer ? threeSceneOf(viewer) : null;
+    if (!loaded || !viewer || !model || !anim.info?.parts?.some((p) => p.kind === "curves")) return;
+    applyHairRange(model, anim.hairPct);
+    viewer.jumpCameraToGoal();
+  }, [loaded, anim.hairPct, anim.info, anim.part]);
 
   // Which of the file's meshes is shown.
   useEffect(() => {

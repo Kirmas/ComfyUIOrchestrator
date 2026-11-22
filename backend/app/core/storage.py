@@ -148,7 +148,9 @@ def build_asset_url(asset_id: uuid.UUID | str) -> str:
 def build_view_url(asset_id: uuid.UUID | str) -> str:
     """GET /api/assets/{id}/view: a mesh in a format the 3D viewer can load
     (a GLB), whatever format the original is stored in."""
-    return f"/api/assets/{asset_id}/view?v=3&token={get_settings().api_token}"
+    from app.core.mesh_view import VIEW_VERSION  # imported here: mesh_view pulls in the converters
+
+    return f"/api/assets/{asset_id}/view?v={VIEW_VERSION}&token={get_settings().api_token}"
 
 
 def build_fit_url(asset_id: uuid.UUID | str) -> str:

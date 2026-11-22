@@ -51,10 +51,12 @@ _ID_RE = re.compile(r"^[0-9a-f]{12}$")
 _GPU_ERROR = re.compile(r"GPU|Vulkan|OpenGL|EGL|GHOST|no display", re.I)
 _MIME_EXT = {
     "model/gltf-binary": ".glb", "model/stl": ".stl", "model/gltf+json": ".gltf", "image/png": ".png", "image/jpeg": ".jpg",
-    "image/webp": ".webp", "model/obj": ".obj", "model/stl": ".stl", "model/fbx": ".fbx",
+    "image/webp": ".webp", "model/obj": ".obj", "model/stl": ".stl", "model/fbx": ".fbx", "model/alembic": ".abc",
 }
-_IMPORTABLE = {".glb", ".gltf", ".fbx", ".obj", ".stl", ".ply"}
-EXPORT_FORMATS = {"glb": "model/gltf-binary", "fbx": "application/octet-stream", "obj": "model/obj"}
+_IMPORTABLE = {".glb", ".gltf", ".fbx", ".obj", ".stl", ".ply", ".abc"}
+# Everything the app can show (glb, stl, fbx, abc) plus obj. The upload route decides the
+# stored type from the bytes anyway; these are only the declared types.
+EXPORT_FORMATS = {"glb": "model/gltf-binary", "fbx": "model/fbx", "obj": "model/obj", "stl": "model/stl", "abc": "model/alembic"}
 
 
 class SceneError(Exception):
@@ -648,7 +650,7 @@ class SceneManager:
         """(bytes, mime, extension) of everything in the scene."""
         fmt = (fmt or "glb").lower()
         if fmt not in EXPORT_FORMATS:
-            raise SceneError("format must be glb, fbx or obj")
+            raise SceneError("format must be glb, fbx, obj, stl or abc")
         async with self._lock(scene_id):
             meta = self._load(scene_id)
             await self._ensure_running(meta)
