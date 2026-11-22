@@ -205,6 +205,14 @@ look at the result between them.
   scene because `GET /{id}/info` *reopens* it (it asks the live Blender).
   Verified without a browser (none can run on this box: no libnss3) by
   server-rendering the components with real API data in both languages.
+## Hair for Unreal: the Groom Exporter add-on (`backend/app/blender_addons/`)
+
+`scene_export(format="groom")` writes hair as an **Unreal Groom** `.abc` (strands + guides + root UVs + `groom_*` attributes) through the third-party *Groom Exporter* add-on (Turbocheke, paid; `GroomExporter_v0.2.0_patched.zip` with our fixes, instructions in the person's `GroomExporter_Guide.md`). Blender's own `abc` export drops all of that -- so plain `abc` is a viewing cache, `groom` is what Unreal gets. Pieces:
+- The add-on dir and its **Linux PyAlembic** (the zip only has Windows `.pyd`) are **gitignored** (paid code, 55 MB) but `deploy.sh` copies them with the rest of `backend/app/`. A fresh box rebuilds the libs with `scripts/build_pyalembic.sh` (~15 min, no sudo) and re-extracts the add-on's `.py` files from the zip into `blender_addons/GroomExporter/`. `groom_precheck.py` (the guide's section 9 script, made importable) is in git.
+- Loaded lazily by `blender_scene_server.py` (`_groom()`), never at Blender start. `groom_check()` runs the guide's pre-export checks; `export_to(fmt="groom")` **refuses** an unclean groom with the reasons (1-point curves crash UE) and fills the add-on's attribute mapping from the default names (section 4) first. Unit scale -> the Groom scale multiplier automatically (metres -> 100).
+- **Traps found, don't undo:** Blender ships its own `libImath`; a second copy with the same symbols **crashes Blender at dlopen**, so ours is built in its own namespace/name (`Imath_Groom`/`libImathGroom`). Boost 1.86's numpy bindings don't compile against numpy 2 (one-line patch in the build script). The add-on reads its attribute mapping from the *evaluated* object, whose copy of the property group stays stale until the original gets `update_tag()` -- without it a valid groom exported with no `groom_*` attributes at all and no error.
+- Test: `scripts/groom_export_test.py http://127.0.0.1:8011 dev-local-token` (builds a groom in a live scene, exports, reads the `.abc` back with the same PyAlembic, checks the refusal path).
+
 ## FBX meshes (`core/fbx_convert.py`, `core/blender_fbx_to_glb.py`, `core/mesh_view.py`)
 
 An FBX is stored untouched (`kind=mesh`, mime `model/fbx`, found by signature) and shown through a GLB that a background Blender converts once and `mesh_view` caches (`/view`, `/view?in_place=true`, `/view-info`). Blender's importer applies the file's units/axes; the glTF exporter writes metres/Y-up -- no user choice, by design. Kept: mesh, skeleton, skinning, materials, every clip (each action stacked as an NLA track). A file with a skeleton but no mesh gets thin skinned "sticks" along the bones. `in_place` flattens the root's *horizontal* location curves (horizontal judged from the bone's own rest orientation, not assumed x/y). A clip of one frame is a pose, not an animation (the viewer ignores it). A file may hold several models (the "cat" had two overlapping meshes + armatures): `view-info.meshes` feeds a dropdown that only hides nodes. Vertex counts come from the converted GLB, built in a background thread by `warm()` when a list read finds none. Pitfalls found: a new `BMVert.index` is -1 until `index_update()`; bones of an imported skeleton-only file are non-deforming and the exporter then drops the skin. No FBX export, no ABC, no retargeting (decided).
@@ -214,6 +222,40 @@ An FBX is stored untouched (`kind=mesh`, mime `model/fbx`, found by signature) a
 `.abc` (modern Ogawa container only, by signature; mime `model/alembic`) is stored untouched and viewed through a GLB from a background Blender, same pattern as FBX (`core/blender_convert.py` is the shared runner). It is a per-frame cache with no rig/materials; V1 shows the FIRST frame only. Meshes -> triangles, loose verts -> points, **hair (Blender `CURVES`) -> one LINES primitive per groom, written by our own `glb_writer.py`** because Blender's glTF exporter drops curves. Grooms are thinned for display: strands resampled to the same point count, ordered so ANY PREFIX is an even spatial sample (Morton order of the roots, then bit-reversed -- measured better than random, and far better than "first N in file order", which bald one side), and the primitive's glTF `extras` carry `{strands, strand_points, total_strands}`: the viewer's hair slider just sets the draw range (`applyHairRange`, `Mesh3D.tsx`), no reload. Only 25% (max 60k) of a big groom is sent. Strands are drawn **translucent** (alpha 0.2, `alphaMode BLEND`) with one colour per groom: opaque 1-px lines overlapped into a solid silhouette even at 2%. The two real groom files tested (93k strands, 250 frames declared) turned out to be **static** (file size = one sample; Blender sees zero movement), so animation was not built. Hair width (`radius`, 0..0.0055 in scene units) is ignored: it is far below a pixel; ribbons would cost ~3.5x the line data and look wrong edge-on.
 
 **Cache gotcha (2026-11-22):** `/view` is served `Cache-Control: immutable`, so a changed converter's output under the same URL is never fetched by a browser that already has the old one (the groom stayed one flat colour). `mesh_view.VIEW_VERSION` names the cache dir AND is the `?v=` of the view URL; **bump it whenever a converter's output changes**. The frontend's thumbnail-still key includes it too. Blender scenes open and export every shown format (glb, fbx, stl, abc; obj export-only): hair survives only an `abc` export.
+
+## Unreal / Blender bridge (`core/bridge.py`, `routes/bridge.py`, `app/bridge_plugins/`)
+
+Two-way link to the DCC apps on the person's PC. The plugins dial **out** over
+`WS /api/bridge/device/ws` (the PC opens no port); the socket carries only JSON
+commands, files go over HTTP. **No queue, by the person's choice**: sending to
+an app that isn't connected is a 409, never a job waiting for Unreal to open,
+so all live state is the in-memory set of sockets. **Plugins never hold the
+site's API_TOKEN** (the person rejected copying it as insecure): "Connect" in
+the plugin makes an unauthenticated pairing request (in memory, 10 min, max 5
+pending), the person approves it on the Settings page after checking the same
+code shows in the app, and the plugin's poll receives its own **device key
+exactly once** (`bridge_devices`, migration 0035, SHA-256 only; fixed 30-day
+lifetime, then re-approve -- the person's call; revoke = delete row + drop its
+socket). `core/auth.py` lets `/api/bridge/device/*` through and each route
+checks the device key itself; a device key opens nothing else, and its file
+download serves only assets that were sent to that device. Plugins reconnect
+by themselves only with a key in hand -- a pairing request is always by hand,
+and a 4401 close (expired/revoked) stops retrying. Orchestrator -> app: the
+⇪ button in `FullSizeModal` (`BridgeSend.tsx`); Unreal imports into
+`/Game/Orchestrator/<project>/`, Blender into the open scene at the 3D cursor,
+and a re-send replaces in place (Blender keeps the moved transform). App ->
+orchestrator: `POST /api/bridge/device/upload` makes a **library** asset
+(`create_library_asset`, shared with the board upload) and optionally a
+refasset on a new row at the bottom of the chosen graph, through the real
+`/api/tracks` + `/api/nodes` routes with `get_client(agent=False)` -- the
+person's cell, not an agent's. The plugins live in `app/bridge_plugins/` so a
+deploy ships them and `GET /api/bridge/plugins/{blender|unreal}.zip` serves the
+deployed version (Settings page links). Blender add-on: stdlib-only (own
+minimal WebSocket client), extension format, tested headless
+(`scripts/bridge_blender_test.py`; timers don't run headless, the test pumps
+the queue; never `read_factory_settings` in it -- that disables the add-on).
+Unreal plugin: **C++, UE 5.8, cannot be compiled on this box** -- the person
+builds it; compile errors come back by hand. Server: `scripts/bridge_smoke_test.py`.
 
 ## Agent task node (`native.agent_task`, `backend/app/core/agent_task.py`)
 

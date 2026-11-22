@@ -174,7 +174,7 @@ const IMAGE_MAX_BYTES = 3.5 * 1024 * 1024;
 type Attachment = AgentImageUpload & { preview: string };
 type FileAttachment = AgentFileUpload & { size: number };
 
-const FILE_MAX_BYTES = 100 * 1024 * 1024;
+const FILE_MAX_BYTES = 500 * 1024 * 1024;
 
 function readFileAttachment(file: File): Promise<FileAttachment> {
   return new Promise((ok, fail) => {

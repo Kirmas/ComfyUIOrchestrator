@@ -875,6 +875,45 @@ export interface SceneInputInfo {
   note?: string;
 }
 
+/** An Unreal/Blender editor connected over the bridge (routes/bridge.py). */
+export interface BridgeClient {
+  id: string;
+  device_id: string;
+  app: "unreal" | "blender";
+  name: string;
+  version: string;
+  connected_at: string;
+  busy: number;
+}
+
+/** An app the person approved (routes/bridge.py BridgeDevice). */
+export interface BridgeDevice {
+  id: string;
+  app: "unreal" | "blender";
+  name: string;
+  created_at: string | null;
+  expires_at: string;
+  last_seen_at: string | null;
+  online: boolean;
+}
+
+/** A plugin asking to pair; `code` is also shown in the app itself. */
+export interface BridgePairRequest {
+  id: string;
+  app: "unreal" | "blender";
+  name: string;
+  code: string;
+  remote: string;
+  created_at: string;
+}
+
+export interface BridgeSendResult {
+  client: BridgeClient;
+  ok: boolean;
+  pending?: boolean;
+  message: string;
+}
+
 export interface SceneSummary {
   id: string;
   name: string;

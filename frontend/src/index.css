@@ -808,6 +808,109 @@ input, select, textarea {
   z-index: 10;
 }
 
+/* Send to Unreal / Blender (BridgeSend.tsx), just left of the close button. */
+.bridge-send {
+  position: absolute;
+  top: 10px;
+  right: 50px;
+  z-index: 10;
+}
+
+.bridge-send-toggle {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.75);
+  color: white;
+  border: none;
+  font-size: 16px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+}
+
+.bridge-send-menu {
+  position: absolute;
+  top: 38px;
+  right: 0;
+  min-width: 230px;
+  max-width: min(320px, 80vw);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border, #444);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+.bridge-send-title {
+  font-weight: bold;
+  font-size: 13px;
+}
+
+.bridge-send-note {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.bridge-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border, #333);
+  font-size: 13px;
+}
+
+.bridge-row-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.bridge-pair-requests {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--accent, #4a8);
+  border-radius: 8px;
+}
+
+.bridge-pair-requests h3 {
+  margin: 0 0 4px;
+}
+
+.bridge-code {
+  font-family: monospace;
+  font-size: 15px;
+  font-weight: bold;
+  letter-spacing: 1px;
+}
+
+.bridge-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  background: #777;
+}
+
+.bridge-dot.online {
+  background: #4c4;
+}
+
+.button-link {
+  display: inline-block;
+  padding: 6px 10px;
+  border: 1px solid var(--border, #444);
+  border-radius: 6px;
+  text-decoration: none;
+  color: inherit;
+}
+
 .image-modal-close:hover {
   background: rgba(0, 0, 0, 0.9);
 }
@@ -2112,7 +2215,8 @@ th, td {
   position: absolute;
   top: 8px;
   left: 8px;
-  right: 52px;
+  /* clear of the close (x) and send-to-app (BridgeSend.tsx) buttons */
+  right: 92px;
   z-index: 2;
   display: flex;
   flex-wrap: wrap;

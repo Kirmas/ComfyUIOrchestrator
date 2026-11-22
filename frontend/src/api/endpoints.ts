@@ -17,6 +17,10 @@ import type {
   CapabilityModels,
   Board,
   BoardItem,
+  BridgeClient,
+  BridgeDevice,
+  BridgePairRequest,
+  BridgeSendResult,
   BoardItemKind,
   Capability,
   Dashboard,
@@ -488,6 +492,19 @@ export const pushApi = {
   vapidPublicKey: () => api.get<{ key: string }>("/api/push/vapid-public-key"),
   subscribe: (subscription: PushSubscriptionJSON) => api.post<void>("/api/push/subscribe", subscription),
   unsubscribe: (endpoint: string) => api.post<void>("/api/push/unsubscribe", { endpoint }),
+};
+
+export const bridgeApi = {
+  clients: () => api.get<BridgeClient[]>("/api/bridge/clients"),
+  send: (assetId: string, clientId: string) =>
+    api.post<BridgeSendResult>("/api/bridge/send", { asset_id: assetId, client_id: clientId }),
+  pairing: () => api.get<BridgePairRequest[]>("/api/bridge/pairing"),
+  approve: (id: string) => api.post<BridgeDevice>(`/api/bridge/pairing/${id}/approve`),
+  deny: (id: string) => api.post<void>(`/api/bridge/pairing/${id}/deny`),
+  devices: () => api.get<BridgeDevice[]>("/api/bridge/devices"),
+  revoke: (id: string) => api.delete(`/api/bridge/devices/${id}`),
+  pluginUrl: (app: "blender" | "unreal") =>
+    `${getApiBaseUrl()}/api/bridge/plugins/${app}.zip?token=${encodeURIComponent(getApiToken())}`,
 };
 
 export const scenesApi = {

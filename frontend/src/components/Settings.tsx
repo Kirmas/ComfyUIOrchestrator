@@ -1,3 +1,4 @@
+import { BridgeSection } from "./BridgeSend";
 import { useEffect, useRef, useState } from "react";
 import { assetsApi, backendsApi, capabilitiesApi, nodeTemplatesApi, projectsApi, systemApi } from "../api/endpoints";
 import { NodeTypeDescription } from "./NodeTypeDescription";
@@ -1491,6 +1492,7 @@ export function Settings() {
       {loadError && <div className="error-text">{loadError}</div>}
       <LanguageSection />
       <NotificationsSection />
+      <BridgeSection />
       <StorageSection />
       <BackendsSection items={backends} reload={reloadBackends} />
       <NodeTypesSection

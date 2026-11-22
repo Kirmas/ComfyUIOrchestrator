@@ -817,3 +817,23 @@ class VapidKeypair(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     private_key_b64: Mapped[str] = mapped_column(Text)
     public_key_b64: Mapped[str] = mapped_column(Text)
+
+
+class BridgeDevice(Base):
+    """An Unreal/Blender editor the person approved on the Settings page
+    (routes/bridge.py). Its key is the only credential a plugin ever holds --
+    never the site's own API_TOKEN -- and it only opens the plugin-facing
+    `/api/bridge/device/*` routes. Only a SHA-256 of the key is stored; the key
+    itself is handed out once, at approval. Fixed lifetime (expires_at, a month,
+    the person's call), then the device has to be approved again. Revoking =
+    deleting the row."""
+
+    __tablename__ = "bridge_devices"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    app: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

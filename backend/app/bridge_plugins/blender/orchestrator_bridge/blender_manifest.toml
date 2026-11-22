@@ -1,0 +1,15 @@
+schema_version = "1.0.0"
+
+id = "orchestrator_bridge"
+version = "1.0.6"
+name = "ComfyUI Orchestrator Bridge"
+tagline = "Send assets between ComfyUI Orchestrator and Blender"
+maintainer = "ComfyUI Orchestrator"
+type = "add-on"
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+tags = ["Import-Export"]
+
+[permissions]
+network = "Connects to your ComfyUI Orchestrator server"
+files = "Stores imported assets and temporary exports"

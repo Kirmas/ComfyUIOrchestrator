@@ -229,16 +229,22 @@ async def upload_project_asset(project_id: uuid.UUID, file: UploadFile, db: Asyn
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
+    asset = await create_library_asset(db, project_id, await file.read(), file.content_type, file.filename)
+    return to_asset_read(asset)
 
-    data = await file.read()
-    mime_type, kind = resolve_upload(data, file.content_type)
+
+async def create_library_asset(db: AsyncSession, project_id: uuid.UUID, data: bytes, content_type: str | None,
+                               filename: str | None, meta: dict | None = None) -> Asset:
+    """One project-library asset from raw bytes (committed). Shared by the
+    page's upload and the Unreal/Blender bridge (routes/bridge.py)."""
+    mime_type, kind = resolve_upload(data, content_type)
     key = await get_storage().put_object(data, mime_type, prefix=f"projects/{project_id}", kind=kind)
-    asset = Asset(project_id=project_id, storage_key=key, mime_type=mime_type, kind=kind, selected=False, tags=[], meta={}, name=upload_name(file.filename))
+    asset = Asset(project_id=project_id, storage_key=key, mime_type=mime_type, kind=kind, selected=False, tags=[],
+                  meta=meta or {}, name=upload_name(filename))
     db.add(asset)
     await db.commit()
     await db.refresh(asset)
-    read = to_asset_read(asset)
-    return read
+    return asset
 
 
 # ---------- bridge 2: idea text -> prompt ----------

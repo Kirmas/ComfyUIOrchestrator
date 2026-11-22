@@ -1435,7 +1435,16 @@ async def scene_export(scene_id: str, format: str = "glb", name: str = "") -> di
     asset_id). Put it in the grid with place_reference_asset(track_id,
     step_index, asset_id) -- GLB, STL, FBX and ABC all show in the 3D viewer (the
     last two through a converted copy), OBJ is a file to download. Hair/fur
-    (curves) survives ONLY in abc: glb/fbx/stl/obj keep the meshes and drop it. The scene stays open; destroy it when you're done."""
+    (curves) survives ONLY in abc: glb/fbx/stl/obj keep the meshes and drop it.
+    **format="groom" = the hair as an Unreal Groom** (.abc with the groom_* attributes
+    Unreal reads: root UVs, guides, strand->guide weights, width, colour), written by the
+    Groom Exporter add-on; plain "abc" is Blender's own export and Unreal can't use its hair.
+    The add-on wants, per Curves object: surface_uv_coordinate (CURVE, FLOAT2), groom_is_guide
+    + groom_guide_id (CURVE, INT; guides ids 0..G-1), groom_guide_closest (CURVE, FLOAT_COLOR,
+    R,G,B = 3 guide ids) and groom_guide_weights (CURVE, FLOAT_VECTOR), radius (POINT) and
+    optionally color/roughness/groom_AO, Rotation 0 / Scale 1 and the object parented to the
+    scalp. Run `groom_check()` inside scene_run first: it lists what is missing or wrong and
+    the export refuses until it is clean. The scene stays open; destroy it when you're done."""
     return await _post(f"/api/scenes/{scene_id}/export", {"format": format, "name": name or None})
 
 

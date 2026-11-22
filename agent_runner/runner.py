@@ -1189,7 +1189,7 @@ def decode_images(raw) -> list[tuple[str, bytes]] | str:
 
 
 MAX_FILES = 10
-MAX_FILE_BYTES = 100 * 1024 * 1024
+MAX_FILE_BYTES = 500 * 1024 * 1024
 
 
 def decode_files(raw) -> list[tuple[str, bytes]] | str:

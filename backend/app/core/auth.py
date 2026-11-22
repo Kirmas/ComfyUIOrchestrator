@@ -4,6 +4,10 @@ from fastapi.responses import JSONResponse
 from app.config import get_settings
 
 PUBLIC_PATHS = {"/api/health"}
+# The Unreal/Blender plugins never hold API_TOKEN: every route under this
+# prefix checks a per-device key itself (routes/bridge.py `_device`), except
+# the two pairing calls, which are how a device gets a key in the first place.
+DEVICE_PREFIX = "/api/bridge/device/"
 
 
 async def auth_middleware(request: Request, call_next):
@@ -14,7 +18,7 @@ async def auth_middleware(request: Request, call_next):
     # any device on the LAN full node-creation and generation control.
     if not path.startswith("/api/") and not path.startswith("/ws/") and not path.startswith("/mcp"):
         return await call_next(request)
-    if path in PUBLIC_PATHS:
+    if path in PUBLIC_PATHS or path.startswith(DEVICE_PREFIX):
         return await call_next(request)
 
     token = _extract_token(request.headers.get("authorization"), request.query_params.get("token"))

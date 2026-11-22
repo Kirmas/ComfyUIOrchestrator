@@ -56,7 +56,8 @@ _MIME_EXT = {
 _IMPORTABLE = {".glb", ".gltf", ".fbx", ".obj", ".stl", ".ply", ".abc"}
 # Everything the app can show (glb, stl, fbx, abc) plus obj. The upload route decides the
 # stored type from the bytes anyway; these are only the declared types.
-EXPORT_FORMATS = {"glb": "model/gltf-binary", "fbx": "model/fbx", "obj": "model/obj", "stl": "model/stl", "abc": "model/alembic"}
+EXPORT_FORMATS = {"glb": "model/gltf-binary", "fbx": "model/fbx", "obj": "model/obj", "stl": "model/stl", "abc": "model/alembic",
+                  "groom": "model/alembic"}  # groom = hair as an Unreal Groom .abc (Groom Exporter add-on)
 
 
 class SceneError(Exception):
@@ -110,7 +111,10 @@ Predefined names:
   verts_under_mask(mask_png, obj)  vertex indices a person painted (white) on a render
   grow(obj, idx, hops)            widen a vertex selection by edges
   falloff(obj, idx, radius, power) per-vertex weights 1..0 around a selection
-  export_to(path, fmt)            glb | fbx | obj (scene_export does this for you)
+  export_to(path, fmt)            glb | fbx | obj | stl | abc | groom (scene_export does this for you)
+  groom_check(names=None)         HAIR for Unreal: pre-export check of the Curves objects (attributes,
+                                  guides, 1-point curves ...) -> [{object, ok, info, issues}]
+  groom_export(path, scale=None)  Unreal Groom .abc via the Groom Exporter add-on (= scene_export format="groom")
 Posing (rigs):
   pose_report(focus=None, frame=None)  the pose in words and cm (= scene_pose tool)
   hands()                         bone names that look like hands
@@ -650,7 +654,7 @@ class SceneManager:
         """(bytes, mime, extension) of everything in the scene."""
         fmt = (fmt or "glb").lower()
         if fmt not in EXPORT_FORMATS:
-            raise SceneError("format must be glb, fbx, obj, stl or abc")
+            raise SceneError("format must be glb, fbx, obj, stl, abc or groom")
         async with self._lock(scene_id):
             meta = self._load(scene_id)
             await self._ensure_running(meta)
@@ -658,14 +662,15 @@ class SceneManager:
             shutil.rmtree(out_dir, ignore_errors=True)
             out_dir.mkdir()
             try:
-                path = out_dir / f"scene.{fmt}"
+                ext = "abc" if fmt == "groom" else fmt
+                path = out_dir / f"scene.{ext}"
                 reply = await self._exec(meta, {"op": "call", "fn": "export_to", "kwargs": {"path": str(path), "fmt": fmt}}, 600)
                 if not reply["ok"]:
                     raise SceneError("export failed:\n" + reply["out"][-1200:])
                 data = await asyncio.to_thread(path.read_bytes)
             finally:
                 shutil.rmtree(out_dir, ignore_errors=True)
-        return data, EXPORT_FORMATS[fmt], fmt
+        return data, EXPORT_FORMATS[fmt], ext
 
     # ------------------------------------------------------------ lifecycle --
     async def close(self, scene_id: str) -> dict:

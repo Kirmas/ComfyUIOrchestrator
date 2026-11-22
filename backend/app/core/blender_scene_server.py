@@ -805,13 +805,128 @@ def pose_report(focus=None, frame=None, contacts=True):
             s.frame_set(keep)
 
 
+# ------------------------------------------------- Unreal groom (Alembic) --
+# The Groom Exporter add-on (blender_addons/GroomExporter, with a Linux-built
+# PyAlembic next to it) writes hair as an Unreal Groom: strands + guides + root UVs
+# under the `groom_*` names UE reads. Blender's own abc export drops all of that, so
+# hair for Unreal leaves ONLY through export_to(fmt="groom"). Loaded lazily: it costs
+# 55 MB of libraries, and most scenes never have hair.
+ADDONS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "blender_addons")
+_GROOM = {}
+# add-on field -> default attribute name (GroomExporter_Guide.md section 4); a field is only
+# filled when the curves actually carry such an attribute and the person set nothing else.
+GROOM_DEFAULT_MAPPING = {
+    "att_groom_root_uv": "surface_uv_coordinate", "att_groom_guide": "groom_is_guide",
+    "att_groom_id": "groom_guide_id", "att_groom_closest_guides": "groom_guide_closest",
+    "att_groom_guide_weights": "groom_guide_weights", "att_groom_width": "radius",
+    "att_groom_color": "color", "att_groom_roughness": "roughness", "att_groom_ao": "groom_AO",
+}
+
+
+def _groom():
+    """(GroomExporter package, groom_precheck module), registered once per Blender."""
+    if not _GROOM:
+        if ADDONS_DIR not in sys.path:
+            sys.path.insert(0, ADDONS_DIR)
+        try:
+            import GroomExporter
+            import groom_precheck
+        except Exception as exc:  # missing libs / wrong Blender python
+            raise RuntimeError("the Groom Exporter add-on can't load (PyAlembic is built for Blender's "
+                               f"Python 3.13 on Linux; scripts/build_pyalembic.sh): {exc!r}")
+        if not hasattr(GroomExporter.AlembicGroomExporter, "alembic"):
+            raise RuntimeError("the Groom Exporter add-on loaded without PyAlembic (libs missing in "
+                               "blender_addons/GroomExporter/PyAlembic)")
+        GroomExporter.register()
+        _GROOM.update(addon=GroomExporter, check=groom_precheck)
+    return _GROOM["addon"], _GROOM["check"]
+
+
+def groom_curves():
+    """The hair that gets exported: Curves objects that are shown. A hidden one (render-hidden or
+    hidden in the viewport) is a helper -- e.g. the `*_GuideRef` object that shares the hair's curves
+    data to feed its guides in -- and would otherwise leave as an extra, broken group."""
+    vl = bpy.context.view_layer
+    return [o for o in objects() if o.type == "CURVES" and not o.hide_render and not (o.name in vl.objects and o.hide_get())]
+
+
+def groom_map_attributes():
+    """Fill each hair object's add-on mapping with the guide's default attribute names
+    (only the empty fields whose attribute exists); returns {object: {field: name}}."""
+    _groom()
+    dg = bpy.context.evaluated_depsgraph_get()
+    out = {}
+    for ob in groom_curves():
+        have = ob.evaluated_get(dg).data.attributes
+        gp = ob.GroomProperty
+        out[ob.name] = {}
+        for field, name in GROOM_DEFAULT_MAPPING.items():
+            if not getattr(gp, field) and have.get(name) is not None:
+                setattr(gp, field, name)
+            if getattr(gp, field):
+                out[ob.name][field] = getattr(gp, field)
+        # The add-on reads the mapping from the EVALUATED object, whose copy of a custom
+        # property group stays stale until the original is tagged (found by
+        # groom_export_test.py: a valid groom exported with no groom_* attributes at all).
+        ob.update_tag()
+    bpy.context.view_layer.update()
+    return out
+
+
+def groom_check(names=None):
+    """Pre-export check of the hair objects (all, or the named ones): per object `ok`,
+    `info` and `issues` (a missing guide attribute, 1-point curves, UV out of 0..1, strands
+    pointing at far-away guides ...). Changes nothing. Fix every issue before export_to(fmt="groom")."""
+    _, chk = _groom()
+    groom_map_attributes()
+    obs = [o for o in groom_curves() if not names or o.name in names]
+    out = chk.report(obs)
+    for r in out:
+        if r["object"] not in bpy.context.view_layer.objects:
+            # Blender only evaluates objects of the active view layer: with the collection excluded the
+            # modifiers never run, so the add-on would see the raw strands and none of the guides.
+            r["ok"] = False
+            r["issues"].insert(0, "the object's collection is excluded from the active view layer, so its "
+                                  "modifiers don't run (Blender evaluates only the view layer's objects) -- "
+                                  "enable the collection (layer_collection.exclude = False) before exporting")
+    return out
+
+
+def groom_export(path, scale=None, width_scale=True, radius_to_diameter=True):
+    """Write an Unreal Groom .abc of every hair object. `scale` is the multiplier to
+    centimetres (default: from the scene unit scale, so metres -> 100, a 0.01-scale scene -> 1)."""
+    _groom()
+    obs = groom_curves()
+    if not obs:
+        raise RuntimeError("no hair: the scene has no Curves object (Add > Curves > Empty Hair, or import a groom)")
+    groom_map_attributes()
+    bad = [f"{r['object']}: " + "; ".join(r["issues"]) for r in groom_check() if r["issues"]]
+    if bad:
+        raise RuntimeError("fix these before a groom export (groom_check() shows details):\n" + "\n".join(bad))
+    if scale is None:
+        scale = bpy.context.scene.unit_settings.scale_length * 100.0
+    if bpy.context.object is not None and bpy.context.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    for o in bpy.context.scene.objects:
+        o.select_set(o in obs)
+    bpy.context.view_layer.objects.active = obs[0]
+    res = bpy.ops.groom.buttonexport(filepath=path, groom_scale=float(scale), groom_width_scale=bool(width_scale),
+                                     groom_radius_to_diameter=bool(radius_to_diameter), groom_animation=False)
+    if "FINISHED" not in res:
+        raise RuntimeError(f"groom export returned {res}")
+    return path
+
+
 def export_to(path, fmt="glb"):
-    """Export all content (not the helper camera/lights) as glb | fbx | obj | stl | abc."""
+    """Export all content (not the helper camera/lights) as glb | fbx | obj | stl | abc,
+    or `groom` = the hair as an Unreal Groom .abc (see groom_check)."""
+    fmt = fmt.lower()
+    if fmt == "groom":
+        return groom_export(path)
     if not meshes() and not any(o.type == "CURVES" for o in objects()):
         raise RuntimeError("nothing to export: the scene has no mesh or hair")
     for o in bpy.context.scene.objects:
         o.select_set(not o.get(AUX))
-    fmt = fmt.lower()
     sc = bpy.context.scene
     if fmt == "glb":
         bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", use_selection=True, export_apply=True, export_animations=True)
@@ -825,7 +940,7 @@ def export_to(path, fmt="glb"):
         # The scene's frame range, hair included -- an Alembic is a per-frame cache.
         bpy.ops.wm.alembic_export(filepath=path, selected=True, start=sc.frame_start, end=sc.frame_end, export_hair=True)
     else:
-        raise ValueError("format must be glb, fbx, obj, stl or abc")
+        raise ValueError("format must be glb, fbx, obj, stl, abc or groom")
     return path
 
 

@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
 
-from app.api.routes import agent_chats, agent_tasks, annotations, assets, backends, boards, capabilities, dashboards, design_docs, health, jobs, logs, node_templates, node_types, nodes, project_categories, projects, push, scenes, system, tracks, ws
+from app.api.routes import agent_chats, agent_tasks, annotations, assets, backends, boards, bridge, capabilities, dashboards, design_docs, health, jobs, logs, node_templates, node_types, nodes, project_categories, projects, push, scenes, system, tracks, ws
 from app.config import get_settings
 from app.core.auth import auth_middleware
 from app.core.blender_scene import scene_manager, scene_sweeper_loop
@@ -114,6 +114,7 @@ def create_app() -> FastAPI:
         agent_chats.reports_router,
         agent_chats.night_router,
         push.router,
+        bridge.router,
     ):
         app.include_router(router)
 

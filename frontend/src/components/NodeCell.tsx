@@ -27,6 +27,7 @@ import { IdeaTextPicker, MacroPreview } from "./IdeaTextPicker";
 import { MultiAngleBuilder } from "./MultiAngleBuilder";
 import { MeshThumb, MeshViewer, meshViewUrl } from "./Mesh3D";
 import { AssetNameDialog } from "./AssetNameDialog";
+import { BridgeSendButton } from "./BridgeSend";
 import { ReferencePicker } from "./ReferencePicker";
 import { ZoomableImage } from "./ZoomableImage";
 
@@ -561,6 +562,7 @@ export function FullSizeModal({
         <button type="button" className="image-modal-close" onClick={onClose} title={t("cell.closeFullSize")}>
           ×
         </button>
+        {asset && <BridgeSendButton asset={asset} />}
         {asset?.kind === "mesh" ? (
           <MeshViewer url={meshViewUrl(asset)} asset={asset} />
         ) : asset?.kind === "video" ? (

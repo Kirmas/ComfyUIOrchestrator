@@ -22,16 +22,21 @@ def set_app(app) -> None:
     _app = app
 
 
-def get_client() -> httpx.AsyncClient:
+def get_client(agent: bool = True) -> httpx.AsyncClient:
+    """`agent=False` is for routes acting on the person's own behalf (the
+    Unreal/Blender bridge): what they create is the person's, not an agent's."""
     if _app is None:
         raise RuntimeError("MCP internal client used before set_app()")
-    return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=_app),
-        base_url="http://internal",
+    headers = {"Authorization": f"Bearer {get_settings().api_token}"}
+    if agent:
         # X-Actor is how routes tell an agent's call from the web page's (e.g.
         # create_node stamps Node.is_agent_created) -- the client never sends
         # the flag itself, so it can't be forged through the request body.
-        headers={"Authorization": f"Bearer {get_settings().api_token}", AGENT_ACTOR_HEADER: "agent"},
+        headers[AGENT_ACTOR_HEADER] = "agent"
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app),
+        base_url="http://internal",
+        headers=headers,
         timeout=120.0,
     )
 

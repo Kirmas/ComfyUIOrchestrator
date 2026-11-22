@@ -28,3 +28,7 @@ npm-debug.log*
 # so the ignore rule itself doesn't hint at what's in there.
 backend/app/core/native_local/
 dev.db*
+
+# Groom Exporter add-on: someone else's paid add-on (Turbocheke, gumroad) -- never committed.
+# Its Linux PyAlembic is rebuilt by scripts/build_pyalembic.sh (55 MB). Deploy still copies both.
+backend/app/blender_addons/GroomExporter/

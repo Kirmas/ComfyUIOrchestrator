@@ -1,0 +1,20 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "ComfyUI Orchestrator Bridge",
+	"Description": "Send assets between ComfyUI Orchestrator and the Unreal Editor (two-way).",
+	"Category": "Editor",
+	"CreatedBy": "ComfyUI Orchestrator",
+	"EnabledByDefault": true,
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "OrchestratorBridge",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
+		}
+	]
+}

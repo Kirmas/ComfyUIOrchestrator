@@ -256,7 +256,7 @@ async def delete_chat(chat_id: str):
 @router.post("/{chat_id}/messages")
 async def post_message(chat_id: str, payload: AgentMessage):
     # Files can be tens of MB: longer than the usual 30 s to hand them over.
-    return await _call("POST", f"/chats/{chat_id}/messages", json=payload.model_dump(), timeout=httpx.Timeout(120.0))
+    return await _call("POST", f"/chats/{chat_id}/messages", json=payload.model_dump(), timeout=httpx.Timeout(600.0))
 
 
 @router.get("/{chat_id}/attachments/{name}")
