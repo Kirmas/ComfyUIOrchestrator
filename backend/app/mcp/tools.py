@@ -280,6 +280,32 @@ async def import_chat_attachment(chat_id: str, name: str, node_id: str) -> dict:
 
 
 @mcp_server.tool()
+async def create_upload_ticket(
+    node_id: str | None = None,
+    project_id: str | None = None,
+    dashboard_id: str | None = None,
+    max_files: int = 20,
+    minutes: int = 30,
+) -> dict:
+    """Get a temporary upload URL for putting many/large files from YOUR machine
+    into the app -- no token, no base64, no tokens spent on bytes.
+
+    Two modes:
+    - `project_id` (+ optional `dashboard_id` for a sub-dashboard): every file
+      you send gets its OWN NEW ROW at the bottom of that grid, with an asset
+      cell named after the file. Use this for "upload this whole folder".
+    - `node_id`: every file becomes another picture inside that one asset cell.
+
+    Returns `path`; in a shell on the machine where the files are, run once per
+    file: `curl -X POST -F "file=@Quill_BaseColor.png" http://<same host:port
+    you reached this MCP server on><path>` -- the reply is the asset (its
+    `node_id` is the new cell). The ticket expires after `minutes` (max 120) or
+    `max_files` (max 500) successful uploads, and is lost on a server restart."""
+    return await _post("/api/upload-tickets", {"node_id": node_id, "project_id": project_id,
+                                               "dashboard_id": dashboard_id, "max_files": max_files, "minutes": minutes})
+
+
+@mcp_server.tool()
 async def upload_reference_image(
     node_id: str,
     image_base64: str | None = None,

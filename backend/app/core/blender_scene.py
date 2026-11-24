@@ -41,6 +41,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from app.config import get_settings
+from app.core.blend_file import BLEND_MIME
 from app.core.blender import find_blender_binary
 from app.core.mesh_simplify import glb_triangle_count
 
@@ -52,6 +53,7 @@ _GPU_ERROR = re.compile(r"GPU|Vulkan|OpenGL|EGL|GHOST|no display", re.I)
 _MIME_EXT = {
     "model/gltf-binary": ".glb", "model/stl": ".stl", "model/gltf+json": ".gltf", "image/png": ".png", "image/jpeg": ".jpg",
     "image/webp": ".webp", "model/obj": ".obj", "model/stl": ".stl", "model/fbx": ".fbx", "model/alembic": ".abc",
+    "application/x-blender": ".blend",
 }
 _IMPORTABLE = {".glb", ".gltf", ".fbx", ".obj", ".stl", ".ply", ".abc"}
 # Everything the app can show (glb, stl, fbx, abc) plus obj. The upload route decides the
@@ -298,6 +300,9 @@ class SceneManager:
             raise SceneError("Blender is not installed on this server", 503)
         if not inputs:
             raise SceneError("pass at least one asset (a mesh to work on)")
+        opens_blend = any(i.mime == BLEND_MIME for i in inputs)
+        if opens_blend and len(inputs) != 1:
+            raise SceneError("a .blend file opens as a scene by itself; pass only it (import meshes into it afterwards)")
         async with self._create_lock:
             self._check_capacity()
             scene_id = uuid.uuid4().hex[:12]
@@ -311,13 +316,20 @@ class SceneManager:
             limit = settings.blender_simplify_over_tris if max_tris is None else max_tris
             server_inputs = []
             for n, item in enumerate(inputs):
-                entry = await self._write_input(scene_dir, n, item, limit)
+                if opens_blend:
+                    # The stored file is only copied: the scene's own checkpoint is this copy.
+                    await asyncio.to_thread((scene_dir / "scene.blend").write_bytes, item.data)
+                    entry = {"asset_id": item.asset_id, "kind": "blend", "path": str(scene_dir / "scene.blend"),
+                             "file": "scene.blend", "auto_import": False, "objects": [],
+                             "note": "opened from a stored .blend; the stored original is untouched"}
+                else:
+                    entry = await self._write_input(scene_dir, n, item, limit)
                 meta.inputs.append({k: v for k, v in entry.items() if k != "path"})
                 server_inputs.append(entry)
             (scene_dir / "inputs.json").write_text(json.dumps(server_inputs))
             self._save(meta)
             async with self._lock(scene_id):
-                await self._start(meta, "fresh")
+                await self._start(meta, "resume" if opens_blend else "fresh")
                 reply = await self._exec(meta, {"op": "run", "code": "import_inputs()\n_ensure_stage()", "save": True}, 600)
                 if not reply["ok"]:
                     raise SceneError("importing the inputs failed:\n" + reply["out"][-1200:])
@@ -400,7 +412,8 @@ class SceneManager:
             raise SceneError("the scenes directory path is too long for a unix socket; shorten cache_dir", 500)
         if sock.exists():
             sock.unlink()
-        argv = [blender, "-b", "--factory-startup", "-noaudio"]
+        # --disable-autoexec: a .blend may carry scripts/drivers that run on load (agent code runs via exec regardless).
+        argv = [blender, "-b", "--factory-startup", "--disable-autoexec", "-noaudio"]
         if mode == "resume":
             argv.append(str(scene_dir / "scene.blend"))
         argv += ["--python-exit-code", "1", "-P", str(SERVER_SCRIPT), "--", str(sock),

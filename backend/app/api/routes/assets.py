@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import asset_response
 from app.core.asset_preview import fit_rendition, svg_preview
 from app.core.mesh_view import MESH_FORMAT_BY_MIME, converts_via_blender, mesh_view_info, mesh_view_path, view_counts, warm
+from app.core.blend_file import BLEND_MIME
 from app.core.storage import build_asset_url, build_fit_url, build_preview_url, build_view_url, get_storage
 from app.db.base import get_db
 from app.db.models import Asset, AssetKind, Dashboard, Node, NodeKind, NodeStatus, Track
@@ -96,6 +97,8 @@ def clean_name(name: str | None) -> str | None:
 def _extension(asset: Asset) -> str:
     if asset.kind == AssetKind.mesh:
         return "." + MESH_FORMAT_BY_MIME.get(asset.mime_type, "glb")
+    if asset.mime_type == BLEND_MIME:
+        return ".blend"
     ext = mimetypes.guess_extension(asset.mime_type.split(";")[0].strip()) or ""
     return {".jpe": ".jpg", ".jpeg": ".jpg"}.get(ext, ext)
 

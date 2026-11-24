@@ -22,6 +22,7 @@ audio), so the guess only decides when the client said nothing useful.
 """
 
 from app.core.abc_convert import ABC_MIME, is_abc
+from app.core.blend_file import BLEND_MIME, is_blend
 from app.core.fbx_convert import FBX_MIME, is_fbx
 from app.core.stl_convert import STL_MIME, stl_triangle_count
 from app.db.models import AssetKind
@@ -55,6 +56,7 @@ _EXTENSIONS = {
     STL_MIME: ".stl",
     FBX_MIME: ".fbx",
     ABC_MIME: ".abc",
+    BLEND_MIME: ".blend",
     "video/mp4": ".mp4",
     "video/quicktime": ".mov",
     "video/webm": ".webm",
@@ -76,6 +78,8 @@ def sniff_mime(data: bytes) -> str | None:
         return FBX_MIME
     if is_abc(data):
         return ABC_MIME
+    if is_blend(data):
+        return BLEND_MIME
     for signature, mime in _SIGNATURES:
         if data.startswith(signature):
             return mime

@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.blend_file import BLEND_MIME
 from app.core.idea_macros import resolve_macros, strip_markdown
 from app.core.storage import build_asset_url, get_storage
 from app.core.upload_type import resolve_upload
@@ -210,7 +211,9 @@ async def list_project_assets(project_id: uuid.UUID, tag: str | None = None, db:
     what the grid's "з референсів" picker reads. Tag filtering is done in Python
     on purpose (see Asset.tags in db/models.py)."""
     result = await db.execute(
-        select(Asset).where(Asset.project_id == project_id).order_by(Asset.created_at.desc())
+        select(Asset)
+        .where(Asset.project_id == project_id, Asset.mime_type != BLEND_MIME)  # .blend files live on the Storage page
+        .order_by(Asset.created_at.desc())
     )
     assets = list(result.scalars().all())
     if tag:

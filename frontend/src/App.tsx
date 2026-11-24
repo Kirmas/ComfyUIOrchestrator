@@ -12,12 +12,13 @@ import { Grid } from "./components/Grid";
 import { Logs } from "./components/Logs";
 import { ProjectsPage } from "./components/ProjectsPage";
 import { Scenes } from "./components/Scenes";
+import { Storage } from "./components/Storage";
 import { Settings } from "./components/Settings";
 import { useT } from "./i18n";
 import { cx } from "./utils";
 
 // "gdoc": a global design doc, opened from its folder on the projects page.
-type View = "projects" | "grid" | "board" | "doc" | "gdoc" | "agent" | "scenes" | "settings" | "logs";
+type View = "projects" | "grid" | "board" | "doc" | "gdoc" | "agent" | "scenes" | "storage" | "settings" | "logs";
 type AuthStatus = "checking" | "unauthenticated" | "authenticated";
 type DocPlace = { view: "doc"; projectId: string } | { view: "gdoc"; docId: string };
 
@@ -25,7 +26,7 @@ const LAST_PROJECT_KEY = "comfy-orchestrator:lastProjectId";
 const LAST_VIEW_KEY = "comfy-orchestrator:lastView";
 const LAST_GLOBAL_DOC_KEY = "comfy-orchestrator:lastGlobalDoc";
 
-const VIEWS: View[] = ["projects", "grid", "board", "doc", "gdoc", "agent", "scenes", "settings", "logs"];
+const VIEWS: View[] = ["projects", "grid", "board", "doc", "gdoc", "agent", "scenes", "storage", "settings", "logs"];
 
 /** Reloading should put you back where you were, the same way the project
  * picker already remembers its selection -- landing back on the grid after
@@ -239,6 +240,11 @@ export default function App() {
           <button onClick={() => goTo(view === "agent" ? "grid" : "agent")} className={view === "agent" ? "active" : ""}>
             {t("app.agent")}
           </button>
+          {projectId && (
+            <button onClick={() => goTo(view === "storage" ? "grid" : "storage")} className={view === "storage" ? "active" : ""}>
+              {t("app.storage")}
+            </button>
+          )}
           {scenesAvailable && (
             <button onClick={() => goTo(view === "scenes" ? "grid" : "scenes")} className={view === "scenes" ? "active" : ""}>
               {t("app.scenes")}
@@ -254,7 +260,7 @@ export default function App() {
         </div>
       </div>
       {view === "projects" ||
-      (!projectId && (view === "grid" || view === "board" || view === "doc")) ||
+      (!projectId && (view === "grid" || view === "board" || view === "doc" || view === "storage")) ||
       (view === "gdoc" && !globalDoc) ? (
         // Also what a grid/board with no project to show falls back to.
         <ProjectsPage
@@ -278,6 +284,10 @@ export default function App() {
       ) : view === "settings" ? (
         <div className="main-area">
           <Settings />
+        </div>
+      ) : view === "storage" && projectId ? (
+        <div className="main-area">
+          <Storage key={projectId} projectId={projectId} scenesAvailable={scenesAvailable} onOpenScene={() => goTo("scenes")} />
         </div>
       ) : view === "scenes" && scenesAvailable ? (
         <div className="main-area">

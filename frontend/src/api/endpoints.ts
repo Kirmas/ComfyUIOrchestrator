@@ -512,4 +512,18 @@ export const scenesApi = {
   info: (id: string) => api.get<SceneInfo>(`/api/scenes/${id}/info`),
   close: (id: string) => api.post<SceneSummary>(`/api/scenes/${id}/close`),
   remove: (id: string) => api.delete(`/api/scenes/${id}`),
+  // A stored .blend (one asset) opens as a scene made from a copy of it.
+  create: (assetIds: string[], name?: string) => api.post<SceneSummary>("/api/scenes", { asset_ids: assetIds, name }),
+};
+
+// Per-project file storage (.blend files kept so they are not lost). Rename,
+// delete and download are the generic assetsApi calls.
+export const storageApi = {
+  list: (projectId: string) => api.get<Asset[]>(`/api/projects/${projectId}/storage`),
+  upload: (projectId: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return api.postForm<Asset>(`/api/projects/${projectId}/storage`, form);
+  },
+  downloadUrl: (id: string) => `${assetsApi.fileUrl(id)}&download=true`,
 };

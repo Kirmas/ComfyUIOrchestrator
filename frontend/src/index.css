@@ -4672,3 +4672,8 @@ button.scene-danger { color: var(--danger); border-color: var(--danger); }
   background: rgba(0, 0, 0, 0.7);
   opacity: 0.85;
 }
+
+/* --- Storage page (.blend files kept per project) --- */
+.storage-file { cursor: default; user-select: none; }
+.storage-file:hover { border-color: var(--accent); }
+.storage-icon { font-size: 32px; width: 48px; text-align: center; color: var(--text-dim); }

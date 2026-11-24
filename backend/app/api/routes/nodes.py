@@ -24,7 +24,7 @@ from app.core.ws_manager import ws_manager
 from app.mcp.client import AGENT_ACTOR_HEADER
 from app.api.routes.assets import to_asset_read, upload_name
 from app.db.base import get_db
-from app.db.models import Asset, AssetKind, Dashboard, Job, JobStatusEnum, Node, NodeKind, NodeStatus, Track
+from app.db.models import Asset, AssetKind, Dashboard, Job, JobStatusEnum, Node, NodeKind, NodeStatus, Project, Track
 from app.schemas.schemas import AssetRead, JobRead, NodeCreate, NodeDuplicate, NodeMove, NodeRead, NodeUpdate, PickCandidate
 from app.worker.tasks import (
     _asset_at_cell_index,
@@ -1332,3 +1332,73 @@ async def duplicate_node(node_id: uuid.UUID, payload: NodeDuplicate, db: AsyncSe
     await db.commit()
     await db.refresh(new_node)
     return new_node
+
+
+ticket_router = APIRouter(prefix="/api", tags=["upload-ticket"])
+
+
+@ticket_router.post("/upload-ticket/{ticket}", response_model=AssetRead, status_code=201)
+async def upload_with_ticket(ticket: str, file: UploadFile, db: AsyncSession = Depends(get_db)):
+    """Public (the ticket is the credential, see core/upload_tickets.py): same
+    effect as POST /api/nodes/{id}/upload-asset on the ticket's node. A failed
+    upload doesn't spend a use."""
+    from app.core import upload_tickets
+
+    t = upload_tickets.peek(ticket)
+    if t is None:
+        raise HTTPException(403, "Upload ticket is invalid, expired or used up -- ask for a new one")
+    node_id = t.node_id
+    row = None
+    if node_id is None:
+        from app.api.routes.bridge import _drop_row, _new_row_cell
+
+        row = await _new_row_cell(t.project_id, t.dashboard_id, db)
+        node_id = uuid.UUID(row["node_id"])
+    try:
+        result = await upload_asset_to_node(node_id, file, kind=None, unnamed=False, db=db)
+    except Exception:
+        if row:
+            await _drop_row(row["track_id"])
+        raise
+    t.uses_left -= 1
+    return result
+
+
+@ticket_router.post("/upload-tickets")
+async def create_upload_ticket(payload: dict, db: AsyncSession = Depends(get_db)):
+    """Authenticated: mint a ticket (MCP `create_upload_ticket`) for one asset
+    node, or -- with project_id -- for a whole graph (one new row per file)."""
+    import time
+    from app.core import upload_tickets
+
+    def _uuid(name: str, required: bool = True):
+        v = payload.get(name)
+        if not v:
+            if required:
+                raise HTTPException(422, f"{name} is required")
+            return None
+        try:
+            return uuid.UUID(str(v))
+        except ValueError:
+            raise HTTPException(422, f"{name} must be a UUID")
+
+    node_id = _uuid("node_id", required=False)
+    project_id = dashboard_id = None
+    if node_id:
+        node = await db.get(Node, node_id)
+        if not node:
+            raise HTTPException(404, "Node not found")
+        if node.kind != NodeKind.asset or node.node_type == SUBGRAPH_NODE_TYPE:
+            raise HTTPException(400, "Only plain asset cells accept uploads")
+    else:
+        project_id = _uuid("project_id")
+        dashboard_id = _uuid("dashboard_id", required=False)
+        dash = await db.get(Dashboard, dashboard_id) if dashboard_id else None
+        if dashboard_id and (dash is None or dash.project_id != project_id):
+            raise HTTPException(404, "That dashboard is not in this project")
+        if not dashboard_id and not await db.get(Project, project_id):
+            raise HTTPException(404, "Project not found")
+    key, t = upload_tickets.create(node_id, int(payload.get("max_files", 20)), int(payload.get("minutes", 30)),
+                                   project_id, dashboard_id)
+    return {"path": f"/api/upload-ticket/{key}", "max_files": t.uses_left,
+            "expires_in_minutes": max(1, round((t.expires - time.time()) / 60))}
