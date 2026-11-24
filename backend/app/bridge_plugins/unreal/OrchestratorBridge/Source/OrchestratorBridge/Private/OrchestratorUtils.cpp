@@ -77,8 +77,7 @@ namespace OrchestratorUtils
 		Body.Append(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
 	}
 
-	FString BuildMultipart(const TMap<FString, FString>& Fields, const FString& FileName, const FString& Mime,
-		const TArray<uint8>& FileData, TArray<uint8>& OutBody)
+	FString BuildMultipartFiles(const TMap<FString, FString>& Fields, const TArray<FMultipartFile>& Files, TArray<uint8>& OutBody)
 	{
 		const FString Boundary = TEXT("orch") + FGuid::NewGuid().ToString(EGuidFormats::Digits);
 		OutBody.Reset();
@@ -87,10 +86,22 @@ namespace OrchestratorUtils
 			Append(OutBody, FString::Printf(TEXT("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n"),
 				*Boundary, *Field.Key, *Field.Value));
 		}
-		Append(OutBody, FString::Printf(TEXT("--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\nContent-Type: %s\r\n\r\n"),
-			*Boundary, *FileName, *Mime));
-		OutBody.Append(FileData);
-		Append(OutBody, FString::Printf(TEXT("\r\n--%s--\r\n"), *Boundary));
+		for (const FMultipartFile& File : Files)
+		{
+			Append(OutBody, FString::Printf(TEXT("--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\nContent-Type: %s\r\n\r\n"),
+				*Boundary, *File.Field, *File.FileName, *File.Mime));
+			OutBody.Append(File.Data);
+			Append(OutBody, TEXT("\r\n"));
+		}
+		Append(OutBody, FString::Printf(TEXT("--%s--\r\n"), *Boundary));
 		return TEXT("multipart/form-data; boundary=") + Boundary;
+	}
+
+	FString BuildMultipart(const TMap<FString, FString>& Fields, const FString& FileName, const FString& Mime,
+		const TArray<uint8>& FileData, TArray<uint8>& OutBody)
+	{
+		TArray<FMultipartFile> Files;
+		Files.Add({TEXT("file"), FileName, Mime, FileData});
+		return BuildMultipartFiles(Fields, Files, OutBody);
 	}
 }

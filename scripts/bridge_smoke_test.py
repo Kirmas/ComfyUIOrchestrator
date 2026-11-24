@@ -27,6 +27,22 @@ H = {"Authorization": f"Bearer {TOKEN}"}
 WS = BASE.replace("http", "ws", 1) + "/api/bridge/device/ws"
 
 
+def tiny_glb(material: str) -> bytes:
+    """One triangle with one material and no textures -- what Unreal's exporter writes for a
+    Substrate material (Base Color left at 0)."""
+    pos = struct.pack("<9f", 0, 0, 0, 1, 0, 0, 0, 1, 0)
+    doc = {"asset": {"version": "2.0"}, "buffers": [{"byteLength": len(pos)}],
+           "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": len(pos)}],
+           "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]}],
+           "materials": [{"name": material, "pbrMetallicRoughness": {"baseColorFactor": [0, 0, 0, 1]}}],
+           "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "material": 0}]}],
+           "nodes": [{"mesh": 0}], "scenes": [{"nodes": [0]}], "scene": 0}
+    j = json.dumps(doc).encode(); j += b" " * (-len(j) % 4)
+    b = pos + b"\0" * (-len(pos) % 4)
+    return (b"glTF" + struct.pack("<II", 2, 28 + len(j) + len(b)) + struct.pack("<I", len(j)) + b"JSON" + j
+            + struct.pack("<I", len(b)) + b"BIN\0" + b)
+
+
 def tiny_png() -> bytes:
     def chunk(t, d):
         return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
@@ -114,6 +130,20 @@ async def main():
                 assert [o["id"] for o in outs] == [aid], outs
                 assert node.get("is_agent_created") in (False, None), node
                 assert up["asset"].get("project_id") in (None, ""), up["asset"]  # node_id XOR project_id
+
+                # a black GLB + the material's own textures -> the textures land in the material
+                r = await anon.post("/api/bridge/device/upload", headers=D,
+                                    files=[("file", ("Head.glb", tiny_glb("MI_Head"), "model/gltf-binary")),
+                                           ("tex_0", ("T_Head_BaseColor.png", tiny_png(), "image/png"))],
+                                    data={"project_id": pid, "place": "false", "diagnostics": "r.Substrate=1",
+                                          "material_fixups": json.dumps({"MI_Head": {"baseColor": "tex_0", "baseColorFactor": [1, 1, 1, 1]}})})
+                assert r.status_code == 201, r.text
+                g = r.json()["asset"]
+                assert g["meta"].get("bridge_textures") == ["MI_Head.baseColor"] and g["meta"].get("bridge_diag"), g["meta"]
+                glb = (await page.get(f"/api/assets/{g['id']}/file")).content
+                n = struct.unpack("<I", glb[12:16])[0]
+                pbr = json.loads(glb[20:20 + n])["materials"][0]["pbrMetallicRoughness"]
+                assert pbr["baseColorTexture"] == {"index": 0} and pbr["baseColorFactor"] == [1, 1, 1, 1], pbr
 
                 # not sent yet -> the device can't download it
                 assert (await anon.get(f"/api/bridge/device/assets/{aid}/file", headers=D)).status_code == 403

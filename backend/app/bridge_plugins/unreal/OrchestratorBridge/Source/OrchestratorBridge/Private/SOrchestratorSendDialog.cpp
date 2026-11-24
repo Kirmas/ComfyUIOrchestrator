@@ -15,7 +15,11 @@
 #include "Options/GLTFExportOptions.h"
 #include "Framework/Application/SlateApplication.h"
 #include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInstance.h"
 #include "Interfaces/IHttpResponse.h"
+#include "Misc/EngineVersion.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
@@ -365,6 +369,189 @@ bool SOrchestratorSendDialog::ExportOne(UObject* Object, FString& OutPath, FStri
 	return false;
 }
 
+static TArray<UMaterialInterface*> MeshMaterials(UObject* Object)
+{
+	TArray<UMaterialInterface*> Mats;
+	if (const UStaticMesh* SM = Cast<UStaticMesh>(Object))
+	{
+		for (const FStaticMaterial& M : SM->GetStaticMaterials())
+		{
+			Mats.Add(M.MaterialInterface);
+		}
+	}
+	else if (const USkeletalMesh* SK = Cast<USkeletalMesh>(Object))
+	{
+		for (const FSkeletalMaterial& M : SK->GetMaterials())
+		{
+			Mats.Add(M.MaterialInterface);
+		}
+	}
+	return Mats;
+}
+
+/** Unreal's glTF exporter can't read a Substrate material graph: a mesh on the Interchange
+ *  glTF material (M_GLTF, r.Substrate=1) came out black (Base Color 0), though its instance
+ *  holds plain glTF-named texture parameters. Those textures go along as PNG parts
+ *  (tex_N) with a map of which material slot each fills; the server writes them into the
+ *  GLB's materials (core/glb_patch.py), only where the exporter left the slot empty. */
+static FString CollectMaterialTextures(UObject* Object, TArray<OrchestratorUtils::FMultipartFile>& Files)
+{
+	// glTF slot -> the texture parameter names that may fill it, first match wins
+	struct FSlot
+	{
+		const TCHAR* Slot;
+		const TCHAR* Params[5];
+	};
+	static const FSlot Slots[] = {
+		{TEXT("baseColor"), {TEXT("BaseColorTexture"), TEXT("BaseColor"), TEXT("Albedo"), TEXT("DiffuseTexture"), TEXT("Diffuse")}},
+		{TEXT("metallicRoughness"), {TEXT("MetallicRoughnessTexture"), nullptr, nullptr, nullptr, nullptr}},
+		{TEXT("normal"), {TEXT("NormalTexture"), TEXT("Normal"), nullptr, nullptr, nullptr}},
+		{TEXT("emissive"), {TEXT("EmissiveTexture"), nullptr, nullptr, nullptr, nullptr}},
+	};
+	const FString Dir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("Orchestrator") / TEXT("Outgoing"));
+	IFileManager::Get().MakeDirectory(*Dir, true);
+	TSharedRef<FJsonObject> Fixups = MakeShared<FJsonObject>();
+	TMap<FString, FString> KeyOfTexture;  // one texture used by several materials goes once
+	for (UMaterialInterface* Mi : MeshMaterials(Object))
+	{
+		if (!Mi)
+		{
+			continue;
+		}
+		TSharedRef<FJsonObject> Fix = MakeShared<FJsonObject>();
+		for (const FSlot& Slot : Slots)
+		{
+			for (const TCHAR* ParamName : Slot.Params)
+			{
+				if (!ParamName)
+				{
+					break;
+				}
+				UTexture* Tex = nullptr;
+				if (!Mi->GetTextureParameterValue(FMaterialParameterInfo(FName(ParamName)), Tex) || !Tex)
+				{
+					continue;
+				}
+				const FString TexPath = Tex->GetPathName();
+				// the Interchange material's 1x1 white/flat placeholders mean "not set"
+				if (TexPath.StartsWith(TEXT("/InterchangeAssets/")) || TexPath.StartsWith(TEXT("/Engine/")))
+				{
+					continue;
+				}
+				FString* Key = KeyOfTexture.Find(TexPath);
+				if (!Key)
+				{
+					const FString NewKey = FString::Printf(TEXT("tex_%d"), KeyOfTexture.Num());
+					const FString PngPath = Dir / (OrchestratorUtils::SafeName(Tex->GetName(), NewKey) + TEXT(".png"));
+					FString Why;
+					if (!TryExport(Tex, TEXT("png"), PngPath, false, Why))
+					{
+						UE_LOG(LogTemp, Warning, TEXT("[Orchestrator] %s: %s"), *TexPath, *Why);
+						break;
+					}
+					OrchestratorUtils::FMultipartFile File;
+					File.Field = NewKey;
+					File.FileName = FPaths::GetCleanFilename(PngPath);
+					File.Mime = TEXT("image/png");
+					FFileHelper::LoadFileToArray(File.Data, *PngPath);
+					IFileManager::Get().Delete(*PngPath, false, true, true);
+					Files.Add(MoveTemp(File));
+					Key = &KeyOfTexture.Add(TexPath, NewKey);
+				}
+				Fix->SetStringField(Slot.Slot, *Key);
+				break;
+			}
+		}
+		FLinearColor Factor;
+		if (Mi->GetVectorParameterValue(FMaterialParameterInfo(TEXT("BaseColorFactor")), Factor))
+		{
+			TArray<TSharedPtr<FJsonValue>> Rgba;
+			for (float V : {Factor.R, Factor.G, Factor.B, Factor.A})
+			{
+				Rgba.Add(MakeShared<FJsonValueNumber>(V));
+			}
+			Fix->SetArrayField(TEXT("baseColorFactor"), Rgba);
+		}
+		if (Fix->Values.Num() > 0)
+		{
+			Fixups->SetObjectField(Mi->GetName(), Fix);
+		}
+	}
+	return Fixups->Values.Num() > 0 ? OrchestratorUtils::ToJson(Fixups) : FString();
+}
+
+/** What the orchestrator needs to tell why a mesh's colour didn't survive the glTF export,
+ *  sent with the upload (meta.bridge_diag) and logged: per material its chain, shading model,
+ *  Material Attributes / Substrate wiring, and the texture + colour parameters it sets. */
+static FString DescribeMaterials(UObject* Object)
+{
+	const TArray<UMaterialInterface*> Mats = MeshMaterials(Object);
+	if (Mats.Num() == 0)
+	{
+		return FString();
+	}
+	FString Out;
+	const IConsoleVariable* SubstrateVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Substrate"));
+	Out += FString::Printf(TEXT("UE %s, r.Substrate=%d\n"), *FEngineVersion::Current().ToString(),
+		SubstrateVar ? SubstrateVar->GetInt() : -1);
+	for (UMaterialInterface* Mi : Mats)
+	{
+		if (!Mi)
+		{
+			Out += TEXT("- (empty slot)\n");
+			continue;
+		}
+		FString Chain = Mi->GetPathName();
+		for (const UMaterialInstance* Inst = Cast<UMaterialInstance>(Mi); Inst && Inst->Parent; Inst = Cast<UMaterialInstance>(Inst->Parent))
+		{
+			Chain += TEXT(" <- ") + Inst->Parent->GetPathName();
+		}
+		Out += TEXT("- ") + Chain + TEXT("\n");
+		if (const UMaterial* Base = Mi->GetMaterial())
+		{
+			const FMaterialShadingModelField Models = Base->GetShadingModels();
+			const UEnum* ModelEnum = StaticEnum<EMaterialShadingModel>();
+			FString ModelNames;
+			for (int32 i = 0; i < (int32)MSM_NUM; ++i)
+			{
+				if (Models.HasShadingModel((EMaterialShadingModel)i))
+				{
+					ModelNames += (ModelNames.IsEmpty() ? TEXT("") : TEXT(",")) + ModelEnum->GetNameStringByValue(i);
+				}
+			}
+			const UMaterialEditorOnlyData* Ed = Base->GetEditorOnlyData();
+			Out += FString::Printf(TEXT("  shading=%s materialAttributes=%d baseColorLinked=%d frontMaterialLinked=%d domain=%d blend=%d\n"),
+				*ModelNames, Base->bUseMaterialAttributes ? 1 : 0,
+				Ed && Ed->BaseColor.IsConnected() ? 1 : 0,
+				Ed && Ed->FrontMaterial.IsConnected() ? 1 : 0,
+				(int32)Base->MaterialDomain, (int32)Base->BlendMode);
+		}
+		TArray<FMaterialParameterInfo> Infos;
+		TArray<FGuid> Ids;
+		Mi->GetAllTextureParameterInfo(Infos, Ids);
+		for (const FMaterialParameterInfo& Info : Infos)
+		{
+			UTexture* Tex = nullptr;
+			if (Mi->GetTextureParameterValue(Info, Tex) && Tex)
+			{
+				Out += FString::Printf(TEXT("  tex %s = %s (sRGB=%d)\n"), *Info.Name.ToString(), *Tex->GetPathName(), Tex->SRGB ? 1 : 0);
+			}
+		}
+		Infos.Reset();
+		Ids.Reset();
+		Mi->GetAllVectorParameterInfo(Infos, Ids);
+		for (const FMaterialParameterInfo& Info : Infos)
+		{
+			FLinearColor C;
+			if (Mi->GetVectorParameterValue(Info, C))
+			{
+				Out += FString::Printf(TEXT("  vec %s = (%.3f, %.3f, %.3f, %.3f)\n"), *Info.Name.ToString(), C.R, C.G, C.B, C.A);
+			}
+		}
+	}
+	return Out.Left(20000);
+}
+
 void SOrchestratorSendDialog::SendNext()
 {
 	if (NextIndex >= Assets.Num())
@@ -403,8 +590,24 @@ void SOrchestratorSendDialog::SendNext()
 	Fields.Add(TEXT("dashboard_id"), SendGraphId);
 	Fields.Add(TEXT("place"), bPlace ? TEXT("true") : TEXT("false"));
 	Fields.Add(TEXT("source_path"), Data.GetObjectPathString());
+	const FString Diag = DescribeMaterials(Object);
+	if (!Diag.IsEmpty())
+	{
+		UE_LOG(LogTemp, Log, TEXT("[Orchestrator] materials of %s:\n%s"), *Data.AssetName.ToString(), *Diag);
+		Fields.Add(TEXT("diagnostics"), Diag);
+	}
+	TArray<OrchestratorUtils::FMultipartFile> Files;
+	Files.Add({TEXT("file"), FPaths::GetCleanFilename(Path), Mime, MoveTemp(FileData)});
+	if (Mime == TEXT("model/gltf-binary"))
+	{
+		const FString Fixups = CollectMaterialTextures(Object, Files);
+		if (!Fixups.IsEmpty())
+		{
+			Fields.Add(TEXT("material_fixups"), Fixups);
+		}
+	}
 	TArray<uint8> Body;
-	const FString ContentType = OrchestratorUtils::BuildMultipart(Fields, FPaths::GetCleanFilename(Path), Mime, FileData, Body);
+	const FString ContentType = OrchestratorUtils::BuildMultipartFiles(Fields, Files, Body);
 
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Req = Connection->NewRequest(TEXT("POST"), TEXT("/api/bridge/device/upload"));
 	Req->SetHeader(TEXT("Content-Type"), ContentType);

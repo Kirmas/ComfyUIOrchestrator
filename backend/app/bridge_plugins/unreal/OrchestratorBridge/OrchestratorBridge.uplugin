@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 5,
-	"VersionName": "1.2.2",
+	"Version": 7,
+	"VersionName": "1.2.4",
 	"FriendlyName": "ComfyUI Orchestrator Bridge",
 	"Description": "Send assets between ComfyUI Orchestrator and the Unreal Editor (two-way).",
 	"Category": "Editor",

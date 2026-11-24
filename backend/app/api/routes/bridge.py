@@ -15,6 +15,7 @@ API_TOKEN is never accepted or needed here:
 Page-facing (API_TOKEN, like the rest of /api): pairing approvals, the device
 list (revoke), who is connected, send an asset, plugin downloads.
 """
+import asyncio
 import io
 import json
 import logging
@@ -32,6 +33,7 @@ from app.api.routes.assets import get_asset_file, resolve_download_name, to_asse
 from app.api.routes.boards import create_library_asset
 from app.core.auth import _extract_token
 from app.core.bridge import APPS, DEVICE_KEY_LIFETIME, BridgeError, PairingError, hash_key, hub, new_device_key, pairing
+from app.core.glb_patch import add_material_textures
 from app.core.grid_scope import scope_start_kind
 from app.core.storage import get_storage
 from app.db.base import async_session_maker, get_db
@@ -308,11 +310,14 @@ async def _drop_row(track_id: str) -> None:
 @router.post("/device/upload", status_code=201)
 async def upload_from_app(
     file: UploadFile,
+    request: Request,
     project_id: uuid.UUID = Form(...),
     dashboard_id: str = Form(""),
     place: bool = Form(True),
     source_path: str = Form(""),
     groom: bool = Form(False),
+    diagnostics: str = Form(""),
+    material_fixups: str = Form(""),
     device: BridgeDevice = Depends(_device),
     db: AsyncSession = Depends(get_db),
 ):
@@ -327,9 +332,22 @@ async def upload_from_app(
     meta = {"source": "bridge", "bridge_app": device.app, "bridge_device": device.name}
     if source_path:
         meta["bridge_path"] = source_path[:500]
+    if diagnostics:
+        # what the plugin saw (e.g. Unreal's materials), so a bad export can be read here, not copied by hand
+        meta["bridge_diag"] = diagnostics[:20000]
     if groom:
         meta["groom"] = True  # an Unreal Groom .abc (Groom Exporter add-on), not just a hair cache
     data = await file.read()
+    if material_fixups:
+        # Textures the exporter couldn't bake (Unreal's glTF exporter + a Substrate material =
+        # black), sent as tex_* parts and written into the GLB's materials (core/glb_patch.py).
+        form = await request.form()
+        images = {k: await v.read() for k, v in form.multi_items() if k.startswith("tex_") and hasattr(v, "read")}
+        try:
+            data, changed = await asyncio.to_thread(add_material_textures, data, json.loads(material_fixups), images)
+        except (ValueError, KeyError) as exc:
+            changed = [f"failed: {exc}"]
+        meta["bridge_textures"] = changed
     if not place:
         asset = await create_library_asset(db, project_id, data, file.content_type, file.filename, meta)
         placed = None
