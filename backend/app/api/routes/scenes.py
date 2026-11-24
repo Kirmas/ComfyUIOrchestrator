@@ -14,13 +14,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes.assets import to_asset_read
+from app.api.routes.storage import store_blend
 from app.config import get_settings
 from app.core.blender import find_blender_binary
 from app.core.blender_scene import SCENE_GUIDE, SceneError, SceneInput, scene_manager
 from app.core.storage import get_storage
 from app.core.upload_type import resolve_upload
 from app.db.base import get_db
-from app.db.models import Asset
+from app.db.models import Asset, Project
 from app.mcp.client import AGENT_ACTOR_HEADER
 from app.schemas.schemas import AssetRead
 
@@ -53,6 +54,11 @@ class ScenePose(BaseModel):
     focus: str | None = None
     frames: list[int] | None = None
     contacts: bool = True
+
+
+class SceneSaveToStorage(BaseModel):
+    project_id: uuid.UUID
+    name: str | None = None
 
 
 class SceneExport(BaseModel):
@@ -188,6 +194,25 @@ async def export_scene(scene_id: str, body: SceneExport, db: AsyncSession = Depe
     db.add(asset)
     await db.commit()
     await db.refresh(asset)
+    return to_asset_read(asset)
+
+
+@router.post("/{scene_id}/save-to-storage", response_model=AssetRead, status_code=201)
+async def save_scene_to_storage(scene_id: str, body: SceneSaveToStorage, request: Request, db: AsyncSession = Depends(get_db)):
+    """The whole scene as a .blend into the project's Storage -- the way a scene's
+    work is kept (a scene itself is disposable). Saved by an agent, the file
+    carries `meta.agent_saved`, a mark the person can clear on the Storage page."""
+    if not await db.get(Project, body.project_id):
+        raise HTTPException(404, "Project not found")
+    try:
+        data, _mime, _ext = await scene_manager.export(scene_id, "blend")
+        summary = await scene_manager.summary(scene_id)
+    except SceneError as exc:
+        _raise(exc)
+    by_agent = request.headers.get(AGENT_ACTOR_HEADER) == "agent"
+    name = (body.name or summary["name"] or "scene").strip()[:80]
+    asset = await store_blend(db, body.project_id, data, f"{name}.blend",
+                              {"scene_id": scene_id, **({"agent_saved": True} if by_agent else {})})
     return to_asset_read(asset)
 
 

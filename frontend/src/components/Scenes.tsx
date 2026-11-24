@@ -13,13 +13,14 @@ const compact = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3
  * rows (backend core/blender_scene.py), so this list is the only place a person
  * sees them -- which is the whole point: nothing should ever need an SSH
  * session to clean up. */
-export function Scenes() {
+export function Scenes({ projectId }: { projectId: string | null }) {
   const t = useT();
   const [data, setData] = useState<SceneListing | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [auto, setAuto] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [zoom, setZoom] = useState<SceneSummary | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [details, setDetails] = useState<{ id: string; info?: SceneInfo; error?: string } | null>(null);
 
   const reload = useCallback(
@@ -109,6 +110,7 @@ export function Scenes() {
           </div>
         </div>
         {error && <div className="error-text">{error}</div>}
+        {notice && <div className="scenes-note">{notice}</div>}
         {data && data.scenes.length === 0 && <p className="scenes-empty">{t("scenes.empty")}</p>}
         <div className="scene-list">
           {data?.scenes.map((scene) => (
@@ -119,6 +121,17 @@ export function Scenes() {
               ago={ago}
               details={details?.id === scene.id ? details : null}
               onZoom={() => setZoom(scene)}
+              onSave={() => {
+                if (!projectId) {
+                  setError(t("scenes.noProject"));
+                  return;
+                }
+                setNotice(null);
+                act(scene.id, async () => {
+                  const saved = await scenesApi.saveToStorage(scene.id, projectId, scene.name);
+                  setNotice(t("scenes.saved", { name: saved.name ?? scene.name }));
+                });
+              }}
               onDetails={() => openDetails(scene)}
               onClose={() => act(scene.id, () => scenesApi.close(scene.id))}
               onDelete={() => {
@@ -151,6 +164,7 @@ export function SceneCard({
   ago,
   details,
   onZoom,
+  onSave,
   onDetails,
   onClose,
   onDelete,
@@ -160,6 +174,7 @@ export function SceneCard({
   ago: (ts: number) => string;
   details: { id: string; info?: SceneInfo; error?: string } | null;
   onZoom: () => void;
+  onSave: () => void;
   onDetails: () => void;
   onClose: () => void;
   onDelete: () => void;
@@ -202,6 +217,9 @@ export function SceneCard({
           {scene.error && <div className="scene-line error-text">{t("scenes.stopped", { reason: scene.error })}</div>}
         </div>
         <div className="scene-actions">
+          <button onClick={onSave} disabled={busy} title={t("scenes.saveToStorageTitle")}>
+            {t("scenes.saveToStorage")}
+          </button>
           <button onClick={onDetails} disabled={busy || !open} title={open ? undefined : t("scenes.detailsClosed")}>
             {t("scenes.details")}
           </button>

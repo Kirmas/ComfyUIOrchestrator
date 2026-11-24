@@ -514,6 +514,9 @@ export const scenesApi = {
   remove: (id: string) => api.delete(`/api/scenes/${id}`),
   // A stored .blend (one asset) opens as a scene made from a copy of it.
   create: (assetIds: string[], name?: string) => api.post<SceneSummary>("/api/scenes", { asset_ids: assetIds, name }),
+  // The whole scene as a .blend into the project's Storage.
+  saveToStorage: (id: string, projectId: string, name?: string) =>
+    api.post<Asset>(`/api/scenes/${id}/save-to-storage`, { project_id: projectId, name }),
 };
 
 // Per-project file storage (.blend files kept so they are not lost). Rename,
@@ -526,4 +529,7 @@ export const storageApi = {
     return api.postForm<Asset>(`/api/projects/${projectId}/storage`, form);
   },
   downloadUrl: (id: string) => `${assetsApi.fileUrl(id)}&download=true`,
+  // The "saved by an agent" note on a file; only the person can change it.
+  setAgentMark: (projectId: string, id: string, agentSaved: boolean) =>
+    api.patch<Asset>(`/api/projects/${projectId}/storage/${id}/agent-mark`, { agent_saved: agentSaved }),
 };

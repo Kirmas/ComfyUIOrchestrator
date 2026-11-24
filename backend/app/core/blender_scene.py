@@ -58,7 +58,7 @@ _MIME_EXT = {
 _IMPORTABLE = {".glb", ".gltf", ".fbx", ".obj", ".stl", ".ply", ".abc"}
 # Everything the app can show (glb, stl, fbx, abc) plus obj. The upload route decides the
 # stored type from the bytes anyway; these are only the declared types.
-EXPORT_FORMATS = {"glb": "model/gltf-binary", "fbx": "model/fbx", "obj": "model/obj", "stl": "model/stl", "abc": "model/alembic",
+EXPORT_FORMATS = {"blend": BLEND_MIME, "glb": "model/gltf-binary", "fbx": "model/fbx", "obj": "model/obj", "stl": "model/stl", "abc": "model/alembic",
                   "groom": "model/alembic"}  # groom = hair as an Unreal Groom .abc (Groom Exporter add-on)
 
 
@@ -80,7 +80,9 @@ BLENDER SCENES -- how to work (Python `bpy`, background Blender, no UI)
 
 Lifecycle: scene_create(asset_ids) -> work with scene_run / scene_render /
 scene_info -> scene_export (result becomes an orchestrator asset) ->
-scene_destroy. A scene closes itself after ~15 idle minutes but keeps its last
+scene_destroy. To KEEP the work as a file use scene_save_to_storage (the whole scene as a .blend in the
+project's Storage; the person can reopen it later); a scene itself is disposable.
+A scene closes itself after ~15 idle minutes but keeps its last
 checkpoint for a week; any call reopens it. At most a couple of scenes are
 open at once -- destroy yours when done.
 
@@ -113,7 +115,7 @@ Predefined names:
   verts_under_mask(mask_png, obj)  vertex indices a person painted (white) on a render
   grow(obj, idx, hops)            widen a vertex selection by edges
   falloff(obj, idx, radius, power) per-vertex weights 1..0 around a selection
-  export_to(path, fmt)            glb | fbx | obj | stl | abc | groom (scene_export does this for you)
+  export_to(path, fmt)            glb | fbx | obj | stl | abc | groom | blend (scene_export does this for you)
   groom_check(names=None)         HAIR for Unreal: pre-export check of the Curves objects (attributes,
                                   guides, 1-point curves ...) -> [{object, ok, info, issues}]
   groom_export(path, scale=None)  Unreal Groom .abc via the Groom Exporter add-on (= scene_export format="groom")
@@ -427,7 +429,12 @@ class SceneManager:
         self._procs[meta.id] = proc
         meta.pid, meta.state, meta.error = proc.pid, "starting", None
         self._save(meta)
-        deadline = time.monotonic() + 90
+        # Opening a big .blend is most of the start-up (a 465 MB one took ~90 s on a busy box),
+        # so the budget grows with the checkpoint instead of a flat 90 s.
+        ckpt = scene_dir / "scene.blend"
+        (scene_dir / "scene.blend1").unlink(missing_ok=True)  # leftover backup of scenes made before save_version=0
+        budget = min(600, 90 + (ckpt.stat().st_size / 1e6 * 0.5 if mode == "resume" and ckpt.exists() else 0))
+        deadline = time.monotonic() + budget
         while time.monotonic() < deadline:
             if proc.returncode is not None:
                 meta.state, meta.pid = "closed", None
@@ -443,8 +450,8 @@ class SceneManager:
                 except (SceneError, OSError, asyncio.TimeoutError):
                     pass
             await asyncio.sleep(0.1)
-        await self._kill(meta, "did not start within 90 s")
-        raise SceneError("Blender did not start within 90 s:\n" + _tail(scene_dir / "blender.log"), 500)
+        await self._kill(meta, f"did not start within {budget:.0f} s")
+        raise SceneError(f"Blender did not start within {budget:.0f} s:\n" + _tail(scene_dir / "blender.log"), 500)
 
     async def _rpc(self, scene_id: str, req: dict, timeout: float) -> dict:
         sock = str(self._dir(scene_id) / "s.sock")
@@ -667,7 +674,7 @@ class SceneManager:
         """(bytes, mime, extension) of everything in the scene."""
         fmt = (fmt or "glb").lower()
         if fmt not in EXPORT_FORMATS:
-            raise SceneError("format must be glb, fbx, obj, stl, abc or groom")
+            raise SceneError("format must be glb, fbx, obj, stl, abc, groom or blend")
         async with self._lock(scene_id):
             meta = self._load(scene_id)
             await self._ensure_running(meta)

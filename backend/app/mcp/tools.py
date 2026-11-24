@@ -1483,6 +1483,17 @@ async def list_scenes() -> dict:
 
 
 @mcp_server.tool()
+async def scene_save_to_storage(scene_id: str, project_id: str, name: str = "") -> dict:
+    """Keep the scene's work: saves the WHOLE scene as a .blend into the project's Storage (the
+    Storage tab; the person can open it as a scene again later). Scenes are disposable -- a closed
+    one is deleted after a week -- so do this before you finish anything worth keeping, and say so
+    in your reply. The file is marked "saved by an agent" until the person clears the mark. Never
+    overwrites: every call adds a new file, so give a name that says what state this is.
+    project_id: the project you are working in. The scene stays open."""
+    return await _post(f"/api/scenes/{scene_id}/save-to-storage", {"project_id": project_id, "name": name or None})
+
+
+@mcp_server.tool()
 async def scene_close(scene_id: str) -> dict:
     """Stop the scene's Blender (frees its memory) but keep its checkpoint, so a
     later call can reopen it where it was."""

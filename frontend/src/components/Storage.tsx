@@ -109,7 +109,10 @@ export function Storage({
               <div className="scene-card-main">
                 <span className="storage-icon">▣</span>
                 <div className="scene-body">
-                  <strong>{displayName(file)}</strong>
+                  <strong>
+                    {displayName(file)}
+                    {file.meta.agent_saved === true && <span className="scene-state running storage-agent-mark"> {t("storage.agentSaved")}</span>}
+                  </strong>
                   <div className="scene-line dim">
                     {new Date(file.created_at).toLocaleString()}
                     {typeof file.meta.size === "number" ? ` · ${formatBytes(file.meta.size)}` : ""}
@@ -119,6 +122,15 @@ export function Storage({
                   <button onClick={() => openAsScene(file)} disabled={!!busy || !scenesAvailable} title={t("storage.openTitle")}>
                     {t("storage.open")}
                   </button>
+                  {file.meta.agent_saved === true && (
+                    <button
+                      disabled={!!busy}
+                      title={t("storage.clearMarkTitle")}
+                      onClick={() => run(file.id, () => storageApi.setAgentMark(projectId, file.id, false))}
+                    >
+                      {t("storage.clearMark")}
+                    </button>
+                  )}
                   <button onClick={() => (window.location.href = storageApi.downloadUrl(file.id))}>{t("storage.download")}</button>
                   <button
                     disabled={!!busy}

@@ -4677,3 +4677,6 @@ button.scene-danger { color: var(--danger); border-color: var(--danger); }
 .storage-file { cursor: default; user-select: none; }
 .storage-file:hover { border-color: var(--accent); }
 .storage-icon { font-size: 32px; width: 48px; text-align: center; color: var(--text-dim); }
+
+/* Storage: the "saved by an agent" label */
+.storage-agent-mark { margin-left: 8px; }

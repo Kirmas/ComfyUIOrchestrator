@@ -291,7 +291,7 @@ export default function App() {
         </div>
       ) : view === "scenes" && scenesAvailable ? (
         <div className="main-area">
-          <Scenes />
+          <Scenes projectId={projectId} />
         </div>
       ) : view === "logs" ? (
         <div className="main-area">

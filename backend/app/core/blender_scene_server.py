@@ -44,6 +44,9 @@ AUX = "orch_aux"
 
 if MODE == "fresh":
     bpy.ops.wm.read_factory_settings(use_empty=True)
+# Blender keeps the previous save as scene.blend1 -- for the checkpoint that silently doubled the
+# scene's size on disk (a 444 MB file became 890 MB). The checkpoint is overwritten on purpose.
+bpy.context.preferences.filepaths.save_version = 0
 
 try:
     with open(INPUTS_PATH, encoding="utf-8") as f:
@@ -898,6 +901,11 @@ def export_to(path, fmt="glb"):
     fmt = fmt.lower()
     if fmt == "groom":
         return groom_export(path)
+    if fmt == "blend":
+        # The whole scene as a .blend (helper camera/lights included, flagged orch_aux) --
+        # a working file to keep, not an exchange format. Compressed: they are big.
+        bpy.ops.wm.save_as_mainfile(filepath=path, copy=True, compress=True)
+        return path
     if not meshes() and not any(o.type == "CURVES" for o in objects()):
         raise RuntimeError("nothing to export: the scene has no mesh or hair")
     for o in bpy.context.scene.objects:
