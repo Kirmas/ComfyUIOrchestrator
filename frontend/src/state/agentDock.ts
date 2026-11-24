@@ -15,6 +15,26 @@ export type AgentNodeRef = {
   previewUrl: string | null;
 };
 
+/** A viewport picture from a Blender scene (Scenes page) attached to the next
+ * message: the picture itself goes along, the camera and the picked objects as
+ * text so the agent can look at the same angle (scene_view). Kept in memory
+ * only -- it is a screenshot, not worth localStorage. */
+export type AgentSceneView = {
+  sceneId: string;
+  sceneName: string;
+  az: number;
+  el: number;
+  /** The free camera: where it looks (world units) and how far away. */
+  target: number[] | null;
+  dist: number | null;
+  only: boolean;
+  frame: number | null;
+  /** {armature: action} the picture was taken with. */
+  actions: Record<string, string>;
+  objects: string[];
+  image: Blob;
+};
+
 /** The project-chat dock shown over the grid, board and design doc
  * (AgentDock.tsx). A store rather than props because the gestures that feed
  * it live deep in Grid/NodeCell, and the dock itself sits in App. */
@@ -23,6 +43,8 @@ type AgentDockState = {
   /** Tapping a grid cell attaches it instead of doing what a tap does. */
   picking: boolean;
   refs: AgentNodeRef[];
+  sceneView: AgentSceneView | null;
+  setSceneView: (v: AgentSceneView | null) => void;
   setOpen: (open: boolean) => void;
   setPicking: (picking: boolean) => void;
   addRef: (ref: AgentNodeRef) => void;
@@ -48,6 +70,8 @@ export const useAgentDock = create<AgentDockState>((set) => ({
   open: false,
   picking: false,
   refs: storedRefs(),
+  sceneView: null,
+  setSceneView: (sceneView) => set(sceneView ? { sceneView, open: true, picking: false } : { sceneView }),
   setOpen: (open) => set(open ? { open } : { open, picking: false }),
   setPicking: (picking) => set({ picking }),
   // Attaching always ends a pick and brings the sheet back with the chip in it.

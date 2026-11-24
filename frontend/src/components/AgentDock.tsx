@@ -12,7 +12,7 @@ const POLL_MS = 5000;
 // Statuses worth a dot on the closed bubble: working, waiting on you, broken.
 const SIGNAL = new Set(["running", "awaiting_approval", "error"]);
 const dockChatKey = (projectId: string) => `comfy-orchestrator:dockChat:${projectId}`;
-const VIEW_NAMES = { grid: "Grid", board: "idea Board", doc: "Design doc" } as const;
+const VIEW_NAMES = { grid: "Grid", board: "idea Board", doc: "Design doc", scenes: "Blender Scenes page" } as const;
 
 export type DockView = keyof typeof VIEW_NAMES;
 
@@ -33,7 +33,7 @@ export function AgentDock({
   onExpand: () => void;
 }) {
   const t = useT();
-  const { open, picking, refs: allRefs, setOpen, setPicking, removeRef, clearRefs } = useAgentDock();
+  const { open, picking, refs: allRefs, sceneView, setSceneView, setOpen, setPicking, removeRef, clearRefs } = useAgentDock();
   const refs = allRefs.filter((r) => r.projectId === projectId);
   const [chats, setChats] = useState<Chat[]>([]);
   const [providers, setProviders] = useState<AgentProviderInfo[]>([]);
@@ -105,7 +105,7 @@ export function AgentDock({
       <button className="agent-dock-bubble" title={t("agentDock.open")} onClick={() => setOpen(true)}>
         💬
         {status && SIGNAL.has(status) && <span className={cx("agent-status-dot", `agent-status-${status}`)} />}
-        {refs.length > 0 && <span className="agent-dock-badge">{refs.length}</span>}
+        {refs.length + (sceneView ? 1 : 0) > 0 && <span className="agent-dock-badge">{refs.length + (sceneView ? 1 : 0)}</span>}
       </button>
     );
   }
@@ -163,7 +163,12 @@ export function AgentDock({
               origin,
               refs,
               onRemoveRef: removeRef,
-              onSent: () => clearRefs(projectId),
+              sceneView,
+              onRemoveSceneView: () => setSceneView(null),
+              onSent: () => {
+                clearRefs(projectId);
+                setSceneView(null);
+              },
               // Picking on the board or in the doc would have nothing to tap.
               onPick: () => (view === "grid" ? setPicking(true) : alert(t("agentDock.pickGridOnly"))),
             }}

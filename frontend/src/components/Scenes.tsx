@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { resolveAssetUrl } from "../api/client";
 import { scenesApi } from "../api/endpoints";
 import { useT } from "../i18n";
+import { SceneViewport } from "./SceneViewport";
 import type { SceneInfo, SceneListing, SceneSummary } from "../types";
 import { cx, formatBytes } from "../utils";
 
@@ -20,6 +21,7 @@ export function Scenes({ projectId }: { projectId: string | null }) {
   const [auto, setAuto] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [zoom, setZoom] = useState<SceneSummary | null>(null);
+  const [viewing, setViewing] = useState<SceneSummary | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [details, setDetails] = useState<{ id: string; info?: SceneInfo; error?: string } | null>(null);
 
@@ -121,6 +123,7 @@ export function Scenes({ projectId }: { projectId: string | null }) {
               ago={ago}
               details={details?.id === scene.id ? details : null}
               onZoom={() => setZoom(scene)}
+              onView={() => setViewing(scene)}
               onSave={() => {
                 if (!projectId) {
                   setError(t("scenes.noProject"));
@@ -142,6 +145,7 @@ export function Scenes({ projectId }: { projectId: string | null }) {
         </div>
         <p className="scenes-note">{t("scenes.keptNote")}</p>
       </div>
+      {viewing && <SceneViewport scene={viewing} onClose={() => setViewing(null)} />}
       {zoom?.render_url &&
         createPortal(
           <div className="image-modal-backdrop" onClick={() => setZoom(null)}>
@@ -164,6 +168,7 @@ export function SceneCard({
   ago,
   details,
   onZoom,
+  onView,
   onSave,
   onDetails,
   onClose,
@@ -174,6 +179,7 @@ export function SceneCard({
   ago: (ts: number) => string;
   details: { id: string; info?: SceneInfo; error?: string } | null;
   onZoom: () => void;
+  onView: () => void;
   onSave: () => void;
   onDetails: () => void;
   onClose: () => void;
@@ -217,6 +223,9 @@ export function SceneCard({
           {scene.error && <div className="scene-line error-text">{t("scenes.stopped", { reason: scene.error })}</div>}
         </div>
         <div className="scene-actions">
+          <button onClick={onView} disabled={busy} title={t("scenes.viewTitle")}>
+            {t("scenes.view")}
+          </button>
           <button onClick={onSave} disabled={busy} title={t("scenes.saveToStorageTitle")}>
             {t("scenes.saveToStorage")}
           </button>

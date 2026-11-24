@@ -55,6 +55,9 @@ import type {
   SceneInfo,
   SceneListing,
   SceneSummary,
+  SceneAnimation,
+  SceneFrameInfo,
+  SceneViewParams,
 } from "../types";
 
 export const backendsApi = {
@@ -509,6 +512,13 @@ export const bridgeApi = {
 
 export const scenesApi = {
   list: () => api.get<SceneListing>("/api/scenes"),
+  get: (id: string) => api.get<SceneSummary>(`/api/scenes/${id}`),
+  frame: (id: string, select: string[], anim: Record<string, string>, frames: number[]) =>
+    api.get<SceneFrameInfo>(
+      `/api/scenes/${id}/frame?select=${encodeURIComponent(select.join(","))}&anim=${encodeURIComponent(JSON.stringify(anim))}&frames=${frames.join(",")}`,
+    ),
+  animations: (id: string, select: string[]) =>
+    api.get<SceneAnimation[]>(`/api/scenes/${id}/animations?select=${encodeURIComponent(select.join(","))}`),
   info: (id: string) => api.get<SceneInfo>(`/api/scenes/${id}/info`),
   close: (id: string) => api.post<SceneSummary>(`/api/scenes/${id}/close`),
   remove: (id: string) => api.delete(`/api/scenes/${id}`),
@@ -517,6 +527,31 @@ export const scenesApi = {
   // The whole scene as a .blend into the project's Storage.
   saveToStorage: (id: string, projectId: string, name?: string) =>
     api.post<Asset>(`/api/scenes/${id}/save-to-storage`, { project_id: projectId, name }),
+  /** One orbit-camera picture (JPEG) as an <img src>; see SceneViewport. */
+  viewUrl: (id: string, v: SceneViewParams) => {
+    const q = new URLSearchParams({
+      az: String(v.az),
+      el: String(v.el),
+      zoom: String(v.zoom ?? 1),
+      select: v.select.join(","),
+      only: String(v.only),
+      size: String(v.size),
+      token: getApiToken(),
+    });
+    if (v.frame != null) q.set("frame", String(v.frame));
+    if (v.hair != null) q.set("hair", String(v.hair));
+    if (v.fast) q.set("fast", "true");
+    if (v.textures === false) q.set("textures", "false");
+    if (v.nonce) q.set("n", String(v.nonce));
+    if (v.target && v.dist) {
+      q.set("tx", String(v.target[0]));
+      q.set("ty", String(v.target[1]));
+      q.set("tz", String(v.target[2]));
+      q.set("dist", String(v.dist));
+    }
+    if (v.anim && Object.keys(v.anim).length) q.set("anim", JSON.stringify(v.anim));
+    return `${getApiBaseUrl()}/api/scenes/${id}/view?${q}`;
+  },
 };
 
 // Per-project file storage (.blend files kept so they are not lost). Rename,

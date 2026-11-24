@@ -4678,5 +4678,27 @@ button.scene-danger { color: var(--danger); border-color: var(--danger); }
 .storage-file:hover { border-color: var(--accent); }
 .storage-icon { font-size: 32px; width: 48px; text-align: center; color: var(--text-dim); }
 
-/* Storage: the "saved by an agent" label */
+/* --- Scene viewport (orbit view rendered in the live scene) --- */
 .storage-agent-mark { margin-left: 8px; }
+.viewport-modal { display: flex; gap: 12px; width: min(1100px, 96vw); max-height: 92vh; padding: 12px; background: var(--bg); border-radius: 10px; }
+.viewport-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.viewport-stage { position: relative; aspect-ratio: 1; max-height: 74vh; background: #1c1c1e; border-radius: 8px; overflow: hidden; cursor: grab; touch-action: none; user-select: none; }
+.viewport-stage:active { cursor: grabbing; }
+.viewport-stage img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+.viewport-busy { position: absolute; top: 8px; left: 8px; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: rgba(0, 0, 0, 0.6); color: var(--text-dim); }
+.viewport-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.viewport-frame { display: flex; gap: 6px; align-items: center; font-size: 12px; }
+.viewport-side { flex: 0 0 240px; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.viewport-side-actions { display: flex; gap: 8px; align-items: center; justify-content: space-between; font-size: 12px; }
+.viewport-objects { overflow-y: auto; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 6px; max-height: 64vh; }
+.viewport-objects label { display: flex; gap: 6px; align-items: center; padding: 3px 8px; font-size: 12px; cursor: pointer; }
+.viewport-objects label.picked { background: rgba(255, 140, 26, 0.18); }
+.viewport-obj-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 800px) {
+  .viewport-modal { flex-direction: column; overflow-y: auto; }
+  .viewport-side { flex: 0 0 auto; }
+  .viewport-objects { max-height: 30vh; }
+}
+.viewport-anims { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; }
+.viewport-anims label { display: flex; flex-direction: column; gap: 2px; }
+.viewport-anims select { width: 100%; }

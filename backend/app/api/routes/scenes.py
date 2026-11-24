@@ -6,10 +6,11 @@ manager's docstring. The one thing that crosses over is export, which makes an
 ordinary library Asset (node_id None, like an upload) -- that is the only way
 a result leaves a scene, and the asset then lives and dies like any other.
 """
+import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -195,6 +196,59 @@ async def export_scene(scene_id: str, body: SceneExport, db: AsyncSession = Depe
     await db.commit()
     await db.refresh(asset)
     return to_asset_read(asset)
+
+
+@router.get("/{scene_id}/view")
+async def scene_view(scene_id: str, az: float = 0.0, el: float = 15.0, zoom: float = 1.0,
+                     select: str = "", only: bool = False, size: int = 512, frame: int | None = None,
+                     hair: float = Query(0.1, ge=0, le=1), fast: bool = False, textures: bool = True,
+                     anim: str = "", tx: float | None = None, ty: float | None = None, tz: float | None = None,
+                     dist: float | None = Query(None, gt=0)) -> Response:
+    """One orbit-camera picture (JPEG) -- the viewport on the Scenes page, usable
+    straight as an <img src> (token in the query like every picture URL).
+    `select` = comma-separated object names to frame and highlight. `tx,ty,tz` + `dist` = a free camera looking at that world point from that far (it ignores how big the
+    content is, so an animation does not make it jump; otherwise the content is framed and `zoom` applies);
+    `anim` = JSON {armature: action} to show for this picture only; `hair` = share of hair
+    strands drawn (0..1): 0.1 is a light stand-in, 1 the real groom (minutes for a heavy one)."""
+    names = [n for n in select.split(",") if n]
+    try:
+        actions = json.loads(anim) if anim else {}
+        if not isinstance(actions, dict):
+            raise ValueError
+    except ValueError:
+        raise HTTPException(400, 'anim must be a JSON object {"armature": "action"}') from None
+    try:
+        data = await scene_manager.view(scene_id, az, el, zoom, names, only, size, frame, hair, fast, textures, actions,
+                                       [tx, ty, tz] if None not in (tx, ty, tz) and dist else None, dist)
+    except SceneError as exc:
+        _raise(exc)
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/{scene_id}/frame")
+async def scene_frame(scene_id: str, select: str = "", anim: str = "", frames: str = "") -> dict:
+    """Where a free camera should look: the picked objects' bounding box united over `frames` (comma-separated;
+    none = the scene's current frame), with `anim` ({armature: action} JSON) applied. -> {center, radius, dist, min, max}."""
+    try:
+        actions = json.loads(anim) if anim else {}
+        picks = [int(f) for f in frames.split(",") if f.strip()][:12]
+        if not isinstance(actions, dict):
+            raise ValueError
+    except ValueError:
+        raise HTTPException(400, "anim must be a JSON object, frames a comma-separated list of integers") from None
+    try:
+        return await scene_manager.frame_info(scene_id, [n for n in select.split(",") if n], actions, picks)
+    except SceneError as exc:
+        _raise(exc)
+
+
+@router.get("/{scene_id}/animations")
+async def scene_animations(scene_id: str, select: str = "") -> list:
+    """The animations that fit the armatures deforming the picked objects (no pick = every armature)."""
+    try:
+        return await scene_manager.animations(scene_id, [n for n in select.split(",") if n])
+    except SceneError as exc:
+        _raise(exc)
 
 
 @router.post("/{scene_id}/save-to-storage", response_model=AssetRead, status_code=201)

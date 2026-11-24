@@ -10,6 +10,7 @@ app/mcp/client.py, so the routes' validation stays the single source of truth
 instead of being mirrored (and drifting) here.
 """
 import asyncio
+import json
 import base64
 import io
 import math
@@ -1480,6 +1481,43 @@ async def list_scenes() -> dict:
     how many may be open at once. Check this before scene_create, and destroy
     scenes you are finished with."""
     return await _get("/api/scenes")
+
+
+@mcp_server.tool()
+async def scene_view(scene_id: str, az: float = 0.0, el: float = 15.0, zoom: float = 1.0,
+                     select: list[str] | None = None, only: bool = False, size: int = 768, hair: float = 0.1, textures: bool = True,
+                     frame: int | None = None, actions: dict[str, str] | None = None,
+                     target: list[float] | None = None, dist: float | None = None,
+                     max_px: int = _VIEW_MAX_PX) -> list:
+    """The same orbit-camera picture the person sees in the Scenes page viewport -- use it to
+    look at exactly the angle they sent you. az/el are degrees: az 0 = front, 90 = the model's
+    right side (+X), 180 = back; el 0 = level, 90 = from above; zoom > 1 = closer. select = object
+    names (see scene_info): they are framed and drawn orange against grey; only=True hides the rest.
+    hair = the share of hair/fur strands drawn (0..1, default 0.1 = a light stand-in, 0 = none, 1 = the
+    real groom, which for millions of points takes minutes and a call over 2 minutes stops the scene).
+    target=[x,y,z] + dist = a free camera (world point and distance) -- the person's viewport uses one, and
+    it keeps the framing steady while an animation changes the model's size; without them the content is framed.
+    frame = the animation frame; actions = {armature name: action name} to show for this picture only (the scene is
+    left as it was; scene_run "animations(['mesh name'])" lists the actions that fit a picked mesh's rig).
+    textures=True colours by the materials' image textures (the first call loads them: a few seconds);
+    False = flat grey. With select but not only, the picked objects are painted orange instead.
+    Workbench only (instant). For other engines or several views use scene_render."""
+    from mcp.server.fastmcp import Image
+
+    params = {"az": az, "el": el, "zoom": zoom, "select": ",".join(select or []), "only": only, "size": size, "hair": hair, "textures": textures}
+    if frame is not None:
+        params["frame"] = frame
+    if actions:
+        params["anim"] = json.dumps(actions)
+    if target and dist:
+        params.update(tx=target[0], ty=target[1], tz=target[2], dist=dist)
+    async with get_client() as client:
+        r = await client.get(f"/api/scenes/{scene_id}/view", params=params)
+        raise_for_api_error(r)
+        data = r.content
+    view, fmt, _shown = await asyncio.to_thread(_agent_view, data, max_px, None)
+    return [f"scene {scene_id}: az={az} el={el} zoom={zoom}" + (f", selected {select}" if select else ""),
+            Image(data=view, format=fmt)]
 
 
 @mcp_server.tool()

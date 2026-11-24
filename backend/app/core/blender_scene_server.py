@@ -27,6 +27,7 @@ import json
 import linecache
 import math
 import os
+import re
 import socket
 import sys
 import time
@@ -109,6 +110,8 @@ def bbox(objs=None):
     for o in objs or objects():
         if o.type not in ("MESH", "CURVE", "CURVES", "SURFACE", "FONT"):
             continue
+        if o.hide_render:
+            continue  # not part of the picture (view_render hides a heavy groom); evaluating it is the slow part
         ev = o.evaluated_get(dg)
         pts.extend(ev.matrix_world @ Vector(c) for c in ev.bound_box)
     if not pts:
@@ -156,13 +159,15 @@ def _tans(scene):
     return (longer, longer * h / w) if w >= h else (longer * w / h, longer)
 
 
-def set_view(view="front", margin=1.12, ortho=False, objs=None, focus=None):
+def set_view(view="front", margin=1.12, ortho=False, objs=None, focus=None, target=None, dist=None):
     """Aim the helper camera at all content from a named direction (VIEWS) or any
     (x, y, z) vector, close enough to fill the frame. view="current" leaves it.
     focus=<bone name> frames that bone and everything under it (a hand with its
     fingers) instead of the whole scene, re-aimed for the current pose; with a
     hand as focus, view may also be one of HAND_VIEWS (palm, back_of_hand, thumb_side,
-    pinky_side, fingertips, wrist), which follow the hand's own orientation."""
+    pinky_side, fingertips, wrist), which follow the hand's own orientation.
+    target + dist = a FREE camera: it looks at that world point from `dist` away, whatever the content
+    does (framing by bounding box makes the camera jump when an animation changes the model's size)."""
     cam = _ensure_stage()
     if view == "current":
         return cam
@@ -175,7 +180,10 @@ def set_view(view="front", margin=1.12, ortho=False, objs=None, focus=None):
         direction = _focus_direction(view, focus)
     else:
         direction = Vector(VIEWS[view] if isinstance(view, str) else view).normalized()
-    if focus is not None:
+    if target is not None and dist is not None:
+        lo = hi = Vector(target)
+        corners = [lo]
+    elif focus is not None:
         corners = _focus_points(focus)
         arr = np.array([p[:] for p in corners])
         lo, hi = Vector(arr.min(axis=0)), Vector(arr.max(axis=0))
@@ -202,10 +210,13 @@ def set_view(view="front", margin=1.12, ortho=False, objs=None, focus=None):
         x, y, z = abs(d.dot(right)) * margin, abs(d.dot(up)) * margin, d.dot(fwd)
         half_w, half_h = max(half_w, x), max(half_h, y)
         need = max(need, x / tx - z, y / ty - z)
+    free = target is not None and dist is not None
+    if free:
+        need = max(float(dist), 1e-3)
     need = max(need, 0.01)
     cam.location = ctr + direction * need
     cam.rotation_euler = quat.to_euler()
-    cam.data.clip_start, cam.data.clip_end = need * 0.01, need * 10 + (hi - lo).length * 2
+    cam.data.clip_start, cam.data.clip_end = need * 0.01, need * (60 if free else 10) + (hi - lo).length * 2
     if focus is not None:
         # A close-up camera may sit inside the body (a palm resting on a thigh):
         # start the view just in front of the focus so nothing hides it.
@@ -222,27 +233,214 @@ def set_view(view="front", margin=1.12, ortho=False, objs=None, focus=None):
 
 
 def render_to(path, view="front", engine="workbench", size=512, frame=None, ortho=False, margin=1.12, samples=32,
-              focus=None):
+              focus=None, objs=None, color_type="MATERIAL", aa="8", target=None, dist=None):
     """Render the content to a PNG. engine: workbench (fast, always works, gray
     studio look) | eevee (nicer) | cycles (slow, CPU). size: px or (w, h).
-    focus: a bone to close up on (see set_view)."""
+    focus: a bone to close up on (see set_view). objs: frame just these objects.
+    color_type: workbench colouring (MATERIAL | OBJECT | ...). aa: workbench anti-aliasing samples (OFF | FXAA | 5 | 8 | ...)."""
     s = bpy.context.scene
     _ensure_stage()
     if frame is not None:
         s.frame_set(int(frame))
     s.render.resolution_x, s.render.resolution_y = (size, size) if isinstance(size, int) else size
     s.render.resolution_percentage = 100
-    set_view(view, margin, ortho, focus=focus)
+    set_view(view, margin, ortho, objs=objs, focus=focus, target=target, dist=dist)
     s.render.engine = {"workbench": "BLENDER_WORKBENCH", "eevee": "BLENDER_EEVEE", "cycles": "CYCLES"}[engine]
     s.view_settings.view_transform = "Standard"
     if engine == "workbench":
-        s.display.shading.light, s.display.shading.color_type = "STUDIO", "MATERIAL"
-        s.display.render_aa = "8"
+        s.display.shading.light, s.display.shading.color_type = "STUDIO", color_type
+        s.display.render_aa = aa
     elif engine == "cycles":
         s.cycles.device, s.cycles.samples = "CPU", int(samples)
     s.render.image_settings.file_format = "PNG"
     s.render.filepath = path
     bpy.ops.render.render(write_still=True)
+    return path
+
+
+def _hair_proxy(obj, keep):
+    """A light stand-in for a groom: every k-th strand (k = 1/keep) of what the viewport already
+    evaluated, as a plain Curves object with no modifiers. Rendering the original means Blender
+    re-runs its geometry nodes on every frame (75 s for a 3M-point groom, however few strands are
+    left afterwards -- thinning downstream does not help); the stand-in draws in half a second."""
+    src = obj.evaluated_get(bpy.context.evaluated_depsgraph_get()).data
+    n_curves, n_pts = len(src.curves), len(src.points)
+    pos = np.empty(n_pts * 3, "f4")
+    src.points.foreach_get("position", pos)
+    pos = pos.reshape(-1, 3)
+    first, cnt = np.empty(n_curves, "i4"), np.empty(n_curves, "i4")
+    src.curves.foreach_get("first_point_index", first)
+    src.curves.foreach_get("points_length", cnt)
+    sel = np.arange(0, n_curves, max(1, round(1 / keep)))
+    counts = cnt[sel]
+    starts = np.cumsum(counts) - counts
+    idx = np.arange(int(counts.sum())) - np.repeat(starts, counts) + np.repeat(first[sel], counts)
+    data = bpy.data.hair_curves.new("_proxy_" + obj.name)
+    data.add_curves(counts.tolist())
+    data.points.foreach_set("position", pos[idx].reshape(-1))
+    for m in src.materials:
+        data.materials.append(m)
+    proxy = _aux(bpy.data.objects.new("_proxy_" + obj.name, data))
+    bpy.context.scene.collection.objects.link(proxy)
+    proxy.matrix_world = obj.matrix_world.copy()
+    return proxy
+
+
+_BONE_PATH = re.compile(r'pose\.bones\["(.+?)"\]')
+
+
+def _action_bones(action):
+    """Names of the bones an action animates (works for layered actions and the legacy fcurve list)."""
+    if hasattr(action, "layers"):
+        curves = [f for layer in action.layers for strip in layer.strips for cb in strip.channelbags for f in cb.fcurves]
+    else:
+        curves = list(action.fcurves)
+    return {m.group(1) for f in curves for m in [_BONE_PATH.match(f.data_path)] if m}
+
+
+def animations(select=None):
+    """The animations a person can pick for the armatures that deform `select` (object names; none =
+    every armature): [{armature, current, meshes, actions: [{name, start, end}]}]. An action belongs to an
+    armature when it animates (mostly) bones that armature has -- Blender itself ties no action to a rig.
+    Armatures with no matching action are left out."""
+    chosen = [bpy.data.objects[n] for n in (select or []) if n in bpy.data.objects]
+    if chosen:
+        arms = []
+        for c in chosen:
+            for m in c.modifiers if c.type == "MESH" else []:
+                if m.type == "ARMATURE" and m.object and m.object not in arms:
+                    arms.append(m.object)
+    else:
+        arms = [o for o in objects() if o.type == "ARMATURE"]
+    out = []
+    for arm in arms:
+        bones = {b.name for b in arm.data.bones}
+        found = []
+        for a in bpy.data.actions:
+            used = _action_bones(a)
+            if used and len(used & bones) >= 0.6 * len(used):
+                found.append({"name": a.name, "start": int(round(a.frame_range[0])), "end": int(round(a.frame_range[1]))})
+        if not found:
+            continue
+        ad = arm.animation_data
+        out.append({"armature": arm.name, "current": ad.action.name if ad and ad.action else None,
+                    "meshes": [c.name for c in chosen if c.type == "MESH"
+                               and any(m.type == "ARMATURE" and m.object is arm for m in c.modifiers)],
+                    "actions": found})
+    return out
+
+
+def _apply_actions(actions):
+    """Put the named action on each named armature for one picture; returns what to put back."""
+    undo = []
+    for arm_name, act_name in (actions or {}).items():
+        arm, act = bpy.data.objects.get(arm_name), bpy.data.actions.get(act_name)
+        if arm is None or arm.type != "ARMATURE" or act is None:
+            continue
+        ad = arm.animation_data or arm.animation_data_create()
+        undo.append((arm, ad.action, ad.action_slot if ad.action else None))
+        ad.action = act  # Blender picks the slot named after the object
+        suitable = getattr(ad, "action_suitable_slots", None)
+        if suitable and ad.action_slot is None:
+            ad.action_slot = suitable[0]
+    return undo
+
+
+def frame_info(select=None, actions=None, frames=None):
+    """Where a free camera should look to see the picked objects (no pick = all but hair) however they move:
+    the union of their bounding boxes over `frames` (with `actions` applied; the scene is put back).
+    -> {center, radius, dist, min, max}. dist fits a sphere around the box at the 50 mm lens, so it holds for
+    every angle."""
+    chosen = [bpy.data.objects[n] for n in (select or []) if n in bpy.data.objects and not bpy.data.objects[n].get(AUX)]
+    objs = chosen or [o for o in objects() if o.type != "CURVES"]
+    sc = bpy.context.scene
+    prev = sc.frame_current
+    undo = _apply_actions(actions)
+    lo = hi = None
+    try:
+        for f in (frames or [prev]):
+            sc.frame_set(int(f))
+            a, b = bbox(objs)
+            lo = a if lo is None else Vector(np.minimum(lo, a))
+            hi = b if hi is None else Vector(np.maximum(hi, b))
+    finally:
+        for arm, action, slot in undo:
+            arm.animation_data.action = action
+            if action is not None and slot is not None:
+                arm.animation_data.action_slot = slot
+        sc.frame_set(prev)
+    ctr = (lo + hi) / 2
+    radius = max((hi - lo).length / 2, 0.01)
+    return {"center": [round(v, 4) for v in ctr], "radius": round(radius, 4), "dist": round(radius / 0.36 * 1.08, 4),
+            "min": [round(v, 4) for v in lo], "max": [round(v, 4) for v in hi]}
+
+
+def view_render(path, az=0.0, el=15.0, zoom=1.0, select=None, only=False, size=512, frame=None, hair=0.1, fast=False, textures=True, actions=None, target=None, dist=None):
+    """One picture from an orbit camera -- what the Scenes page's viewport (and the
+    scene_view tool) shows. az/el in degrees: az 0 = front, 90 = the model's right
+    side (+X), 180 = back; el 0 = level, 90 = from above. zoom > 1 = closer.
+    select: object names -- they are framed, and coloured orange against grey so
+    the person can see what they picked; only=True hides everything else.
+    hair: the share of strands of every Curves (hair/fur) object that is drawn: 0 = none (a picked
+    hair object still shows at 0.1), 0.1 = a light stand-in (see _hair_proxy), 1 = the real thing,
+    which for a groom of millions of points is minutes per frame.
+    textures: colour by the materials' image textures (Workbench TEXTURE: costs a few seconds the first
+    time the images load, then nothing); False = flat viewport colours. With objects picked and `only`
+    off, the picked ones are painted orange instead (a highlight needs one flat colour per object).
+    The armature a picked mesh is deformed by is kept visible with it (hiding it would drop the pose).
+    actions: {armature name: action name} -- shown for this picture only and then put back, like `frame`
+    (see animations()); the scene itself is left exactly as it was.
+    target + dist: a free camera (world point, distance) that ignores the content's size -- what the page
+    uses, so an animation never makes the camera jump; without them the content is framed (zoom applies).
+    fast=True turns anti-aliasing off (for frames drawn while the camera is still moving)."""
+    chosen = [bpy.data.objects[n] for n in (select or []) if n in bpy.data.objects and not bpy.data.objects[n].get(AUX)]
+    a, e = math.radians(az), math.radians(el)
+    direction = (math.sin(a) * math.cos(e), -math.cos(a) * math.cos(e), math.sin(e))
+    hair = float(hair or 0)
+    attached = {m.object for c in chosen if c.type == "MESH" for m in c.modifiers if m.type == "ARMATURE" and m.object}
+    highlight = bool(chosen) and not only
+    saved_colors, hidden, proxies = {}, [], {}
+    undo, prev_frame = [], bpy.context.scene.frame_current
+    try:
+        undo = _apply_actions(actions)
+        if undo and frame is None:
+            frame = prev_frame  # re-pose with the new action
+        for o in objects():
+            if o.type != "CURVES":
+                continue
+            keep = hair if hair > 0 else (0.1 if o in chosen else 0.0)
+            if 0 < keep < 1 and not (only and chosen and o not in chosen):
+                proxies[o] = _hair_proxy(o, keep)
+        if highlight:
+            for o in objects():
+                saved_colors[o] = tuple(o.color)
+                o.color = (1.0, 0.55, 0.1, 1.0) if o in chosen else (0.6, 0.6, 0.64, 1.0)
+            for o, p in proxies.items():
+                p.color = (1.0, 0.55, 0.1, 1.0) if o in chosen else (0.6, 0.6, 0.64, 1.0)
+        for o in objects():
+            skip = (only and chosen and o not in chosen and o not in attached) or (o.type == "CURVES" and not (hair >= 1 or (o in chosen and o not in proxies)))
+            if skip and not o.hide_render:
+                o.hide_render = True
+                hidden.append(o)
+        framed = [proxies.get(o, o) for o in chosen]
+        render_to(path, view=direction, engine="workbench", size=size, frame=frame, margin=1.12 / max(float(zoom), 0.05),
+                  objs=framed or None, color_type="OBJECT" if highlight else ("TEXTURE" if textures else "MATERIAL"),
+                  aa="OFF" if fast else "8", target=target, dist=dist)
+    finally:
+        for o, c in saved_colors.items():
+            o.color = c
+        for o in hidden:
+            o.hide_render = False
+        for p in proxies.values():
+            data = p.data
+            bpy.data.objects.remove(p)
+            bpy.data.hair_curves.remove(data)
+        for arm, action, slot in undo:
+            arm.animation_data.action = action
+            if action is not None and slot is not None:
+                arm.animation_data.action_slot = slot
+        if bpy.context.scene.frame_current != prev_frame or undo:
+            bpy.context.scene.frame_set(prev_frame)
     return path
 
 

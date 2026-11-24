@@ -916,6 +916,8 @@ export interface BridgeSendResult {
 
 export interface SceneSummary {
   id: string;
+  /** A call is running in the scene right now (an agent's scene_run, a render). */
+  busy?: boolean;
   name: string;
   state: "starting" | "running" | "closed";
   owner: string | null;
@@ -953,6 +955,46 @@ export interface SceneObjectInfo {
   modifiers?: string[];
   materials?: string[];
   bone_count?: number;
+}
+
+/** The Scenes page viewport's camera: az 0 = front, 90 = the model's right side; el 0 = level, 90 = from above. */
+export interface SceneViewParams {
+  az: number;
+  el: number;
+  /** Only for the legacy "frame the content" camera; a free camera (target + dist) ignores it. */
+  zoom?: number;
+  /** Free camera: the world point it looks at and how far away it is. Steady while an animation changes the model's size. */
+  target?: [number, number, number];
+  dist?: number;
+  select: string[];
+  only: boolean;
+  size: number;
+  frame?: number | null;
+  /** Share of hair strands drawn, 0..1 (0.1 = a light stand-in; 1 = the real groom, can take minutes). */
+  hair?: number;
+  fast?: boolean;
+  textures?: boolean;
+  /** Changes when the scene did (an agent edited it): forces a redraw of an unchanged camera. */
+  nonce?: number;
+  /** {armature: action} shown for this picture only. */
+  anim?: Record<string, string>;
+}
+
+/** Where a free camera should look to see some objects however they move (GET /api/scenes/{id}/frame). */
+export interface SceneFrameInfo {
+  center: number[];
+  radius: number;
+  dist: number;
+  min: number[];
+  max: number[];
+}
+
+/** An armature that deforms the picked meshes, with the actions that fit its bones (GET /api/scenes/{id}/animations). */
+export interface SceneAnimation {
+  armature: string;
+  current: string | null;
+  meshes: string[];
+  actions: { name: string; start: number; end: number }[];
 }
 
 export interface SceneInfo {

@@ -313,7 +313,7 @@ export default function App() {
       ) : (
         projectId && <Grid projectId={projectId} />
       )}
-      {projectId && (view === "grid" || view === "board" || view === "doc") && (
+      {projectId && (view === "grid" || view === "board" || view === "doc" || view === "scenes") && (
         <AgentDock projectId={projectId} projectName={projectName} view={view} onExpand={() => goTo("agent")} />
       )}
     </div>

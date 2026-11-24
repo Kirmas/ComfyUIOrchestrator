@@ -26,7 +26,7 @@ import type {
   PermissionDecision,
 } from "../types";
 import { loadChatDraft, saveChatDraft } from "../chatDrafts";
-import type { AgentNodeRef } from "../state/agentDock";
+import type { AgentNodeRef, AgentSceneView } from "../state/agentDock";
 import { cx } from "../utils";
 import { MeshAssetPreview } from "./MeshAssetPreview";
 
@@ -1084,6 +1084,9 @@ export type ChatDockExtras = {
   origin: () => string;
   refs: AgentNodeRef[];
   onRemoveRef: (nodeId: string) => void;
+  /** A Blender-scene viewport screenshot waiting to go with the message (Scenes page). */
+  sceneView: AgentSceneView | null;
+  onRemoveSceneView: () => void;
   onSent: () => void;
   onPick: () => void;
 };
@@ -1095,6 +1098,33 @@ function describeRefs(refs: AgentNodeRef[]): string {
     (r) => `- grid node_id=${r.nodeId}${r.dashboardId ? ` (dashboard_id=${r.dashboardId})` : ""}: ${r.label} (row:column)`,
   );
   return `Attached grid cells:\n${lines.join("\n")}`;
+}
+
+/** The text half of an attached scene viewport: camera, picked objects, and how to see the same thing. */
+function describeSceneView(v: AgentSceneView | null): string {
+  if (!v) return "";
+  const cam = `az=${Math.round(v.az)}° (0 = front, 90 = the model's right side), el=${Math.round(v.el)}°` +
+    (v.target && v.dist ? `, looking at world point (${v.target.map((n) => n.toFixed(2)).join(", ")}) from ${v.dist.toFixed(2)} away` : "") +
+    (v.frame != null ? `, frame=${v.frame}` : "");
+  const acts = Object.entries(v.actions);
+  const anim = acts.length ? ` Animations shown: ${acts.map(([arm, act]) => `${arm} = "${act}"`).join(", ")}.` : "";
+  const objs = v.objects.length ? `Objects the person ticked (only these are drawn): ${v.objects.join(", ")}.` : "No objects ticked.";
+  const call = [
+    `scene_id="${v.sceneId}"`,
+    `az=${Math.round(v.az)}`,
+    `el=${Math.round(v.el)}`,
+    ...(v.target && v.dist
+      ? [`target=${JSON.stringify(v.target.map((n) => Math.round(n * 1000) / 1000))}`, `dist=${v.dist.toFixed(3)}`]
+      : []),
+    `select=${JSON.stringify(v.objects)}`,
+    `only=${v.only}`,
+    ...(v.frame != null ? [`frame=${v.frame}`] : []),
+    ...(acts.length ? [`actions=${JSON.stringify(v.actions)}`] : []),
+  ].join(", ");
+  return (
+    `Attached Blender scene viewport screenshot: scene_id=${v.sceneId} ("${v.sceneName}"). Camera: ${cam}. ${objs}${anim}\n` +
+    `To look at the same view yourself: scene_view(${call}).`
+  );
 }
 
 export function ChatView({
@@ -1282,18 +1312,23 @@ export function ChatView({
   }, [chat.id, draft, attachments]);
 
   const refs = dock?.refs ?? [];
+  const sceneView = dock?.sceneView ?? null;
   const canAttach = !!(chat.accepts_images || chat.accepts_files);
   const send = async () => {
     const text = draft.trim();
-    if ((!text && !attachments.length && !fileAttachments.length && !refs.length) || running || sending || isFrozen) return;
+    if ((!text && !attachments.length && !fileAttachments.length && !refs.length && !sceneView) || running || sending || isFrozen) return;
     setSending(true);
     try {
       const images = attachments.map(({ media_type, data }) => ({ media_type, data }));
       let body = text;
       if (dock) {
-        body = [dock.origin(), describeRefs(refs), text].filter(Boolean).join("\n\n");
+        body = [dock.origin(), describeRefs(refs), describeSceneView(sceneView), text].filter(Boolean).join("\n\n");
         // A cell's picture goes along so the agent sees it without a tool
         // call; one that fails to load still leaves its id in the text.
+        if (chat.accepts_images && sceneView) {
+          const { media_type, data } = await readAttachment(new File([sceneView.image], "scene-view.jpg", { type: "image/jpeg" }));
+          images.push({ media_type, data });
+        }
         if (chat.accepts_images) {
           for (const r of refs) {
             if (!r.previewUrl) continue;
@@ -1866,6 +1901,19 @@ export function ChatView({
           ))}
         </div>
       )}
+      {dock && sceneView && (
+        <div className="agent-dock-refs">
+          <span className="agent-dock-ref">
+            <span className="agent-dock-ref-label">
+              🧊 {sceneView.sceneName}
+              {sceneView.objects.length ? ` · ${sceneView.objects.length}` : ""}
+            </span>
+            <button title={t("agent.removeImage")} onClick={dock.onRemoveSceneView}>
+              ✕
+            </button>
+          </span>
+        </div>
+      )}
       {dock && refs.length > 0 && (
         <div className="agent-dock-refs">
           {refs.map((r) => (
@@ -1963,7 +2011,7 @@ export function ChatView({
               {t("agent.stop")}
             </button>
           ) : (
-            <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length && !fileAttachments.length && !refs.length) || sending || isFrozen}>
+            <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length && !fileAttachments.length && !refs.length && !sceneView) || sending || isFrozen}>
               {t("agent.send")}
             </button>
           )}

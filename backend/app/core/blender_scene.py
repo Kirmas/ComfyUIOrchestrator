@@ -81,8 +81,8 @@ BLENDER SCENES -- how to work (Python `bpy`, background Blender, no UI)
 Lifecycle: scene_create(asset_ids) -> work with scene_run / scene_render /
 scene_info -> scene_export (result becomes an orchestrator asset) ->
 scene_destroy. To KEEP the work as a file use scene_save_to_storage (the whole scene as a .blend in the
-project's Storage; the person can reopen it later); a scene itself is disposable.
-A scene closes itself after ~15 idle minutes but keeps its last
+project's Storage; the person can reopen it later); a scene itself is disposable. When the person sends you a
+viewport screenshot, scene_view(az, el, zoom, select) shows the same angle. A scene closes itself after ~15 idle minutes but keeps its last
 checkpoint for a week; any call reopens it. At most a couple of scenes are
 open at once -- destroy yours when done.
 
@@ -116,6 +116,13 @@ Predefined names:
   grow(obj, idx, hops)            widen a vertex selection by edges
   falloff(obj, idx, radius, power) per-vertex weights 1..0 around a selection
   export_to(path, fmt)            glb | fbx | obj | stl | abc | groom | blend (scene_export does this for you)
+  frame_info(select, actions, frames)  union bounding box over frames -> {center, radius, dist}: where a free
+                                  camera (view_render target=, dist=) should look so an animation never moves it
+  animations(select=None)         the actions that fit the armatures deforming the picked objects:
+                                  [{armature, current, meshes, actions: [{name, start, end}]}]
+  view_render(path, az, el, zoom, select, only, size, hair=0.1, textures=True, actions=None, frame=None)  the Scenes-page viewport picture (= scene_view);
+                                  hair = share of strands drawn -- render_to draws ALL of them, which for a
+                                  groom of millions of points takes minutes (a call over the timeout stops the scene)
   groom_check(names=None)         HAIR for Unreal: pre-export check of the Curves objects (attributes,
                                   guides, 1-point curves ...) -> [{object, ok, info, issues}]
   groom_export(path, scale=None)  Unreal Groom .abc via the Groom Exporter add-on (= scene_export format="groom")
@@ -574,6 +581,14 @@ class SceneManager:
             raise SceneError(reply["out"][-1200:])
         return reply["result"]
 
+    async def frame_info(self, scene_id: str, select: list[str], actions: dict[str, str], frames: list[int]) -> dict:
+        """Where a free camera should look to see `select` however it moves over `frames`."""
+        return await self.call(scene_id, "frame_info", select=select, actions=actions, frames=frames)
+
+    async def animations(self, scene_id: str, select: list[str]) -> list:
+        """Armatures that deform `select` with the actions that fit them (blender_scene_server.animations)."""
+        return await self.call(scene_id, "animations", select=select)
+
     async def info(self, scene_id: str) -> dict:
         data = await self.call(scene_id, "info")
         return {"scene": await self.summary(scene_id), "blender": data}
@@ -632,6 +647,34 @@ class SceneManager:
             raise SceneError("render failed:\n" + reply["out"][-1200:])
         return used
 
+    async def view(self, scene_id: str, az: float, el: float, zoom: float, select: list[str], only: bool, size: int,
+                   frame: int | None, hair: float = 0.1, fast: bool = False, textures: bool = True,
+                   actions: dict[str, str] | None = None, target: list[float] | None = None,
+                   dist: float | None = None) -> bytes:
+        """One orbit-camera picture as JPEG (the page's viewport). Takes the scene's
+        lock like any call, so it waits for a running scene_run; it neither saves a
+        checkpoint nor touches the list thumbnail."""
+        size = min(max(int(size), 64), 1536)
+        async with self._lock(scene_id):
+            meta = self._load(scene_id)
+            await self._ensure_running(meta)
+            out = self._dir(scene_id) / "renders" / "view.png"
+            code = (f"view_render({str(out)!r}, az={float(az)!r}, el={float(el)!r}, zoom={float(zoom)!r}, "
+                    f"select={list(select)!r}, only={bool(only)!r}, size={size}, frame={frame!r}, hair={float(hair)!r}, fast={bool(fast)!r}, textures={bool(textures)!r}, actions={dict(actions or {})!r}, "
+                    f"target={[float(v) for v in target] if target else None!r}, dist={float(dist) if dist else None!r})")
+            reply = await self._exec(meta, {"op": "run", "code": code}, 120)
+            if not reply["ok"]:
+                raise SceneError("view failed:\n" + reply["out"][-1200:])
+            return await asyncio.to_thread(self._to_jpeg, out)
+
+    @staticmethod
+    def _to_jpeg(path: Path) -> bytes:
+        import io
+        with Image.open(path) as im:
+            buf = io.BytesIO()
+            im.convert("RGB").save(buf, "JPEG", quality=86)
+        return buf.getvalue()
+
     @staticmethod
     def _compose(tiles: list[tuple[str, Path]], cols: int, dest: Path) -> tuple[int, int]:
         images = [Image.open(p).convert("RGB") for _, p in tiles]
@@ -658,7 +701,11 @@ class SceneManager:
     async def _render_preview(self, meta: SceneMeta) -> None:
         """First picture of a new scene, so the list has something to show."""
         out = self._dir(meta.id) / "renders" / "tile0.png"
-        await self._render_one(meta, out, "three_quarter", None, "workbench", 384, "workbench")
+        # view_render, not render_to: a heavy groom would make this first picture take minutes
+        # (it draws a light stand-in for hair, see blender_scene_server._hair_proxy).
+        reply = await self._exec(meta, {"op": "run", "code": f"view_render({str(out)!r}, az=37, el=20, size=384)"}, 600)
+        if not reply["ok"]:
+            raise SceneError("render failed:\n" + reply["out"][-1200:])
         await asyncio.to_thread(self._compose, [("", out)], 1, self._dir(meta.id) / "renders" / "latest.png")
         out.unlink(missing_ok=True)
         await asyncio.to_thread(self._thumbnail, meta)
@@ -736,6 +783,9 @@ class SceneManager:
             "disk_bytes": await asyncio.to_thread(self._disk_bytes, scene_dir), "error": meta.error,
             "has_preview": (scene_dir / "preview.png").exists(),
             "has_checkpoint": (scene_dir / "scene.blend").exists(),
+            # A call (an agent's scene_run, a render) is running: the page's viewport shows "busy" and
+            # redraws when `runs`/`renders` change. Read-only -- asking never waits for the lock.
+            "busy": self._lock(scene_id).locked(),
         }
 
     async def list_scenes(self) -> dict:
