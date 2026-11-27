@@ -208,8 +208,15 @@ async def create_node(
     node_type: str,
     params: dict | None = None,
     kind: str = "workflow",
+    inputs: list[dict] | None = None,
 ) -> dict:
     """Create a node at one cell.
+
+    `inputs` (optional) binds the node's image slots, one entry per slot in
+    order: {"type":"cell_index","index":N} reads the asset N rows below the
+    node's own row in the previous column (0 = same row, the default for a
+    slot with no entry), or {"type":"explicit","output_id":<asset id>}.
+    See set_node_inputs.
 
     Each cell (track_id, step_index) holds at most one node. If a node already
     exists in this cell, this call will fail with 409. Use delete_node or
@@ -227,6 +234,7 @@ async def create_node(
             "kind": kind,
             "node_type": node_type,
             "params": params or {},
+            "inputs": inputs or [],
         },
     )
 
@@ -242,6 +250,20 @@ async def set_node_params(node_id: str, params: dict) -> dict:
     """Replace a node's params (prompts exposed as grid-editable fields,
     sampler settings, etc.). For a workflow's *baked* prompt use set_prompt."""
     return await _patch(f"/api/nodes/{node_id}", {"params": params})
+
+
+@mcp_server.tool()
+async def set_node_inputs(node_id: str, inputs: list[dict]) -> dict:
+    """Rebind a workflow node's image/file slots without moving anything.
+
+    `inputs` REPLACES the whole list, one entry per slot in slot order:
+      {"type": "cell_index", "index": N}  -- the asset in the previous column,
+          N rows below this node's own row (slot 0 -> index 0, slot 1 -> 1 ...
+          is the default; use e.g. [{"index":1},{"index":0}] to swap them);
+      {"type": "explicit", "output_id": "<asset id>"} -- one specific asset.
+    Read the current value with get_node first so you keep the other slots.
+    """
+    return await _patch(f"/api/nodes/{node_id}", {"inputs": inputs})
 
 
 @mcp_server.tool()
