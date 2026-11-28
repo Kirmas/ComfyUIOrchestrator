@@ -637,6 +637,8 @@ export interface AgentChat {
     scarce?: boolean;
     limits_detail?: HandoffLimitsDetail;
   };
+  /** Messages written while the agent was busy; they go out as the next turn. */
+  queue?: { id: string; text: string; images: string[]; files: { name: string; size: number }[]; ts: number }[];
   created_at: number;
   updated_at: number;
   last_seq: number;
@@ -656,7 +658,7 @@ export interface AgentFileUpload {
 
 export type AgentEvent = { seq: number; ts: number } & (
   // images: attachment names, served by agentChatsApi.attachmentUrl.
-  | { type: "user"; text: string; origin?: "agent" | "handoff" | "system"; images?: string[]; files?: { name: string; size: number }[] }
+  | { type: "user"; text: string; origin?: "agent" | "handoff" | "system"; images?: string[]; injected?: boolean; files?: { name: string; size: number }[] }
   | { type: "text"; text: string }
   | { type: "image"; images: string[] }
   | { type: "media"; asset_id: string; mime_type: string; name: string; caption: string }
@@ -675,6 +677,7 @@ export type AgentEvent = { seq: number; ts: number } & (
   | { type: "handoff_declined"; request_id: string; target: string; target_label: string; timeout?: boolean }
   | { type: "handoff_out"; request_id?: string; chat_id: string; target: string; target_label: string; reason: string; at: number }
   | { type: "night"; text: string }
+  | { type: "queue"; count: number }
 );
 
 export type PermissionDecision = "allow" | "allow_session" | "deny";

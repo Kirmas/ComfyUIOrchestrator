@@ -434,15 +434,42 @@ The **Agent** tab has two kinds of chat with a Claude Code CLI agent: a
 app's own `/mcp` (no shell, no files), and a *dev* chat, which is Claude Code
 in this very dev copy -- it can change and deploy the site, and whatever its
 permission rules don't allow comes to the page as Allow / Deny buttons
-(opt-in via `RUNNER_DEV_ENABLED=1`; one dev chat runs at a time, and a dev
-chat shares this working tree with any terminal session, so don't run both on
-the same change). A dev chat can run on **Claude Code, Codex or Antigravity** (one `Provider` class each in `agent_runner/providers.py`, chosen by the brand-icon buttons next to "+"; project chats can use any of them too -- Codex in a read-only sandbox with only the orchestrator's MCP, Antigravity edits-only in one fixed folder -- but only Claude can be limited to nothing but MCP and ask Allow / Deny; the other two run headless with a fixed permission policy per chat, and night reports stay on Claude). The sessions live in a **separate user-level service, `comfy-agent-runner`**
+(opt-in via `RUNNER_DEV_ENABLED=1`; several dev chats may run at once -- see
+**working-copy lease** below -- and a dev chat shares this working tree with any
+terminal session, so don't run both on the same change). A dev chat can run on **Claude Code, Codex or Antigravity** (one `Provider` class each in `agent_runner/providers.py`, chosen by the brand-icon buttons next to "+"; project chats can use any of them too -- Codex in a read-only sandbox with only the orchestrator's MCP, Antigravity edits-only in one fixed folder -- but only Claude can be limited to nothing but MCP and ask Allow / Deny; the other two run headless with a fixed permission policy per chat, and night reports stay on Claude). The sessions live in a **separate user-level service, `comfy-agent-runner`**
 (runs as keresh, `127.0.0.1:8765`), not in this process -- a restart of
 `comfy-orchestrator-api` must not kill an agent mid-turn, and the transcript
 stream (SSE keyed by a per-chat sequence) resumes by itself through the proxy.
 The proxy authenticates to the runner with this instance's own `API_TOKEN`,
 so the runner's `RUNNER_TOKENS` must list it (`agent_runner/install.sh`).
 `deploy.sh` does not restart the runner. Details: `agent_runner/README.md`.
+**Messages while an agent works** (`runner.py post_message`/`drain_queue`/
+`queue_now`, providers' `inject`): writing to a busy chat is never a 409. Plain
+text goes into the turn in flight (`Provider.inject`: Claude writes a stream-json
+line to stdin -- the CLI reads it after the current tool result, verified live;
+Codex uses `turn/steer` with `expectedTurnId`, refused steers fall back to the
+queue; Antigravity can't -- `agy -p` runs a second message as a *separate* turn
+after the first, verified live -- so it queues). Pictures/files, and anything
+`inject` refuses, wait in `chat.meta["queue"]` and run as the next turn once the
+current one ends; "send now" (`/queue/{id}/now`) interrupts the turn first.
+A MCP agent that starts a node passes `run_node(chat_id=...)` (or
+`notify_when_done`) and `core/node_watch.py` messages that chat when the node is
+done/failed through the same path, so it need not poll (in-memory, a deploy
+forgets it). A model sometimes skips the text it meant to write before an
+`AskUserQuestion`; put the whole context in the question itself.
+
+**Working-copy lease** (`agent_runner/edit_lock.py`, `runner.gate_change`,
+`comfy_hook_bridge.py`): any number of dev chats talk at once, but only one may
+CHANGE files. The first change (a file-writing tool, or a shell command not on
+the read-only/`git add|commit` allow-list -- unknown counts as a change) takes
+the lease until that chat's turn ends; another chat's change is refused with the
+holder's name and gets a message when the copy is free. Reading, answering the
+person and committing stay open. Enforced by a **PreToolUse hook** (works even in
+bypass/auto permission modes -- verified on a live CLI): Claude via `--settings`,
+Antigravity via the existing hook bridge. Codex's `preToolUse` hook exists but is
+not wired (untested), so Codex takes the lease for the whole turn (`lease_mode`).
+Night mode's `lock` refuses changes outright.
+
 **Agent dock** (`AgentDock.tsx`, `state/agentDock.ts`): the project chats
 are also reachable from the grid, board and design doc through a 💬 bubble
 (bottom sheet on a phone, side panel when wide). It reuses the tab's own

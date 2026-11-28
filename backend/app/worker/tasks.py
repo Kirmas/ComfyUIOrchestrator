@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 from sqlalchemy import delete, select, update
 
+from app.core import node_watch
 from app.config import get_settings
 from app.core import dispatch_stats, dispatcher, push
 from app.core.asset_types import (
@@ -1193,6 +1194,7 @@ async def _finalize_node_if_done(db, node_id, project_id: str) -> None:
         title = project.name if project else "ComfyUI Orchestrator"
         body = "Generation finished." if node.status == NodeStatus.done else "Generation failed."
         await push.send_to_all(db, title, body, "/")
+        await node_watch.notify_finished(node.id, node.status.value, node.error)
 
 
 async def _fail_orphaned_job(db, job: Job, project_id: str, reason: str) -> None:
@@ -1211,6 +1213,7 @@ async def _fail_orphaned_job(db, job: Job, project_id: str, reason: str) -> None
     await ws_manager.broadcast(
         project_id, {"type": "job", "job_id": str(job.id), "node_id": str(job.node_id), "status": "error", "error": reason}
     )
+    await node_watch.notify_finished(job.node_id, "error", reason)
 
 
 async def _ignore_progress(message: dict) -> None:

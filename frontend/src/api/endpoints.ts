@@ -475,6 +475,8 @@ export const agentChatsApi = {
   attachmentUrl: (id: string, name: string, preview = false, download = false) =>
     `${getApiBaseUrl()}/api/agent-chats/${id}/attachments/${name}?token=${encodeURIComponent(getApiToken())}${preview ? "&preview=true" : ""}${download ? "&download=true" : ""}`,
   stop: (id: string) => api.post<AgentChat>(`/api/agent-chats/${id}/stop`),
+  queueNow: (id: string, qid: string) => api.post<AgentChat>(`/api/agent-chats/${id}/queue/${qid}/now`),
+  queueRemove: (id: string, qid: string) => api.delete(`/api/agent-chats/${id}/queue/${qid}`),
   // EventSource can't set headers, so the token rides in the query string
   // (auth_middleware accepts either). `after` replays from a known point
   // when we reconnect by hand; EventSource's own retries send Last-Event-ID.

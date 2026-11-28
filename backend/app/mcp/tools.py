@@ -22,6 +22,7 @@ from pathlib import Path
 from PIL import Image as PILImage
 from sqlalchemy import select
 
+from app.core import node_watch
 from app.api.routes.design_docs import REF_PATTERN
 from app.core import markdown_sections
 from app.db.base import async_session_maker
@@ -633,9 +634,15 @@ async def transfer_ownership(dashboard_id: str, node_id: str) -> dict:
 
 # ---------- running ----------
 @mcp_server.tool()
-async def run_node(node_id: str, variants: int = 1, backend: str = "comfy", session_mode: str = "interactive") -> dict:
-    """Start generating. Returns immediately -- node_id is the handle; poll with
-    await_node or get_runs_status.
+async def run_node(node_id: str, variants: int = 1, backend: str = "comfy", session_mode: str = "interactive",
+                   chat_id: str = "") -> dict:
+    """Start generating. Returns immediately -- node_id is the handle.
+
+    ALWAYS pass chat_id (the current Agent chat_id from your session
+    instructions): you are then messaged in this chat the moment the node is
+    done or failed, so do NOT poll with await_node/get_runs_status -- finish
+    your turn (or do other work) and wait for that message. Without chat_id
+    nothing wakes you and you would have to poll.
 
     backend "comfy" is the local GPU (free), "api" is a paid provider. In
     session_mode "auto" (unattended/overnight) a paid run is refused outright
@@ -667,12 +674,37 @@ async def run_node(node_id: str, variants: int = 1, backend: str = "comfy", sess
         {"requested_variants": variants, "use_api": use_api, "backend_mode": "auto"},
     )
     await _post(f"/api/nodes/{node_id}/generate")
-    return {"blocked": False, "node_id": node_id, "status": "queued", "requested_variants": variants}
+    out = {"blocked": False, "node_id": node_id, "status": "queued", "requested_variants": variants}
+    if chat_id:
+        _check_chat_id(chat_id)
+        node_watch.watch([node_id], chat_id)
+        out["subscribed"] = "You will be messaged in this chat when it finishes. Do not poll."
+    else:
+        out["hint"] = "No chat_id given: nobody will wake you when this finishes. Pass chat_id, or notify_when_done."
+    return out
+
+
+@mcp_server.tool()
+async def notify_when_done(node_ids: list[str], chat_id: str) -> dict:
+    """Subscribe this chat to nodes already running: when each is done or
+    failed you get a message here, instead of polling. Use the current Agent
+    chat_id from your session instructions."""
+    _check_chat_id(chat_id)
+    node_watch.watch(node_ids, chat_id)
+    return {"subscribed": node_ids}
+
+
+def _check_chat_id(chat_id: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{12}|[0-9a-fA-F-]{36}", chat_id):
+        raise ValueError("Use the current Agent chat_id or session UUID from your session instructions")
 
 
 @mcp_server.tool()
 async def await_node(node_id: str, timeout_seconds: int = 300) -> dict:
-    """Wait for a node to finish, up to timeout_seconds. Always returns -- on
+    """Prefer run_node(chat_id=...) -- it messages you when the node finishes,
+    which costs nothing. Use this only for a short, one-off wait.
+
+    Wait for a node to finish, up to timeout_seconds. Always returns -- on
     timeout it reports the last status seen rather than blocking forever.
 
     Reads status straight from the database rather than through the HTTP API:
@@ -699,7 +731,8 @@ async def await_node(node_id: str, timeout_seconds: int = 300) -> dict:
 
 @mcp_server.tool()
 async def get_runs_status(node_ids: list[str]) -> list[dict]:
-    """Non-blocking status check for several nodes at once."""
+    """Non-blocking status check for several nodes at once. Don't loop on it:
+    subscribe with run_node(chat_id=...) or notify_when_done instead."""
     out = []
     for node_id in node_ids:
         node = await _get(f"/api/nodes/{node_id}")

@@ -360,6 +360,17 @@ class Provider:
     async def switch_mode(self, proc: asyncio.subprocess.Process, mode: str) -> None:
         """Apply a permission mode to a turn already running, if the CLI can."""
 
+    # How a dev chat takes the working-copy lease: "tool" = at its first
+    # file-changing call, refused by a PreToolUse hook; "turn" = for the whole
+    # turn, because this CLI has no hook the runner can rely on (see edit_lock).
+    lease_mode = "tool"
+
+    async def inject(self, chat, proc: asyncio.subprocess.Process, text: str) -> bool:
+        """Hand a message to the turn that is running right now, so the agent
+        reads it before its next step (between tool calls). False = this CLI
+        can't, or the turn is already over; the caller queues it instead."""
+        return False
+
     def prompt_for(self, chat, spec: TurnSpec, text: str) -> str:
         """These CLIs have no system-prompt flag, so the instructions ride in
         the conversation's first message (the session keeps them after that)."""
@@ -571,12 +582,26 @@ class ClaudeProvider(Provider):
                 args += ["--disallowedTools", *spec.disallowed]
         if effort := self.effort_for(chat.meta):
             args += ["--effort", effort]
+        settings: dict = {}
+        env: dict[str, str] = {}
         if self.fast_for(chat.meta):
+            settings["fastMode"] = True
+        if not spec.isolated:
+            # A dev chat shares the working copy with other dev chats: a
+            # PreToolUse hook asks the runner before any call that would change
+            # files (edit_lock). Hooks run even where permissions auto-allow.
+            settings["hooks"] = {"PreToolUse": [{
+                "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+                "hooks": [{"type": "command", "command": f"python3 {BRIDGE_SCRIPT}", "timeout": 30}],
+            }]}
+            env = {"COMFY_AGENT_RUNNER_IPC": f"http://127.0.0.1:{RUNNER_PORT}/hooks/pre-tool",
+                   "COMFY_CHAT_ID": chat.id}
+        if settings:
             # --settings layers on top of every setting source, including a
             # project chat's empty one.
-            args += ["--settings", json.dumps({"fastMode": True})]
+            args += ["--settings", json.dumps(settings)]
         args += ["--append-system-prompt", spec.system_prompt, *self.session_args(chat.meta)]
-        return Launch(args)
+        return Launch(args, env=env)
 
     async def begin(self, chat, proc, spec, text, images):
         send_line(proc, {"type": "control_request", "request_id": "init", "request": {"subtype": "initialize", "hooks": None}})
@@ -792,6 +817,20 @@ class ClaudeProvider(Provider):
         send_line(proc, {"type": "control_request", "request_id": f"mode-{uuid.uuid4().hex[:8]}", "request": {"subtype": "set_permission_mode", "mode": mode}})
         await proc.stdin.drain()
 
+    async def inject(self, chat, proc, text):
+        """stream-json stdin is read all turn long: a user line written while
+        tools run is queued by the CLI and read after the current tool result
+        (verified 2026-11-27 against a live `claude -p`: `sleep 12` running,
+        line sent at 4 s, the final reply of the SAME turn used it)."""
+        if chat.turn_state.get("result_received") or proc.stdin.is_closing():
+            return False
+        try:
+            send_line(proc, {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            return False
+        return True
+
 
 # --- Codex ------------------------------------------------------------------
 
@@ -963,6 +1002,14 @@ class CodexProvider(Provider):
                      "-c", f"mcp_servers.orchestrator.url={json.dumps(spec.mcp_url)}",
                      "-c", f'mcp_servers.orchestrator.bearer_token_env_var="{self.MCP_TOKEN_ENV}"',
                      "-c", 'mcp_servers.orchestrator.default_tools_approval_mode="approve"']
+        else:
+            # Dev chat: the same PreToolUse gate as Claude's (edit_lock). Codex's
+            # hook payload is read as Claude's (`tool_name`/`tool_input`); NOT yet
+            # verified against a live Codex (usage limit, 2026-11-27).
+            hook = {"matcher": "*", "hooks": [{"type": "command", "command": f"python3 {BRIDGE_SCRIPT}", "timeout": 30}]}
+            args += ["-c", f"hooks.PreToolUse=[{json.dumps(hook)}]"]
+            env["COMFY_AGENT_RUNNER_IPC"] = f"http://127.0.0.1:{RUNNER_PORT}/hooks/pre-tool"
+            env["COMFY_CHAT_ID"] = chat.id
         return Launch(args, env)
 
     async def begin(self, chat, proc, spec, text, images):
@@ -1061,6 +1108,18 @@ class CodexProvider(Provider):
             return
         if params.get("threadId") and params["threadId"] != chat.meta.get("session_id"):
             # A child thread's completion must not close the parent server.
+            return
+        if method == "turn/started":
+            state["turn_id"] = (params.get("turn") or {}).get("id")
+            return
+        if not method and str(e.get("id", "")).startswith("steer:"):
+            # A refused steer (the turn ended a moment ago) must not fail the
+            # turn: the text just waits in the chat's queue for the next one.
+            text = state.get("steering", {}).pop(e["id"], None)
+            if e.get("error") and text:
+                chat.meta.setdefault("queue", []).append(
+                    {"id": e["id"][6:], "text": text, "images": [], "files": [], "ts": time.time()})
+                chat.save_meta()
             return
         if not method and "id" in e:
             state.get("async_answers_inflight", set()).discard(e["id"])
@@ -1190,6 +1249,27 @@ class CodexProvider(Provider):
                              "context_tokens": chat.meta.get("context_tokens"),
                              "context_window": self.get_context_window(chat)})
             proc.stdin.close()
+
+    async def inject(self, chat, proc, text):
+        """turn/steer appends input to the turn in flight; the app-server
+        refuses it when expectedTurnId is not the active turn."""
+        state = chat.turn_state
+        if not state.get("turn_id") or state.get("result_received") or proc.stdin.is_closing():
+            return False
+        import uuid
+
+        rpc_id = f"steer:{uuid.uuid4().hex[:8]}"
+        state.setdefault("steering", {})[rpc_id] = text
+        try:
+            send_line(proc, {"id": rpc_id, "method": "turn/steer", "params": {
+                "threadId": chat.meta["session_id"], "expectedTurnId": state["turn_id"],
+                "input": [{"type": "text", "text": text}],
+            }})
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            state["steering"].pop(rpc_id, None)
+            return False
+        return True
 
     async def answer_request(self, proc, req_id, request, answer):
         if question_id := request.get("codex_async"):

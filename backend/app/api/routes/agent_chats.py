@@ -259,6 +259,16 @@ async def post_message(chat_id: str, payload: AgentMessage):
     return await _call("POST", f"/chats/{chat_id}/messages", json=payload.model_dump(), timeout=httpx.Timeout(600.0))
 
 
+@router.post("/{chat_id}/queue/{qid}/now")
+async def queue_send_now(chat_id: str, qid: str):
+    return await _call("POST", f"/chats/{chat_id}/queue/{qid}/now")
+
+
+@router.delete("/{chat_id}/queue/{qid}")
+async def queue_remove(chat_id: str, qid: str):
+    return await _call("DELETE", f"/chats/{chat_id}/queue/{qid}")
+
+
 @router.get("/{chat_id}/attachments/{name}")
 async def get_attachment(chat_id: str, name: str, preview: bool = False, download: bool = False):
     """A picture sent in a message, for the transcript (<img>, so the token

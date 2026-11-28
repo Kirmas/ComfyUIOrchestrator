@@ -1251,6 +1251,16 @@ export function ChatView({
   }, [events, chat.status]);
   const running = BUSY.has(status);
 
+  // The queue lives in the chat's meta; the stream only says it changed.
+  const lastQueueSeq = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) if (events[i].type === "queue") return events[i].seq;
+    return 0;
+  }, [events]);
+  useEffect(() => {
+    if (lastQueueSeq) onChanged();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastQueueSeq]);
+
   const decisions = useMemo(() => {
     const map = new Map<string, string>();
     for (const e of events) if (e.type === "permission_decision") map.set(e.request_id, e.decision);
@@ -1316,7 +1326,7 @@ export function ChatView({
   const canAttach = !!(chat.accepts_images || chat.accepts_files);
   const send = async () => {
     const text = draft.trim();
-    if ((!text && !attachments.length && !fileAttachments.length && !refs.length && !sceneView) || running || sending || isFrozen) return;
+    if ((!text && !attachments.length && !fileAttachments.length && !refs.length && !sceneView) || sending || isFrozen) return;
     setSending(true);
     try {
       const images = attachments.map(({ media_type, data }) => ({ media_type, data }));
@@ -1849,6 +1859,21 @@ export function ChatView({
         })}
         {status === "running" && <div className="agent-meta">{t("agent.working")}</div>}
       </div>
+      {!!chat.queue?.length && (
+        <div className="agent-queue">
+          {chat.queue.map((q) => (
+            <div key={q.id} className="agent-queue-item">
+              <span className="agent-queue-text">{q.text || (q.files.length ? "📎" : "🖼")}</span>
+              <button title={t("agent.queueNowHint")} onClick={() => agentChatsApi.queueNow(chat.id, q.id).then(onChanged, (err) => alert(err instanceof Error ? err.message : String(err)))}>
+                {t("agent.queueNow")}
+              </button>
+              <button title={t("agent.queueRemove")} onClick={() => agentChatsApi.queueRemove(chat.id, q.id).then(onChanged)}>
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       {chat.handed_off_to && (
         <div className="agent-handoff-frozen-banner">
           <span>
@@ -1941,7 +1966,7 @@ export function ChatView({
       >
         {canAttach && (
           <>
-            <button className="agent-attach" title={t(chat.accepts_files ? "agent.attachFiles" : "agent.attach")} disabled={isFrozen || running || sending} onClick={() => fileRef.current?.click()}>
+            <button className="agent-attach" title={t(chat.accepts_files ? "agent.attachFiles" : "agent.attach")} disabled={isFrozen || sending} onClick={() => fileRef.current?.click()}>
               📎
             </button>
             <input
@@ -1950,7 +1975,7 @@ export function ChatView({
               accept={chat.accepts_files ? undefined : "image/*"}
               multiple
               hidden
-              disabled={isFrozen || running || sending}
+              disabled={isFrozen || sending}
               onChange={(e) => {
                 attach(Array.from(e.target.files ?? []));
                 e.target.value = "";
@@ -1959,7 +1984,7 @@ export function ChatView({
           </>
         )}
         {dock && (
-          <button className="agent-attach" title={t("agentDock.pickTitle")} disabled={isFrozen || running || sending} onClick={dock.onPick}>
+          <button className="agent-attach" title={t("agentDock.pickTitle")} disabled={isFrozen || sending} onClick={dock.onPick}>
             🎯
           </button>
         )}
@@ -1967,7 +1992,7 @@ export function ChatView({
           ref={textareaRef}
           value={draft}
           placeholder={isFrozen ? t("agent.handoff.chatFrozen") : t("agent.placeholder")}
-          disabled={isFrozen || running || sending}
+          disabled={isFrozen || sending}
           onChange={(e) => setDraft(e.target.value)}
           onPaste={
             canAttach && !isFrozen
@@ -2006,15 +2031,14 @@ export function ChatView({
               <span className="agent-compact-pct">{compactPct}%</span>
             </button>
           )}
-          {running ? (
+          {running && (
             <button className="agent-stop" onClick={() => agentChatsApi.stop(chat.id).then(onChanged)}>
               {t("agent.stop")}
             </button>
-          ) : (
-            <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length && !fileAttachments.length && !refs.length && !sceneView) || sending || isFrozen}>
-              {t("agent.send")}
-            </button>
           )}
+          <button className="primary" onClick={send} disabled={(!draft.trim() && !attachments.length && !fileAttachments.length && !refs.length && !sceneView) || sending || isFrozen}>
+            {running ? t("agent.queueAdd") : t("agent.send")}
+          </button>
         </div>
       </div>
     </>

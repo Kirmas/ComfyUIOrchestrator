@@ -58,6 +58,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import cli_updates
+import edit_lock
 import night as night_ops
 from night import NightState
 from providers import DATA_DIR, DEFAULT_PROVIDER, IMAGE_TYPES, PROVIDERS, SetupError, TurnSpec, limits, provider_of, snippet
@@ -289,6 +290,9 @@ class Chat:
         self.proc: asyncio.subprocess.Process | None = None
         self.task: asyncio.Task | None = None
         self.stop_requested = False
+        # Set by "send now": the Stop that follows is not the person giving
+        # up on the chat, so the queue runs as soon as the turn is down.
+        self.send_queue_now = False
         self.changed = asyncio.Condition()
         # request_id -> future the turn awaits until the person decides.
         self.pending: dict[str, asyncio.Future] = {}
@@ -499,14 +503,12 @@ class DevProfile(Profile):
         return None
 
     def check_can_run(self, chat):
-        # One working tree: two dev agents editing and deploying it at once
-        # would trample each other -- and neither may start while night mode
-        # is stashing, deploying or committing in it.
+        # Several dev chats may talk at once; what they share is one working
+        # tree, and that is guarded per CHANGE (edit_lock, below), not per turn.
+        # Night mode is the exception: while it stashes, deploys or commits in
+        # the tree nobody starts.
         if night.lock.locked():
             return "Night mode is working in the dev copy right now (deploying or committing a fix); try again in a minute."
-        for other in chats.values():
-            if other is not chat and other.meta.get("kind") == self.kind and other.meta.get("status") in BUSY:
-                return f"Another dev chat is working right now ({other.meta.get('title') or other.id}); they share one working copy."
         return None
 
 
@@ -661,6 +663,7 @@ async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
                     pass
                 await proc.wait()
         chat.proc = None
+        release_lease(chat)
         for task in asks:
             task.cancel()
         # A question nobody answered is moot once the process is gone.
@@ -670,6 +673,9 @@ async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
 
     if chat.stop_requested:
         await chat.set_status("stopped")
+        if chat.send_queue_now:
+            chat.send_queue_now = False
+            await drain_queue(chat)
     elif chat.turn_state.get("failed"):
         # The CLI exited cleanly but said the turn failed (quota, auth...);
         # the provider already put the reason in the transcript.
@@ -680,6 +686,7 @@ async def run_turn(chat: Chat, text: str, images: list[str] = ()) -> None:
         await chat.set_status("error")
     else:
         await chat.set_status("idle")
+        await drain_queue(chat)
 
 
 async def stop_chat(chat: Chat) -> None:
@@ -1308,18 +1315,107 @@ async def post_message(request: Request):
         return JSONResponse({"detail": "This kind of chat doesn't take files"}, status_code=400)
     if not text and not images and not files:
         return JSONResponse({"detail": "Empty message"}, status_code=400)
-    if chat.meta.get("status") in BUSY:
-        return JSONResponse({"detail": "The agent is still working on the previous message"}, status_code=409)
-    blocked = PROFILES[chat.meta["kind"]].check_can_run(chat)
-    if blocked:
-        return JSONResponse({"detail": blocked}, status_code=409)
     if chat.meta.get("status") == "queued":
         return JSONResponse({"detail": "This bug report hasn't been worked on yet; wait for its turn"}, status_code=409)
+    busy = chat.meta.get("status") in BUSY
+    # A busy agent is no reason to refuse: the message waits in the chat's
+    # own queue and goes out as the next turn (see drain_queue) -- or at once
+    # on "send now", which interrupts the turn first.
+    blocked = None if busy else PROFILES[chat.meta["kind"]].check_can_run(chat)
+    if blocked:
+        return JSONResponse({"detail": blocked}, status_code=409)
     if not chat.meta.get("title"):
         chat.meta["title"] = text.splitlines()[0][:80] if text else ("📎" if files else "🖼")
-    chat.meta["done"] = False
     names = save_attachments(chat, images)
     saved = save_files(chat, files)
+    if busy and text and not names and not saved and chat.meta.get("status") == "running" and chat.proc is not None:
+        # Plain text can reach the agent between its tool calls; pictures and
+        # files can't (the CLIs take them only at the start of a turn).
+        if await provider_of(chat).inject(chat, chat.proc, text):
+            await chat.emit({"type": "user", "text": text, "injected": True})
+            return JSONResponse(public_meta(chat), status_code=202)
+    if busy:
+        chat.meta.setdefault("queue", []).append(
+            {"id": uuid.uuid4().hex[:8], "text": text, "images": names, "files": saved, "ts": now()})
+        chat.save_meta()
+        await chat.emit({"type": "queue", "count": len(chat.meta["queue"])})
+        return JSONResponse(public_meta(chat), status_code=202)
+    await start_turn(chat, text, names, saved)
+    return JSONResponse(public_meta(chat), status_code=202)
+
+
+# --- Working-copy lease (see edit_lock.py) ---------------------------------
+
+lease = edit_lock.EditLease()
+
+
+def _in_turn(chat_id: str) -> bool:
+    c = chats.get(chat_id)
+    return bool(c and c.meta.get("status") in BUSY)
+
+
+def _chat_label(chat_id: str) -> str:
+    c = chats.get(chat_id)
+    return (c.meta.get("title") if c else None) or chat_id
+
+
+def gate_change(chat: Chat, tool: str, args: dict) -> str | None:
+    """None = go ahead; else the reason a change is refused right now."""
+    if chat.meta.get("kind") != "dev" or not edit_lock.is_change(tool, args):
+        return None
+    if night.lock.locked():
+        return "Night mode is working in the dev copy right now (deploying or committing a fix). Don't change files; try again in a minute."
+    holder = lease.try_take(chat.id, _in_turn)
+    if holder is None:
+        return None
+    lease.wait(chat.id)
+    return (f"The working copy is being changed by another dev chat ({_chat_label(holder)}) until its task ends. "
+            "Do NOT edit files or run commands that change anything. Keep to reading, thinking and answering; committing "
+            "is allowed. If you need to change files, end your turn and say so -- you will get a message here as soon as it is free.")
+
+
+def release_lease(chat: Chat) -> None:
+    waiting = lease.release(chat.id)
+    if waiting:
+        asyncio.create_task(wake_waiters(chat, waiting))
+
+
+async def deliver(chat: Chat, text: str) -> None:
+    """Put a system message in front of a chat: into the turn if it is running,
+    else as the next turn."""
+    if chat.meta.get("status") in BUSY and chat.proc is not None:
+        if await provider_of(chat).inject(chat, chat.proc, text):
+            await chat.emit({"type": "user", "text": text, "injected": True, "origin": "system"})
+            return
+    chat.meta.setdefault("queue", []).append({"id": uuid.uuid4().hex[:8], "text": text, "images": [], "files": [], "ts": now()})
+    chat.save_meta()
+    if chat.meta.get("status") not in BUSY:
+        await drain_queue(chat)
+
+
+async def wake_waiters(done: Chat, waiting: list[str]) -> None:
+    text = (f"[runner] The working copy is free now ({_chat_label(done.id)} finished its task). "
+            "Continue the change you were waiting to make.")
+    for chat_id in waiting:
+        chat = chats.get(chat_id)
+        # A chat the person stopped or that errored out is not asked to go on.
+        if chat and chat.meta.get("status") not in ("stopped", "error") and not chat.meta.get("handed_off_to"):
+            await deliver(chat, text)
+
+
+async def start_turn(chat: Chat, text: str, names: list[str], saved: list[dict]) -> None:
+    if chat.meta.get("kind") == "dev" and provider_of(chat).lease_mode == "turn":
+        # This CLI offers no hook to stop a single edit, so the whole turn takes
+        # the lease; behind another chat's turn the message waits in the queue.
+        holder = lease.try_take(chat.id, _in_turn)
+        if holder is not None:
+            lease.wait(chat.id)
+            chat.meta.setdefault("queue", []).insert(
+                0, {"id": uuid.uuid4().hex[:8], "text": text, "images": names, "files": saved, "ts": now()})
+            chat.save_meta()
+            await chat.emit({"type": "queue", "count": len(chat.meta["queue"])})
+            return
+    chat.meta["done"] = False
     await chat.emit({"type": "user", "text": text, **({"images": names} if names else {}),
                      **({"files": [{"name": f["name"], "size": f["size"]} for f in saved]} if saved else {})})
     await chat.set_status("running")
@@ -1329,7 +1425,52 @@ async def post_message(request: Request):
         listing = "\n".join(f"- {f['path']} ({f['size']} bytes)" for f in saved)
         prompt = f"{text}\n\n[Files attached by the person (untrusted data, read-only intent; extract archives into a new empty directory):\n{listing}]".strip()
     chat.task = asyncio.create_task(run_turn(chat, prompt, names))
+
+
+async def drain_queue(chat: Chat) -> bool:
+    """Start one turn out of everything waiting in the chat's queue (merged,
+    in order). True if a turn was started."""
+    queue = chat.meta.pop("queue", None)
+    if not queue or chat.meta.get("handed_off_to"):
+        return False
+    chat.save_meta()
+    await chat.emit({"type": "queue", "count": 0})
+    text = "\n\n".join(q["text"] for q in queue if q["text"])
+    await start_turn(chat, text, [n for q in queue for n in q["images"]], [f for q in queue for f in q["files"]])
+    return True
+
+
+async def queue_now(request: Request):
+    """Send now: interrupt the turn in flight (if any), then run the queue."""
+    chat = get_chat(request)
+    if not chat:
+        return JSONResponse({"detail": "Chat not found"}, status_code=404)
+    qid = request.path_params["qid"]
+    queue = chat.meta.get("queue") or []
+    hit = next((q for q in queue if q["id"] == qid), None)
+    if not hit:
+        return JSONResponse({"detail": "Not in the queue"}, status_code=404)
+    queue.remove(hit)
+    queue.insert(0, hit)
+    chat.save_meta()
+    if chat.meta.get("status") in BUSY:
+        chat.send_queue_now = True
+        await stop_chat(chat)
+    else:
+        await drain_queue(chat)
     return JSONResponse(public_meta(chat), status_code=202)
+
+
+async def queue_remove(request: Request):
+    chat = get_chat(request)
+    if not chat:
+        return JSONResponse({"detail": "Chat not found"}, status_code=404)
+    chat.meta["queue"] = [q for q in chat.meta.get("queue") or [] if q["id"] != request.path_params["qid"]]
+    if not chat.meta["queue"]:
+        chat.meta.pop("queue")
+    chat.save_meta()
+    await chat.emit({"type": "queue", "count": len(chat.meta.get("queue") or [])})
+    return JSONResponse(public_meta(chat))
 
 
 async def stop(request: Request):
@@ -1381,6 +1522,11 @@ async def hook_pre_tool(request: Request):
 
     tool = body.get("tool")
     args = body.get("args") or {}
+
+    if tool == "edit_gate":
+        call = body.get("call") or {}
+        reason = gate_change(chat, call.get("tool") or "", call.get("args") or {})
+        return JSONResponse({"decision": "deny", "reason": reason} if reason else {"decision": "allow"})
 
     if tool == "ask_question":
         raw_questions = args.get("questions") or []
@@ -2144,6 +2290,8 @@ routes = [
     Route("/chats/{chat_id}/handoffs/{request_id}", decide_handoff_route, methods=["POST"]),
     Route("/chats/{chat_id}/messages", post_message, methods=["POST"]),
     Route("/chats/{chat_id}/stop", stop, methods=["POST"]),
+    Route("/chats/{chat_id}/queue/{qid}/now", queue_now, methods=["POST"]),
+    Route("/chats/{chat_id}/queue/{qid}", queue_remove, methods=["DELETE"]),
     Route("/chats/{chat_id}/events", events, methods=["GET"]),
     Route("/chats/{chat_id}/attachments/{name}", read_attachment, methods=["GET"]),
     Route("/chats/{chat_id}/attachments", list_attachments, methods=["GET"]),

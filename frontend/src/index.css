@@ -4702,3 +4702,8 @@ button.scene-danger { color: var(--danger); border-color: var(--danger); }
 .viewport-anims { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; }
 .viewport-anims label { display: flex; flex-direction: column; gap: 2px; }
 .viewport-anims select { width: 100%; }
+
+.agent-queue { display: flex; flex-direction: column; gap: 4px; padding: 6px 10px; border-top: 1px solid var(--border); }
+.agent-queue-item { display: flex; align-items: center; gap: 6px; opacity: 0.85; font-size: 13px; }
+.agent-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-queue-item button { flex: none; }

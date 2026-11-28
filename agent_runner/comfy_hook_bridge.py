@@ -37,6 +37,23 @@ def respond(decision: str, reason: str | None = None) -> None:
     sys.exit(0)
 
 
+def ask_gate(ipc_url: str, chat_id: str, token: str, tool: str, args: dict) -> str | None:
+    """Ask the runner whether this call may change the shared working copy.
+    The reason it refuses with, or None (also when the runner can't be
+    reached: a lock must never be what stops all work)."""
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    body = {"chat_id": chat_id, "tool": "edit_gate", "call": {"tool": tool, "args": args}}
+    req = urllib.request.Request(ipc_url, data=json.dumps(body).encode("utf-8"), headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    return data.get("reason") or "Refused." if data.get("decision") == "deny" else None
+
+
 def main() -> None:
     try:
         payload = json.load(sys.stdin)
@@ -45,11 +62,20 @@ def main() -> None:
 
     ipc_url = os.environ.get("COMFY_AGENT_RUNNER_IPC")
     chat_id = os.environ.get("COMFY_CHAT_ID")
+    token = os.environ.get("COMFY_IPC_TOKEN", "")
+
+    if "tool_name" in payload:
+        # Claude Code's PreToolUse: silence = allow, this JSON = deny.
+        reason = ask_gate(ipc_url, chat_id, token, payload["tool_name"], payload.get("tool_input") or {}) if ipc_url and chat_id else None
+        if reason:
+            sys.stdout.write(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
+        sys.exit(0)
+
     if not ipc_url or not chat_id:
         respond("allow")
 
     mode = os.environ.get("COMFY_PERMISSION_MODE", "edits")
-    token = os.environ.get("COMFY_IPC_TOKEN", "")
 
     tool_call = payload.get("toolCall") or {}
     tool_name = tool_call.get("name")
@@ -83,6 +109,11 @@ def main() -> None:
                     respond("allow")
         except Exception:
             respond("allow")
+
+    if mode != "project" and tool_name in (*COMMAND_TOOLS, *FILE_WRITE_TOOLS):
+        reason = ask_gate(ipc_url, chat_id, token, tool_name, tool_args)
+        if reason:
+            respond("deny", reason)
 
     if mode == "project":
         # Project chats work only through the orchestrator's MCP. Commands and
